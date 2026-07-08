@@ -1,0 +1,22 @@
+# Workbench configuration
+server:
+  port: 8080
+  static_dir: ./static
+
+database:
+  path: ./data/workbench.db
+
+auth:
+  token_expiry_days: 30
+
+# Route mapping: request path -> target
+#   "/xxx"         -> 302 redirect to target path
+#   "__listdir__"  -> show file listing
+#   "Display Name" -> display name alias in directory listing
+routes:
+  "/todo": "/todo.html"
+  "/index": "__listdir__"
+  "/todo.html": "Todo Board"
+
+logging:
+  dir: ~/.local/state/workbench

@@ -10,3 +10,4 @@ nohup.out
 /workbench
 *.db
 vendor/
+/data/

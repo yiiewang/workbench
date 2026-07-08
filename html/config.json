@@ -1,0 +1,7 @@
+{
+  "route_config": {
+    "/todo": "/todo.html",
+    "/index": "__listdir__",
+    "/todo.html": "Todo Board"
+  }
+}

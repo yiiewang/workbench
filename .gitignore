@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.token_secret
+nohup.out
+*.log
+.DS_Store

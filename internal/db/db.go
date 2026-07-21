@@ -18,10 +18,21 @@ type DB struct {
 
 // TaskItem 任务条目
 type TaskItem struct {
-	ID        string `json:"id"`
-	Text      string `json:"text"`
-	Done      bool   `json:"done"`
-	SortOrder int    `json:"sort_order,omitempty"`
+	ID             string `json:"id"`
+	Title          string `json:"title"`
+	Content        string `json:"content"`
+	Status         string `json:"status"`
+	Priority       string `json:"priority"`
+	Scheduled      string `json:"scheduled"`
+	Due            string `json:"due"`
+	Progress       int    `json:"progress"`
+	Assignee       string `json:"assignee"`
+	PostponedCount int    `json:"postponedCount"`
+	AutoPostponed  bool   `json:"autoPostponed"`
+	SortOrder      int    `json:"sort_order,omitempty"`
+	// 向后兼容旧版字段
+	Text string `json:"text"`
+	Done bool   `json:"done"`
 }
 
 // VisitorStat 访问统计中的访客信息
@@ -98,8 +109,16 @@ func (d *DB) migrate() error {
 		id TEXT NOT NULL,
 		user_id TEXT NOT NULL,
 		org_id TEXT NOT NULL,
-		text TEXT NOT NULL DEFAULT '',
-		done INTEGER DEFAULT 0,
+		title TEXT NOT NULL DEFAULT '',
+		content TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'todo',
+		priority TEXT NOT NULL DEFAULT 'medium',
+		scheduled TEXT NOT NULL DEFAULT '',
+		due TEXT NOT NULL DEFAULT '',
+		progress INTEGER DEFAULT 0,
+		assignee TEXT NOT NULL DEFAULT '',
+		postponed_count INTEGER DEFAULT 0,
+		auto_postponed INTEGER DEFAULT 0,
 		sort_order INTEGER DEFAULT 0,
 		created_at TEXT DEFAULT (datetime('now')),
 		updated_at TEXT DEFAULT (datetime('now')),
@@ -107,7 +126,57 @@ func (d *DB) migrate() error {
 	);
 	`
 	_, err := d.conn.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+	// 自动迁移：补齐旧表缺失的列
+	return d.migrateTasksColumns()
+}
+
+// migrateTasksColumns 检测 tasks 表列，自动补齐缺失列（兼容旧 schema）
+func (d *DB) migrateTasksColumns() error {
+	rows, err := d.conn.Query(`PRAGMA table_info(tasks)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defVal sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defVal, &pk); err != nil {
+			return err
+		}
+		existing[name] = true
+	}
+
+	columns := []struct{ name, def string }{
+		{"title", "TEXT NOT NULL DEFAULT ''"},
+		{"content", "TEXT NOT NULL DEFAULT ''"},
+		{"status", "TEXT NOT NULL DEFAULT 'todo'"},
+		{"priority", "TEXT NOT NULL DEFAULT 'medium'"},
+		{"scheduled", "TEXT NOT NULL DEFAULT ''"},
+		{"due", "TEXT NOT NULL DEFAULT ''"},
+		{"progress", "INTEGER DEFAULT 0"},
+		{"assignee", "TEXT NOT NULL DEFAULT ''"},
+		{"postponed_count", "INTEGER DEFAULT 0"},
+		{"auto_postponed", "INTEGER DEFAULT 0"},
+	}
+
+	for _, col := range columns {
+		if existing[col.name] {
+			continue
+		}
+		q := fmt.Sprintf("ALTER TABLE tasks ADD COLUMN %s %s", col.name, col.def)
+		if _, err := d.conn.Exec(q); err != nil {
+			return fmt.Errorf("add column %s: %w", col.name, err)
+		}
+	}
+
+	return nil
 }
 
 // ============================================================
@@ -257,7 +326,7 @@ func (d *DB) UpsertTasks(orgID, userID string, tasks []TaskItem) error {
 		return err
 	}
 
-	const q = `INSERT INTO tasks (id, user_id, org_id, text, done, sort_order) VALUES (?, ?, ?, ?, ?, ?)`
+	const q = `INSERT INTO tasks (id, user_id, org_id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	stmt, err := tx.Prepare(q)
 	if err != nil {
 		return err
@@ -265,11 +334,11 @@ func (d *DB) UpsertTasks(orgID, userID string, tasks []TaskItem) error {
 	defer stmt.Close()
 
 	for _, t := range tasks {
-		done := 0
-		if t.Done {
-			done = 1
+		autoP := 0
+		if t.AutoPostponed {
+			autoP = 1
 		}
-		if _, err := stmt.Exec(t.ID, userID, orgID, t.Text, done, t.SortOrder); err != nil {
+		if _, err := stmt.Exec(t.ID, userID, orgID, t.Title, t.Content, t.Status, t.Priority, t.Scheduled, t.Due, t.Progress, t.Assignee, t.PostponedCount, autoP, t.SortOrder); err != nil {
 			return err
 		}
 	}
@@ -284,7 +353,7 @@ func (d *DB) UpsertTasks(orgID, userID string, tasks []TaskItem) error {
 // GetTasks 获取用户任务
 func (d *DB) GetTasks(orgID, userID string) ([]TaskItem, error) {
 	rows, err := d.conn.Query(
-		`SELECT id, text, done, sort_order FROM tasks WHERE org_id = ? AND user_id = ? ORDER BY sort_order`,
+		`SELECT id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order FROM tasks WHERE org_id = ? AND user_id = ? ORDER BY sort_order`,
 		orgID, userID)
 	if err != nil {
 		return nil, err
@@ -294,17 +363,17 @@ func (d *DB) GetTasks(orgID, userID string) ([]TaskItem, error) {
 	var tasks []TaskItem
 	for rows.Next() {
 		var t TaskItem
-		var done int
-		if err := rows.Scan(&t.ID, &t.Text, &done, &t.SortOrder); err != nil {
+		var autoP int
+		if err := rows.Scan(&t.ID, &t.Title, &t.Content, &t.Status, &t.Priority, &t.Scheduled, &t.Due, &t.Progress, &t.Assignee, &t.PostponedCount, &autoP, &t.SortOrder); err != nil {
 			return nil, err
 		}
-		t.Done = done == 1
+		t.AutoPostponed = autoP == 1
 		tasks = append(tasks, t)
 	}
 	return tasks, nil
 }
 
-// GetTasksJSON 获取完整任务数据（不含密码）
+// GetTasksJSON 获取完整任务数据（不含密码），一次性 JOIN 查询避免嵌套查询死锁
 func (d *DB) GetTasksJSON() (map[string]interface{}, error) {
 	result := map[string]interface{}{
 		"version":     "1.0",
@@ -312,47 +381,66 @@ func (d *DB) GetTasksJSON() (map[string]interface{}, error) {
 	}
 	orgsMap := make(map[string]map[string]interface{})
 
-	orgRows, err := d.conn.Query(`SELECT id FROM orgs`)
+	rows, err := d.conn.Query(`
+		SELECT u.org_id, u.id, t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due, t.progress, t.assignee, t.postponed_count, t.auto_postponed, t.sort_order
+		FROM users u
+		LEFT JOIN tasks t ON t.org_id = u.org_id AND t.user_id = u.id
+		ORDER BY u.org_id, u.id, t.sort_order
+	`)
 	if err != nil {
 		return nil, err
 	}
-	defer orgRows.Close()
+	defer rows.Close()
 
-	var orgIDs []string
-	for orgRows.Next() {
-		var id string
-		if err := orgRows.Scan(&id); err != nil {
+	type userData struct {
+		tasks []TaskItem
+	}
+	orgUsers := make(map[string]map[string]*userData)
+
+	for rows.Next() {
+		var orgID, userID string
+		var taskID, taskTitle, taskContent, taskStatus, taskPriority, taskScheduled, taskDue, taskAssignee sql.NullString
+		var taskProgress, taskPostponed, taskAutoPostponed, sortOrder sql.NullInt64
+		if err := rows.Scan(&orgID, &userID, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder); err != nil {
 			return nil, err
 		}
-		orgIDs = append(orgIDs, id)
+		if orgUsers[orgID] == nil {
+			orgUsers[orgID] = make(map[string]*userData)
+		}
+		if orgUsers[orgID][userID] == nil {
+			orgUsers[orgID][userID] = &userData{}
+		}
+		if taskID.Valid {
+			orgUsers[orgID][userID].tasks = append(orgUsers[orgID][userID].tasks, TaskItem{
+				ID:             taskID.String,
+				Title:          taskTitle.String,
+				Content:        taskContent.String,
+				Status:         taskStatus.String,
+				Priority:       taskPriority.String,
+				Scheduled:      taskScheduled.String,
+				Due:            taskDue.String,
+				Progress:       int(taskProgress.Int64),
+				Assignee:       taskAssignee.String,
+				PostponedCount: int(taskPostponed.Int64),
+				AutoPostponed:  taskAutoPostponed.Int64 == 1,
+				SortOrder:      int(sortOrder.Int64),
+			})
+		}
 	}
 
-	for _, orgID := range orgIDs {
-		userRows, err := d.conn.Query(`SELECT id FROM users WHERE org_id = ?`, orgID)
-		if err != nil {
-			return nil, err
-		}
+	for orgID, users := range orgUsers {
 		usersMap := make(map[string]interface{})
-		for userRows.Next() {
-			var userID string
-			if err := userRows.Scan(&userID); err != nil {
-				userRows.Close()
-				return nil, err
-			}
-			tasks, err := d.GetTasks(orgID, userID)
-			if err != nil {
-				userRows.Close()
-				return nil, err
+		for userID, ud := range users {
+			tasks := ud.tasks
+			if tasks == nil {
+				tasks = []TaskItem{}
 			}
 			usersMap[userID] = map[string]interface{}{
 				"version": map[string]string{"md5": "init"},
 				"tasks":   tasks,
 			}
 		}
-		userRows.Close()
-		if len(usersMap) > 0 {
-			orgsMap[orgID] = usersMap
-		}
+		orgsMap[orgID] = usersMap
 	}
 	result["orgs"] = orgsMap
 	return result, nil

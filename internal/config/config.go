@@ -21,8 +21,9 @@ type Config struct {
 
 // ServerConfig HTTP 服务配置
 type ServerConfig struct {
-	Port      int    `yaml:"port"`
-	StaticDir string `yaml:"static_dir"`
+	Port      int      `yaml:"port"`
+	StaticDir string   `yaml:"static_dir"`
+	Hidden    []string `yaml:"hidden"`
 }
 
 // DBConfig 数据库配置
@@ -46,6 +47,7 @@ func DefaultConfig() *Config {
 		Server: ServerConfig{
 			Port:      8080,
 			StaticDir: "./static",
+			Hidden:    []string{".*", "*.zip", "*.tar", "*.gz", "*.tgz", "*.rar", "*.7z", "*.bz2", "*.xz"},
 		},
 		DB: DBConfig{
 			Path: "./data/workbench.db",
@@ -93,6 +95,9 @@ func mergeConfig(dst, src *Config) {
 	}
 	if src.Server.StaticDir != "" {
 		dst.Server.StaticDir = src.Server.StaticDir
+	}
+	if src.Server.Hidden != nil {
+		dst.Server.Hidden = src.Server.Hidden
 	}
 	if src.DB.Path != "" {
 		dst.DB.Path = src.DB.Path

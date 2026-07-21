@@ -57,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/set-password", s.handleSetPassword)
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/org-members", s.handleOrgMembers)
+	mux.HandleFunc("/__tree__", s.handleTree)
 	mux.HandleFunc("/", s.handleStatic)
 	return withLogging(mux, s)
 }
@@ -356,6 +357,92 @@ func (s *Server) putTasksJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================
+// GET /__tree__
+// ============================================================
+
+type treeItem struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"isDir"`
+	Size  int64  `json:"size,omitempty"`
+}
+
+func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+		return
+	}
+	relPath := r.URL.Query().Get("path")
+	if relPath == "" {
+		relPath = "/"
+	}
+
+	// 安全检查：防止目录穿越
+	cleanPath := filepath.Clean(relPath)
+	if strings.Contains(cleanPath, "..") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid path"})
+		return
+	}
+
+	fsPath := filepath.Join(s.serDirAbs, cleanPath)
+	info, err := os.Stat(fsPath)
+	if err != nil || !info.IsDir() {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found or not a directory"})
+		return
+	}
+
+	entries, err := os.ReadDir(fsPath)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Cannot read directory"})
+		return
+	}
+
+	var dirs, files = make([]treeItem, 0), make([]treeItem, 0)
+	for _, e := range entries {
+		if s.isHidden(e.Name()) {
+			continue
+		}
+		isDir := e.IsDir()
+		// 软链接目录：e.IsDir() 返回 false，需要 stat 跟随链接后判断
+		if !isDir && e.Type()&os.ModeSymlink != 0 {
+			if info, err := os.Stat(filepath.Join(fsPath, e.Name())); err == nil {
+				isDir = info.IsDir()
+			}
+		}
+		if isDir {
+			dirs = append(dirs, treeItem{Name: e.Name(), IsDir: true})
+		} else {
+			info, _ := e.Info()
+			size := int64(0)
+			if info != nil {
+				size = info.Size()
+			}
+			files = append(files, treeItem{Name: e.Name(), IsDir: false, Size: size})
+		}
+	}
+	sort.Slice(dirs, func(i, j int) bool { return naturalLess(dirs[i].Name, dirs[j].Name) })
+	sort.Slice(files, func(i, j int) bool { return naturalLess(files[i].Name, files[j].Name) })
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"path":  cleanPath,
+		"dirs":  dirs,
+		"files": files,
+	})
+}
+
+// isHidden 根据配置中的 hidden 规则判断文件名是否应隐藏
+func (s *Server) isHidden(name string) bool {
+	for _, pattern := range s.cfg.Server.Hidden {
+		if pattern == ".*" && strings.HasPrefix(name, ".") {
+			return true
+		}
+		if matched, _ := filepath.Match(pattern, name); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// ============================================================
 // 静态文件 + 目录列表
 // ============================================================
 
@@ -400,11 +487,29 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ext := strings.ToLower(filepath.Ext(fsPath))
+	// 二进制扩展名走 http.ServeFile 触发下载
+	if isBinaryExt(ext) {
+		http.ServeFile(w, r, fsPath)
+		return
+	}
 	w.Header().Set("Content-Type", contentType(ext)+"; charset=utf-8")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
 	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusOK)
 	w.Write(content)
+}
+
+// isBinaryExt 判断是否应触发下载而非内联展示
+func isBinaryExt(ext string) bool {
+	switch ext {
+	case ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z", ".bz2", ".xz",
+		".exe", ".dll", ".so", ".dylib", ".bin",
+		".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+		".mp4", ".mp3", ".wav", ".flv", ".avi", ".mov", ".mkv",
+		".ttf", ".otf", ".woff", ".woff2":
+		return true
+	}
+	return false
 }
 
 func (s *Server) listDirectory(w http.ResponseWriter, r *http.Request, dirPath string) {
@@ -586,4 +691,276 @@ func readJSON(r *http.Request, v interface{}) error {
 		return err
 	}
 	return json.Unmarshal(data, v)
+}
+
+// naturalLess 按章节号路径排序：1.1.2 < 1.2 < 2 < 10 < 10.1；非章节号文件名回退到自然排序。
+func naturalLess(a, b string) bool {
+	pa, pOK := leadingChapterPath(a)
+	pb, pOKb := leadingChapterPath(b)
+	if pOK && pOKb {
+		if c := chapterPathCmp(pa, pb); c != 0 {
+			return c < 0
+		}
+	}
+	return naturalLessImpl(a, b)
+}
+
+// leadingChapterPath 抽取开头的章节号路径，如 "1.2.3 xxx.md" → [1,2,3]。
+// 章节号格式：连续的数字+分隔符（.或-或_或空），数字后面必须跟分隔符或字符串结束。
+// 数字段后紧跟 alnum 字母（如 "10xxx"）视为非法章节号。
+func leadingChapterPath(s string) ([]int64, bool) {
+	var path []int64
+	i := 0
+	for {
+		// 跳过分隔符（空格、点、横线、下划线等非 alnum）
+		saveI := i
+		for i < len(s) && !isDigit(s[i]) {
+			if isAlnum(s[i]) {
+				// 字母开头（如 "abc.md"）→ 不是章节号
+				return nil, false
+			}
+			i++
+		}
+		if i >= len(s) {
+			if len(path) == 0 {
+				return nil, false
+			}
+			return path, true
+		}
+		if i == saveI {
+			// 没有跳过分隔符就遇到数字：必须之前已读章节号
+			if len(path) == 0 {
+				// 字符串以数字开头但没分段（单段），仍算章节号
+			}
+		}
+		// 读数字
+		n := int64(0)
+		for i < len(s) && isDigit(s[i]) {
+			n = n*10 + int64(s[i]-'0')
+			i++
+		}
+		path = append(path, n)
+		if i >= len(s) {
+			break
+		}
+		if isAlnum(s[i]) {
+			// 数字后接字母（如 "10xxx"）→ 不是章节号
+			return nil, false
+		}
+		// 是分隔符，继续
+		if len(path) == 0 {
+			return nil, false
+		}
+		// 跳到下一个分隔符后看是否是数字
+		j := i
+		for j < len(s) && !isAlnum(s[j]) {
+			j++
+		}
+		if j >= len(s) || !isDigit(s[j]) {
+			break
+		}
+		i = j
+	}
+	if len(path) == 0 {
+		return nil, false
+	}
+	return path, true
+}
+
+// chapterPathCmp 比较章节号路径：[1,2] vs [1,2,1] → 短前缀更小 → 返回 -1
+func chapterPathCmp(a, b []int64) int {
+	for k := 0; k < len(a) && k < len(b); k++ {
+		if a[k] != b[k] {
+			if a[k] < b[k] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case len(a) < len(b):
+		return -1
+	case len(a) > len(b):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func naturalLessImpl(a, b string) bool {
+	for i, j := 0, 0; ; {
+		for i < len(a) && !isAlnum(a[i]) {
+			i++
+		}
+		for j < len(b) && !isAlnum(b[j]) {
+			j++
+		}
+		if i == len(a) && j == len(b) {
+			return len(a) < len(b)
+		}
+		if i == len(a) {
+			return true
+		}
+		if j == len(b) {
+			return false
+		}
+		ni, nj := i, j
+		for ni < len(a) && isAlnum(a[ni]) {
+			ni++
+		}
+		for nj < len(b) && isAlnum(b[nj]) {
+			nj++
+		}
+		// 整段是否为纯数字
+		aDigit := true
+		for k := i; k < ni; k++ {
+			if a[k] < '0' || a[k] > '9' {
+				aDigit = false
+				break
+			}
+		}
+		bDigit := true
+		for k := j; k < nj; k++ {
+			if b[k] < '0' || b[k] > '9' {
+				bDigit = false
+				break
+			}
+		}
+		if aDigit && bDigit {
+			ai, aj := i, j
+			for ai < ni-1 && a[ai] == '0' {
+				ai++
+			}
+			for aj < nj-1 && b[aj] == '0' {
+				aj++
+			}
+			if ni-ai != nj-aj {
+				return ni-ai < nj-aj
+			}
+			for k := 0; k < ni-ai; k++ {
+				if a[ai+k] != b[aj+k] {
+					return a[ai+k] < b[aj+k]
+				}
+			}
+			if ni-i != nj-j {
+				return ni-i < nj-j
+			}
+		} else {
+			// 至少一段含字母：按字符逐个比较，遇数字按数字段比
+			if c := mixedLess(a, i, ni, b, j, nj); c != 0 {
+				return c < 0
+			}
+		}
+		i, j = ni, nj
+	}
+}
+
+// mixedLess 比较 a[i1:i2] 与 b[j1:j2]：逐段比较，段内是连续同类型字符（数字或非数字）
+// 数字段按整数比，非数字段按小写字典比。
+func mixedLess(a string, i1, i2 int, b string, j1, j2 int) int {
+	for i1 < i2 && j1 < j2 {
+		// 跳过分隔符
+		for i1 < i2 && !isAlnum(a[i1]) {
+			i1++
+		}
+		for j1 < j2 && !isAlnum(b[j1]) {
+			j1++
+		}
+		if i1 == i2 || j1 == j2 {
+			break
+		}
+		// 判断 a 段类型
+		ai := i1
+		aDigit := a[i1] >= '0' && a[i1] <= '9'
+		if aDigit {
+			for ai < i2 && a[ai] >= '0' && a[ai] <= '9' {
+				ai++
+			}
+		} else {
+			for ai < i2 && isAlnum(a[ai]) && !(a[ai] >= '0' && a[ai] <= '9') {
+				ai++
+			}
+		}
+		bj := j1
+		bDigit := b[j1] >= '0' && b[j1] <= '9'
+		if bDigit {
+			for bj < j2 && b[bj] >= '0' && b[bj] <= '9' {
+				bj++
+			}
+		} else {
+			for bj < j2 && isAlnum(b[bj]) && !(b[bj] >= '0' && b[bj] <= '9') {
+				bj++
+			}
+		}
+		// 比较 a[i1:ai] 和 b[j1:bj]
+		if aDigit && bDigit {
+			na, nb := int64(0), int64(0)
+			for k := i1; k < ai; k++ {
+				na = na*10 + int64(a[k]-'0')
+			}
+			for k := j1; k < bj; k++ {
+				nb = nb*10 + int64(b[k]-'0')
+			}
+			if na != nb {
+				if na < nb {
+					return -1
+				}
+				return 1
+			}
+			if ai-i1 != bj-j1 {
+				if ai-i1 < bj-j1 {
+					return -1
+				}
+				return 1
+			}
+		} else if !aDigit && !bDigit {
+			// 两段都是字母段：字符逐个小写比
+			k := 0
+			for ; i1+k < ai && j1+k < bj; k++ {
+				ca, cb := a[i1+k], b[j1+k]
+				if ca >= 'A' && ca <= 'Z' {
+					ca += 32
+				}
+				if cb >= 'A' && cb <= 'Z' {
+					cb += 32
+				}
+				if ca != cb {
+					if ca < cb {
+						return -1
+					}
+					return 1
+				}
+			}
+			// 一方多出的字符决定胜负：数字字符 < 字母字符？这里都已是字母段
+			if ai-i1 != bj-j1 {
+				if ai-i1 < bj-j1 {
+					return -1
+				}
+				return 1
+			}
+		} else {
+			// 一方数字一方字母：按 ASCII 比较首字符等价
+			// 约定：数字段 < 字母段
+			if aDigit {
+				return -1
+			}
+			return 1
+		}
+		i1, j1 = ai, bj
+	}
+	if i1 == i2 && j1 == j2 {
+		return 0
+	}
+	if i1 == i2 {
+		return -1
+	}
+	return 1
+}
+
+func isAlnum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func isDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }

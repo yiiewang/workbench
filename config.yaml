@@ -1,7 +1,12 @@
 # Workbench configuration
 server:
-  port: 8080
-  static_dir: ./static
+  port: 80
+  static_dir: ./preview
+  hidden:
+    - "index.html"
+    - "todo.html"
+    - "*.json"
+    - ".*"
 
 database:
   path: ./data/workbench.db

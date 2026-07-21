@@ -3,68 +3,873 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Preview Server</title>
+<title>Workbench</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='1' width='12' height='14' rx='1' fill='%23007acc'/><path d='M6 4h4l2 2v7H4V4z' fill='%23fff' opacity='.8'/></svg>">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #ffffff;
+    --sidebar-bg: #f3f3f3;
+    --activity-bg: #2c2c2c;
+    --activity-active: #ffffff;
+    --text: #333333;
+    --text-dim: #888888;
+    --text-muted: #bbbbbb;
+    --hover: #e8e8e8;
+    --active: #e4e6f1;
+    --selected: #0060c0;
+    --accent: #007acc;
+    --border: #e5e5e5;
+    --header-bg: #f3f3f3;
+    --statusbar-bg: #007acc;
+    --statusbar-text: #ffffff;
+    --tab-active-bg: #ffffff;
+    --tab-inactive-bg: #ececec;
+    --tab-border: #e5e5e5;
+    --preview-bg: #ffffff;
+    --code-bg: #f5f5f5;
+    --dir-color: #dcb67a;
+    --file-color: #888888;
+  }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background: #f5f5f5;
-    color: #333;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
     display: flex;
-    justify-content: center;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    width: 280px;
+    min-width: 160px;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .sidebar-header {
+    padding: 10px 20px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    line-height: 22px;
+  }
+  .file-tree {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0;
+  }
+  .file-tree::-webkit-scrollbar { width: 10px; }
+  .file-tree::-webkit-scrollbar-track { background: transparent; }
+  .file-tree::-webkit-scrollbar-thumb { background: #ccc; border: 3px solid transparent; background-clip: content-box; border-radius: 5px; }
+  .file-tree::-webkit-scrollbar-thumb:hover { background: #aaa; background-clip: content-box; }
+
+  .tree-node { user-select: none; }
+  .tree-row {
+    display: flex;
     align-items: center;
-    min-height: 100vh;
-    padding: 2rem;
+    padding: 2px 0 2px 0;
+    cursor: pointer;
+    gap: 2px;
+    white-space: nowrap;
+    height: 22px;
+    font-size: 13px;
+    color: var(--text);
   }
-  .container {
-    background: #fff;
-    border-radius: 12px;
-    box-shadow: 0 2px 16px rgba(0,0,0,0.08);
-    padding: 3rem;
-    max-width: 600px;
-    width: 100%;
+  .tree-row:hover { background: var(--hover); }
+  .tree-row.active { background: var(--active); }
+  .tree-row.active .tree-name { color: var(--text); }
+
+  .tree-icon {
+    width: 16px;
+    height: 16px;
     text-align: center;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
-  h1 { font-size: 2rem; margin-bottom: 0.5rem; color: #1a1a1a; }
-  .subtitle { color: #666; margin-bottom: 2rem; font-size: 0.95rem; }
-  .links { display: flex; flex-direction: column; gap: 0.75rem; align-items: center; }
-  .links a {
+  .tree-icon svg { width: 16px; height: 16px; }
+  .tree-icon.expand {
+    width: 16px;
+    font-size: 10px;
+    color: var(--text-dim);
+    transition: transform 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .tree-icon.expand svg { width: 10px; height: 10px; }
+  .tree-icon.expand.open { transform: rotate(90deg); }
+  .tree-icon.dir svg path { fill: var(--dir-color); stroke: var(--dir-color); }
+  .tree-icon.file svg path { fill: var(--file-color); stroke: var(--file-color); }
+
+  .tree-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 22px;
+  }
+  .tree-children { display: none; }
+  .tree-children.open { display: block; }
+
+  /* Main */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+  /* Tab bar */
+  .tab-bar {
+    display: flex;
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--tab-border);
+    height: 35px;
+    align-items: flex-end;
+    overflow-x: auto;
+    flex-shrink: 0;
+  }
+  .tab-bar::-webkit-scrollbar { height: 3px; }
+  .tab-bar::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }
+  .tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 12px;
+    height: 35px;
+    background: var(--tab-inactive-bg);
+    border-right: 1px solid var(--tab-border);
+    cursor: pointer;
+    white-space: nowrap;
+    font-size: 13px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    min-width: 0;
+  }
+  .tab.active {
+    background: var(--tab-active-bg);
+    color: var(--text);
+    border-bottom: 1px solid var(--tab-active-bg);
+    margin-bottom: -1px;
+  }
+  .tab-name { overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+  .tab-close {
+    width: 16px; height: 16px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 3px; font-size: 14px; line-height: 1;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .tab-close:hover { background: #ccc; color: #333; }
+
+  /* Editor area */
+  .editor-area {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    background: var(--preview-bg);
+  }
+  .editor-area::-webkit-scrollbar { width: 14px; }
+  .editor-area::-webkit-scrollbar-track { background: transparent; }
+  .editor-area::-webkit-scrollbar-thumb { background: #ccc; border: 4px solid transparent; background-clip: content-box; border-radius: 7px; }
+  .editor-area::-webkit-scrollbar-thumb:hover { background: #aaa; background-clip: content-box; }
+
+  .editor-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 14px;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .editor-empty svg { width: 64px; height: 64px; opacity: 0.3; }
+
+  /* JSON viewer */
+  .json-viewer {
+    padding: 16px 24px;
+    font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text);
+  }
+  .json-key { color: #881391; }
+  .json-str { color: #1a7f37; }
+  .json-num { color: #0550ae; }
+  .json-bool { color: #cf222e; }
+  .json-null { color: #999; }
+  .json-bracket { color: #666; font-weight: 600; }
+  .json-toggle { color: #888; cursor: pointer; user-select: none; display: inline-block; width: 14px; }
+  .json-count { color: #999; font-size: 11px; margin-left: 8px; font-style: italic; }
+  .json-collapsible.collapsed { display: none; }
+
+  /* Markdown content */
+  .markdown-body {
+    padding: 32px 48px;
+    max-width: 860px;
+    margin: 0 auto;
+    line-height: 1.75;
+    color: #24292f;
+    font-size: 15px;
+  }
+  .markdown-body h1 { font-size: 1.8em; margin: 0 0 16px; padding-bottom: 8px; border-bottom: 1px solid #e5e5e5; }
+  .markdown-body h2 { font-size: 1.4em; margin: 24px 0 12px; }
+  .markdown-body h3 { font-size: 1.15em; margin: 20px 0 8px; }
+  .markdown-body p { margin: 0 0 12px; }
+  .markdown-body code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.9em;
+    font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+  }
+  .markdown-body pre {
+    background: var(--code-bg);
+    padding: 16px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 0 0 16px;
+  }
+  .markdown-body pre code { background: none; padding: 0; }
+  .markdown-body ul, .markdown-body ol { padding-left: 24px; margin: 0 0 12px; }
+  .markdown-body li { margin: 4px 0; }
+  .markdown-body table { border-collapse: collapse; margin: 0 0 16px; width: 100%; }
+  .markdown-body th, .markdown-body td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+  .markdown-body th { background: #f5f5f5; font-weight: 600; }
+  .markdown-body blockquote {
+    border-left: 3px solid #007acc;
+    padding: 4px 16px;
+    color: #666;
+    margin: 0 0 16px;
+  }
+  .markdown-body a { color: #007acc; }
+
+  /* Text preview */
+  .text-preview {
+    padding: 16px 24px;
+    font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text);
+    min-height: 100%;
+  }
+
+  /* File detail */
+  .file-detail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 16px;
+    color: var(--text);
+  }
+  .file-detail .icon-lg { width: 64px; height: 64px; }
+  .file-detail .icon-lg svg { width: 64px; height: 64px; }
+  .file-detail .name { font-size: 16px; font-weight: 600; }
+  .file-detail table { border-collapse: collapse; font-size: 13px; }
+  .file-detail td { padding: 4px 16px 4px 0; }
+  .file-detail td:first-child { text-align: right; color: var(--text-dim); }
+  .file-detail .btn-download {
     display: inline-block;
-    padding: 0.6rem 1.5rem;
-    background: #4f46e5;
+    padding: 8px 20px;
+    background: var(--accent);
     color: #fff;
     text-decoration: none;
-    border-radius: 8px;
-    font-size: 0.95rem;
-    transition: background 0.2s;
-    min-width: 220px;
+    border-radius: 3px;
+    font-size: 13px;
   }
-  .links a:hover { background: #4338ca; }
-  .links a.secondary { background: #e5e7eb; color: #333; }
-  .links a.secondary:hover { background: #d1d5db; }
-  .info {
-    margin-top: 2rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid #eee;
-    font-size: 0.85rem;
-    color: #999;
+  .file-detail .btn-download:hover { background: #005a9e; }
+
+  /* Resizer */
+  .resizer {
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    flex-shrink: 0;
+    transition: background 0.15s;
   }
-  code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+  .resizer:hover, .resizer.active { background: var(--border); }
+
+  /* Spinner */
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid #ddd;
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
-  <div class="container">
-    <h1>Preview Server</h1>
-    <p class="subtitle">A lightweight static file server with visit tracking and auth support.</p>
-    <div class="links">
-      <a href="/todo">Todo Board</a>
-      <a href="/index">Browse All Files</a>
-      <a class="secondary" href="/__stats__">Visit Statistics</a>
-      <a class="secondary" href="/__map__">Route Map</a>
-    </div>
-    <div class="info">
-      <p>Read the docs: <a href="https://github.com/yiiewang/workbench" target="_blank">github.com/yiiewang/workbench</a></p>
+
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="sidebar-header">EXPLORER</div>
+  <div class="file-tree" id="tree"></div>
+</div>
+
+<div class="resizer" id="resizer"></div>
+
+<!-- Main -->
+<div class="main">
+  <div class="tab-bar" id="tabBar">
+  </div>
+  <div class="editor-area" id="editorArea">
+    <div class="editor-empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+      <span>Select a file from the Explorer to preview</span>
     </div>
   </div>
+</div>
+
+<script>
+const treeEl = document.getElementById('tree');
+const editorArea = document.getElementById('editorArea');
+const tabBar = document.getElementById('tabBar');
+
+const openTabs = new Map(); // path -> { name, ext, size }
+let activeTabPath = '';
+
+// ─── Icons (VS Code Codicons SVG) ───
+const ICONS = {
+  chevron: '<svg viewBox="0 0 16 16"><path d="M5.7 13.7L4.3 12.3 8.6 8 4.3 3.7 5.7 2.3l6 6-6 6z"/></svg>',
+  folder: '<svg viewBox="0 0 16 16"><path d="M1.5 3h4l1 1h7v9h-12V3z" fill="currentColor"/></svg>',
+  folderOpen: '<svg viewBox="0 0 16 16"><path d="M1.5 3h4l1 1h7v2h-12V3z"/><path d="M1.5 6h12l-1 7h-10l-1-7z"/></svg>',
+  file: '<svg viewBox="0 0 16 16"><path d="M3 1h6l5 5v9H3V1z" fill="none" stroke="currentColor" stroke-width="1"/><path d="M9 1v5h5" fill="none" stroke="currentColor" stroke-width="1"/></svg>',
+  defaultFile: '<svg viewBox="0 0 16 16"><path d="M3 1h6l5 5v9H3V1z" fill="none" stroke="currentColor" stroke-width="1"/><path d="M9 1v5h5" fill="none" stroke="currentColor" stroke-width="1"/></svg>',
+  html: '<svg viewBox="0 0 16 16"><path d="M2 1h12l-1 13-5 2-5-2L2 1z" fill="currentColor"/><text x="4.5" y="11" font-size="6" fill="#fff" font-weight="bold">&#60;/&#62;</text></svg>',
+  css: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="4" y="12" font-size="7" fill="#fff" font-weight="bold">#</text></svg>',
+  js: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3.5" y="11.5" font-size="5" fill="#fff" font-weight="bold">JS</text></svg>',
+  ts: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3.5" y="11.5" font-size="5" fill="#fff" font-weight="bold">TS</text></svg>',
+  json: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3.5" y="11.5" font-size="5" fill="#fff" font-weight="bold">{}</text></svg>',
+  md: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3.5" y="11" font-size="6" fill="#fff" font-weight="bold">M</text></svg>',
+  py: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3.5" y="11.5" font-size="5" fill="#fff" font-weight="bold">PY</text></svg>',
+  go: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3.5" y="11.5" font-size="5" fill="#fff" font-weight="bold">Go</text></svg>',
+  yaml: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3" y="11" font-size="5" fill="#fff" font-weight="bold">YML</text></svg>',
+  image: '<svg viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="1" fill="currentColor"/><circle cx="6" cy="6" r="1.5" fill="#fff"/><path d="M2 11l3-3 2 2 3-4 4 5H2z" fill="#fff"/></svg>',
+  pdf: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3.5" y="11.5" font-size="5" fill="#fff" font-weight="bold">PDF</text></svg>',
+  zip: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><path d="M7 4h2v2H7zM7 7h2v2H7z" fill="#fff"/></svg>',
+  video: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><polygon points="7,5 11,8 7,11" fill="#fff"/></svg>',
+  audio: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><circle cx="8" cy="8" r="3" fill="#fff"/></svg>',
+  lock: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><path d="M6 6V4a2 2 0 114 0v2" fill="none" stroke="#fff" stroke-width="1.2"/><circle cx="8" cy="9" r="1.5" fill="#fff"/></svg>',
+  db: '<svg viewBox="0 0 16 16"><ellipse cx="8" cy="3" rx="5" ry="2" fill="currentColor"/><path d="M3 3v4c0 1.1 2.2 2 5 2s5-.9 5-2V3" fill="none" stroke="currentColor" stroke-width="1"/><path d="M3 7v4c0 1.1 2.2 2 5 2s5-.9 5-2V7" fill="none" stroke="currentColor" stroke-width="1"/></svg>',
+  sh: '<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="14" rx="1" fill="currentColor"/><text x="3.5" y="11" font-size="6" fill="#fff" font-weight="bold">$</text></svg>',
+};
+
+function fileIconSvg(ext, name) {
+  const byExt = {
+    html: ICONS.html, htm: ICONS.html, css: ICONS.css, js: ICONS.js, ts: ICONS.ts,
+    json: ICONS.json, md: ICONS.md, markdown: ICONS.md,
+    py: ICONS.py, go: ICONS.go, yml: ICONS.yaml, yaml: ICONS.yaml,
+    png: ICONS.image, jpg: ICONS.image, jpeg: ICONS.image, gif: ICONS.image,
+    svg: ICONS.image, webp: ICONS.image, ico: ICONS.image,
+    pdf: ICONS.pdf, zip: ICONS.zip, tar: ICONS.zip, gz: ICONS.zip, tgz: ICONS.zip,
+    rar: ICONS.zip, '7z': ICONS.zip, bz2: ICONS.zip, xz: ICONS.zip,
+    mp4: ICONS.video, mov: ICONS.video, avi: ICONS.video, mkv: ICONS.video,
+    mp3: ICONS.audio, wav: ICONS.audio, flac: ICONS.audio,
+    lock: ICONS.lock, db: ICONS.db, sqlite: ICONS.db,
+    sh: ICONS.sh, bash: ICONS.sh, zsh: ICONS.sh,
+  };
+  if (byExt[ext]) return byExt[ext];
+  if (name.startsWith('.')) return ICONS.lock;
+  return ICONS.defaultFile;
+}
+
+// ─── Tree ───
+async function fetchTree(path) {
+  const resp = await fetch(`/__tree__?path=${encodeURIComponent(path)}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+function buildRow(name, isDir, depth) {
+  const row = document.createElement('div');
+  row.className = 'tree-row';
+  row.style.paddingLeft = `${depth * 16 + (isDir ? 0 : 16)}px`;
+
+  if (isDir) {
+    const expandIcon = document.createElement('span');
+    expandIcon.className = 'tree-icon expand';
+    expandIcon.innerHTML = ICONS.chevron;
+    row.appendChild(expandIcon);
+  } else {
+    row.appendChild(document.createElement('span')); // spacer
+  }
+
+  const typeIcon = document.createElement('span');
+  typeIcon.className = 'tree-icon ' + (isDir ? 'dir' : 'file');
+  if (isDir) {
+    typeIcon.innerHTML = ICONS.folder;
+  } else {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    typeIcon.innerHTML = fileIconSvg(ext, name);
+  }
+  row.appendChild(typeIcon);
+
+  const nameEl = document.createElement('span');
+  nameEl.className = 'tree-name';
+  nameEl.textContent = name;
+  row.appendChild(nameEl);
+
+  return row;
+}
+
+async function expandNode(nodeEl, path) {
+  const childrenEl = nodeEl.querySelector(':scope > .tree-children');
+  const expandIcon = nodeEl.querySelector(':scope > .tree-row > .tree-icon.expand');
+
+  if (childrenEl.dataset.loaded === 'true') {
+    const isOpen = childrenEl.classList.toggle('open');
+    expandIcon.classList.toggle('open', isOpen);
+    return;
+  }
+
+  expandIcon.innerHTML = '<span class="spinner"></span>';
+  try {
+    const data = await fetchTree(path);
+    childrenEl.innerHTML = '';
+    renderTree(childrenEl, data, parseInt(nodeEl.dataset.depth || 0) + 1);
+    childrenEl.dataset.loaded = 'true';
+    childrenEl.classList.add('open');
+    expandIcon.innerHTML = ICONS.chevron;
+    expandIcon.classList.add('open');
+  } catch (err) {
+    expandIcon.innerHTML = ICONS.chevron;
+    childrenEl.innerHTML = `<div class="empty">Failed: ${err.message}</div>`;
+  }
+}
+
+// 根据文件路径逐级展开目录树并高亮目标文件
+async function navigateToPath(targetPath) {
+  // 路径分段：/a/b/c.md → ['/a', '/a/b', '/a/b/c.md']
+  if (!targetPath.startsWith('/')) targetPath = '/' + targetPath;
+  const parts = targetPath.split('/').filter(Boolean);
+  const segments = [];
+  let cur = '';
+  for (const p of parts) {
+    cur += '/' + p;
+    segments.push(cur);
+  }
+
+  // 逐级展开目录（最后一段是文件，不用展开）
+  const dirSegments = segments.slice(0, -1);
+  const filePath = segments[segments.length - 1];
+
+  for (const seg of dirSegments) {
+    const dirName = seg.split('/').pop();
+    const parentPath = seg.substring(0, seg.lastIndexOf('/')) || '/';
+    // 确保父级已展开
+    await ensureNodeLoaded(parentPath);
+    // 在已渲染的树中找对应目录节点并展开
+    const dirNode = findTreeNode(parentPath, dirName);
+    if (dirNode) {
+      await expandNode(dirNode, seg);
+    }
+  }
+
+  // 高亮目标文件
+  const fileName = filePath.split('/').pop();
+  const parentDir = filePath.substring(0, filePath.lastIndexOf('/')) || '/';
+  await ensureNodeLoaded(parentDir);
+  const fileRow = findTreeRow(parentDir, fileName);
+  if (fileRow) {
+    document.querySelectorAll('.tree-row.active').forEach(el => el.classList.remove('active'));
+    fileRow.classList.add('active');
+  }
+}
+
+// 确保指定路径的树节点已加载（如果未加载则触发加载）
+async function ensureNodeLoaded(path) {
+  if (path === '/' || path === '') return;
+  const parentPath = path.substring(0, path.lastIndexOf('/')) || '/';
+  const dirName = path.split('/').pop();
+  await ensureNodeLoaded(parentPath);
+  const node = findTreeNode(parentPath, dirName);
+  if (node) {
+    const childrenEl = node.querySelector(':scope > .tree-children');
+    if (childrenEl && childrenEl.dataset.loaded !== 'true') {
+      await expandNode(node, path);
+    }
+  }
+}
+
+// 在已渲染的树中查找指定父路径下的目录节点
+function findTreeNode(parentPath, name) {
+  const container = parentPath === '/' ? treeEl : findTreeChildren(parentPath);
+  if (!container) return null;
+  const nodes = container.querySelectorAll(':scope > .tree-node');
+  for (const node of nodes) {
+    const row = node.querySelector(':scope > .tree-row');
+    if (!row) continue;
+    const nameEl = row.querySelector(':scope > .tree-name');
+    if (nameEl && nameEl.textContent === name) return node;
+  }
+  return null;
+}
+
+// 在已渲染的树中查找指定父路径下的文件行
+function findTreeRow(parentPath, name) {
+  const container = parentPath === '/' ? treeEl : findTreeChildren(parentPath);
+  if (!container) return null;
+  const nodes = container.querySelectorAll(':scope > .tree-node');
+  for (const node of nodes) {
+    const row = node.querySelector(':scope > .tree-row');
+    if (!row) continue;
+    const nameEl = row.querySelector(':scope > .tree-name');
+    if (nameEl && nameEl.textContent === name) return row;
+  }
+  return null;
+}
+
+// 在已渲染的树中查找指定路径的子节点容器
+function findTreeChildren(path) {
+  if (path === '/' || path === '') return treeEl;
+  const parentPath = path.substring(0, path.lastIndexOf('/')) || '/';
+  const dirName = path.split('/').pop();
+  const parentNode = findTreeNode(parentPath, dirName);
+  if (!parentNode) return null;
+  return parentNode.querySelector(':scope > .tree-children');
+}
+
+function renderTree(parentEl, data, depth) {
+  const dirs = data.dirs || [];
+  const files = data.files || [];
+  const allItems = [...dirs.map(d => ({ ...d, isDir: true })), ...files.map(f => ({ ...f, isDir: false }))];
+
+  for (const item of allItems) {
+    const nodeEl = document.createElement('div');
+    nodeEl.className = 'tree-node';
+    nodeEl.dataset.depth = depth;
+
+    const childPath = data.path === '/' ? `/${item.name}` : `${data.path}/${item.name}`;
+    const row = buildRow(item.name, item.isDir, depth);
+
+    row.addEventListener('click', () => {
+      document.querySelectorAll('.tree-row.active').forEach(el => el.classList.remove('active'));
+      row.classList.add('active');
+
+      if (item.isDir) {
+        expandNode(nodeEl, childPath);
+      } else {
+        const ext = (item.name.split('.').pop() || '').toLowerCase();
+        openTab(childPath, item.name, ext, item.size || 0);
+      }
+    });
+
+    nodeEl.appendChild(row);
+
+    if (item.isDir) {
+      const childrenEl = document.createElement('div');
+      childrenEl.className = 'tree-children';
+      nodeEl.appendChild(childrenEl);
+    }
+
+    parentEl.appendChild(nodeEl);
+  }
+}
+
+// ─── Tabs ───
+function openTab(path, name, ext, size) {
+  if (openTabs.has(path)) {
+    activateTab(path);
+    return;
+  }
+  openTabs.set(path, { name, ext, size });
+
+  const tab = document.createElement('div');
+  tab.className = 'tab';
+  tab.dataset.path = path;
+  tab.innerHTML = `<span class="tab-name">${escapeHtml(name)}</span><span class="tab-close" title="Close">&times;</span>`;
+  tab.addEventListener('click', (e) => {
+    if (e.target.classList.contains('tab-close')) {
+      closeTab(path, tab);
+      return;
+    }
+    activateTab(path);
+  });
+  tabBar.appendChild(tab);
+  activateTab(path);
+  updateHash(path);
+}
+
+function activateTab(path) {
+  activeTabPath = path;
+  tabBar.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.path === path));
+  if (!path) {
+    showWelcome();
+    return;
+  }
+  const info = openTabs.get(path);
+  if (!info) return;
+  renderEditor(path, info.name, info.ext, info.size);
+  updateHash(path);
+}
+
+function closeTab(path, tabEl) {
+  openTabs.delete(path);
+  tabEl.remove();
+  if (activeTabPath === path) {
+    const tabs = [...tabBar.querySelectorAll('.tab')];
+    if (tabs.length > 0) {
+      activateTab(tabs[tabs.length - 1].dataset.path);
+    } else {
+      activeTabPath = '';
+      showWelcome();
+      clearHash();
+    }
+  }
+}
+
+// ─── Editor ───
+function showWelcome() {
+  editorArea.innerHTML = `
+    <div class="editor-empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+      <span>Select a file from the Explorer to preview</span>
+    </div>`;
+}
+
+function renderEditor(path, name, ext, size) {
+  const binaryExts = ['zip','tar','gz','tgz','rar','7z','bz2','xz','exe','dll','so','dylib','bin','ttf','otf','woff','woff2'];
+
+  if (binaryExts.includes(ext)) {
+    showFileDetail(name, path, ext, size);
+    return;
+  }
+  if (['png','jpg','jpeg','gif','svg','webp','ico'].includes(ext)) {
+    editorArea.innerHTML = `<iframe src="${escapeHtml(path)}" style="width:100%;height:100%;border:none;"></iframe>`;
+    return;
+  }
+  if (['html','htm'].includes(ext)) {
+    editorArea.innerHTML = `<iframe src="${escapeHtml(path)}" style="width:100%;height:100%;border:none;background:#fff;"></iframe>`;
+    return;
+  }
+  if (ext === 'json') {
+    editorArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
+    fetch(path).then(r => r.text()).then(text => {
+      editorArea.innerHTML = renderJson(text);
+    }).catch(err => {
+      editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
+    });
+    return;
+  }
+  if (['md','markdown'].includes(ext)) {
+    editorArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
+    loadMarked().then(() => {
+      fetch(path).then(r => r.text()).then(md => {
+        editorArea.innerHTML = `<div class="markdown-body">${marked.parse(md)}</div>`;
+        loadMermaid().then(() => {
+          try { mermaid.run({ querySelector: '.markdown-body .language-mermaid' }); } catch(e) {}
+        });
+      }).catch(err => {
+        editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
+      });
+    });
+    return;
+  }
+  // text
+  fetch(path).then(r => r.text()).then(text => {
+    editorArea.innerHTML = `<div class="text-preview">${escapeHtml(text)}</div>`;
+  }).catch(err => {
+    editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
+  });
+}
+
+function renderJson(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    return `<div style="padding:20px;color:#d00;">Invalid JSON: ${escapeHtml(e.message)}<br><pre style="margin-top:8px;">${escapeHtml(text)}</pre></div>`;
+  }
+  return `<div class="json-viewer" id="jsonRoot">${renderJsonNode(data, '$', 0)}</div>`;
+}
+
+function renderJsonNode(value, key, depth) {
+  const indent = depth * 16;
+  if (value === null) return row(key, '<span class="json-null">null</span>', indent, false);
+  if (typeof value === 'boolean') return row(key, `<span class="json-bool">${value}</span>`, indent, false);
+  if (typeof value === 'number') return row(key, `<span class="json-num">${value}</span>`, indent, false);
+  if (typeof value === 'string') {
+    // 截断长字符串
+    const v = value.length > 200 ? value.slice(0, 200) + '…' : value;
+    return row(key, `<span class="json-str">"${escapeHtml(v)}"</span>`, indent, false);
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return row(key, '[]', indent, true, true);
+    const id = 'json_' + Math.random().toString(36).slice(2, 8);
+    let html = `<div style="padding-left:${indent}px;"><span class="json-toggle" data-target="${id}">▼</span> <span class="json-key">${escapeHtml(key)}</span>: <span class="json-bracket">[</span></div>`;
+    html += `<div id="${id}" class="json-collapsible">`;
+    value.forEach((item, i) => {
+      html += renderJsonNode(item, String(i), depth + 1);
+    });
+    html += `</div>`;
+    html += `<div style="padding-left:${indent}px;"><span class="json-bracket">]</span>${value.length > 1 ? `<span class="json-count">${value.length} items</span>` : ''}</div>`;
+    return html;
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value);
+    if (keys.length === 0) return row(key, '{}', indent, true, true);
+    const id = 'json_' + Math.random().toString(36).slice(2, 8);
+    let html = `<div style="padding-left:${indent}px;"><span class="json-toggle" data-target="${id}">▼</span> <span class="json-key">${escapeHtml(key)}</span>: <span class="json-bracket">{</span></div>`;
+    html += `<div id="${id}" class="json-collapsible">`;
+    keys.forEach(k => {
+      html += renderJsonNode(value[k], k, depth + 1);
+    });
+    html += `</div>`;
+    html += `<div style="padding-left:${indent}px;"><span class="json-bracket">}</span><span class="json-count">${keys.length} keys</span></div>`;
+    return html;
+  }
+  return row(key, String(value), indent, false);
+}
+
+function row(key, value, indent, isEmpty, isInline) {
+  if (isInline) return `<div style="padding-left:${indent}px;"><span class="json-key">${escapeHtml(key)}</span>: ${value}</div>`;
+  return `<div style="padding-left:${indent}px;line-height:1.6;"><span class="json-key">${escapeHtml(key)}</span>: ${value}</div>`;
+}
+
+// 折叠/展开交互
+document.addEventListener('click', (e) => {
+  if (!e.target.classList.contains('json-toggle')) return;
+  const target = document.getElementById(e.target.dataset.target);
+  if (!target) return;
+  const collapsed = target.classList.toggle('collapsed');
+  e.target.textContent = collapsed ? '▶' : '▼';
+});
+
+function showFileDetail(name, path, ext, size) {
+  editorArea.innerHTML = `
+    <div class="file-detail">
+      <div class="icon-lg">${fileIconSvg(ext, name)}</div>
+      <div class="name">${escapeHtml(name)}</div>
+      <table>
+        <tr><td>Type</td><td>${ext.toUpperCase()} archive</td></tr>
+        <tr><td>Size</td><td>${formatSize(size)}</td></tr>
+        <tr><td>Path</td><td><code>${escapeHtml(path)}</code></td></tr>
+      </table>
+      <a href="${escapeHtml(path)}" download class="btn-download">Download</a>
+    </div>`;
+}
+
+function formatSize(bytes) {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+let mermaidReady = null;
+function loadMermaid() {
+  if (mermaidReady) return mermaidReady;
+  if (typeof mermaid !== 'undefined') {
+    mermaidReady = Promise.resolve();
+    return mermaidReady;
+  }
+  mermaidReady = new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+    script.onload = () => {
+      mermaid.initialize({ startOnLoad: false, theme: 'default' });
+      resolve();
+    };
+    script.onerror = () => { mermaidReady = Promise.resolve(); };
+    document.head.appendChild(script);
+  });
+  return mermaidReady;
+}
+
+let markedReady = null;
+function loadMarked() {
+  if (markedReady) return markedReady;
+  if (typeof marked !== 'undefined') {
+    markedReady = Promise.resolve();
+    return markedReady;
+  }
+  markedReady = new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/marked/marked.min.js';
+    script.onload = () => resolve();
+    script.onerror = () => { markedReady = Promise.resolve(); };
+    document.head.appendChild(script);
+  });
+  return markedReady;
+}
+
+// ─── Hash routing ───
+function updateHash(path) {
+  if (history.state && history.state.path === path) return;
+  history.pushState({ path }, '', '#' + path);
+}
+
+function clearHash() {
+  history.pushState({}, '', window.location.pathname);
+}
+
+function getHashPath() {
+  const h = window.location.hash;
+  if (h && h.startsWith('#')) return decodeURIComponent(h.slice(1));
+  return '';
+}
+
+window.addEventListener('popstate', (e) => {
+  const p = getHashPath();
+  if (p && openTabs.has(p)) {
+    activateTab(p);
+  } else if (!p) {
+    activeTabPath = '';
+    showWelcome();
+  }
+});
+
+// ─── Init ───
+(async () => {
+  try {
+    const data = await fetchTree('/');
+    renderTree(treeEl, data, 0);
+    // 恢复 hash 中的文件并展开目录树
+    const hashPath = getHashPath();
+    if (hashPath) {
+      await navigateToPath(hashPath);
+      const name = hashPath.split('/').pop();
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      openTab(hashPath, name, ext, 0);
+    }
+  } catch (err) {
+    treeEl.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
+  }
+})();
+
+// ─── Resizer ───
+const resizer = document.getElementById('resizer');
+const sidebar = document.querySelector('.sidebar');
+let resizing = false;
+
+resizer.addEventListener('mousedown', () => { resizing = true; document.body.style.cursor = 'col-resize'; resizer.classList.add('active'); });
+document.addEventListener('mousemove', (e) => {
+  if (!resizing) return;
+  const w = Math.max(160, Math.min(500, e.clientX));
+  sidebar.style.width = w + 'px';
+});
+document.addEventListener('mouseup', () => { resizing = false; document.body.style.cursor = ''; resizer.classList.remove('active'); });
+</script>
+
 </body>
 </html>

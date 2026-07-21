@@ -11,3 +11,5 @@ nohup.out
 *.db
 vendor/
 /data/
+/preview/
+/preview/

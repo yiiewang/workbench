@@ -606,7 +606,11 @@ async function navigateToPath(targetPath) {
     // 在已渲染的树中找对应目录节点并展开
     const dirNode = findTreeNode(parentPath, dirName);
     if (dirNode) {
-      await expandNode(dirNode, seg);
+      // 仅当未展开时才调用 expandNode，避免 toggle 折叠已展开的目录
+      const childrenEl = dirNode.querySelector(':scope > .tree-children');
+      if (!childrenEl || !childrenEl.classList.contains('open')) {
+        await expandNode(dirNode, seg);
+      }
     }
   }
 
@@ -618,6 +622,8 @@ async function navigateToPath(targetPath) {
   if (fileRow) {
     document.querySelectorAll('.tree-row.active').forEach(el => el.classList.remove('active'));
     fileRow.classList.add('active');
+    // 自动滚动到高亮行，使其在目录树可视区内（仅垂直最近，不水平滚动）
+    fileRow.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 }
 

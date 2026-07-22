@@ -14,8 +14,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/kataras/iris/v12"
 	"github.com/yiiewang/workbench/internal/config"
 	"github.com/yiiewang/workbench/internal/db"
 )
@@ -27,6 +29,7 @@ type Server struct {
 	serDirAbs   string
 	tokenSecret []byte
 	logFile     string
+	app         *iris.Application
 }
 
 // New 创建 Server 实例
@@ -46,20 +49,34 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 	}, nil
 }
 
-// Handler 返回 http.Handler
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/__stats__", s.handleStats)
-	mux.HandleFunc("/__map__", s.handleMap)
-	mux.HandleFunc("/__map__.json", s.handleMap)
-	mux.HandleFunc("/tasks.json", s.handleTasksJSON)
-	mux.HandleFunc("/api/login", s.handleLogin)
-	mux.HandleFunc("/api/set-password", s.handleSetPassword)
-	mux.HandleFunc("/api/me", s.handleMe)
-	mux.HandleFunc("/api/org-members", s.handleOrgMembers)
-	mux.HandleFunc("/__tree__", s.handleTree)
-	mux.HandleFunc("/", s.handleStatic)
-	return withLogging(mux, s)
+// App 构建 iris.Application 并注册所有路由
+func (s *Server) App() *iris.Application {
+	app := iris.New()
+	s.app = app
+
+	// 全局中间件：访问日志 + 安全响应头
+	app.Use(s.loggingMiddleware())
+	app.Use(s.securityHeadersMiddleware())
+
+	// 公开 API
+	app.Get("/__stats__", s.handleStats)
+	app.Get("/__map__", s.handleMap)
+	app.Get("/__map__.json", s.handleMap)
+	app.Get("/__tree__", s.handleTree)
+	app.Get("/api/org-members", s.handleOrgMembers)
+	app.Post("/api/login", s.handleLogin)
+	app.Post("/api/set-password", s.handleSetPassword)
+
+	// 需要鉴权的 API
+	app.Get("/api/me", AuthMiddleware(s.tokenSecret), s.handleMe)
+	app.Get("/tasks.json", s.getTasksJSON)
+	app.Put("/tasks.json", AuthMiddleware(s.tokenSecret), s.putTasksJSON)
+
+	// 静态文件兜底路由：匹配所有其他路径
+	app.Get("/{path:path}", s.handleStatic)
+	app.Post("/{path:path}", s.handleStatic)
+
+	return app
 }
 
 func (s *Server) expiryDays() int {
@@ -70,20 +87,20 @@ func (s *Server) expiryDays() int {
 }
 
 // ============================================================
-// 路由映射
+// 路由映射（静态文件路由重定向）
 // ============================================================
 
-func (s *Server) handleRouteRedirect(w http.ResponseWriter, r *http.Request) bool {
-	target, exists := s.cfg.Routes[r.URL.Path]
+func (s *Server) handleRouteRedirect(ctx iris.Context) bool {
+	target, exists := s.cfg.Routes[ctx.Path()]
 	if !exists {
 		return false
 	}
 	if target == "__listdir__" {
-		s.listDirectory(w, r, s.serDirAbs)
+		s.listDirectory(ctx, s.serDirAbs)
 		return true
 	}
 	if strings.HasPrefix(target, "/") {
-		http.Redirect(w, r, target, http.StatusFound)
+		ctx.Redirect(target, iris.StatusFound)
 		return true
 	}
 	return false
@@ -93,83 +110,64 @@ func (s *Server) handleRouteRedirect(w http.ResponseWriter, r *http.Request) boo
 // GET /__stats__
 // ============================================================
 
-func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-		return
-	}
+func (s *Server) handleStats(ctx iris.Context) {
 	stats, err := s.db.GetStats()
 	if err != nil {
 		log.Printf("get stats failed, err=%v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, stats)
+	writeJSON(ctx, iris.StatusOK, stats)
 }
 
 // ============================================================
 // GET /__map__
 // ============================================================
 
-func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-		return
-	}
+func (s *Server) handleMap(ctx iris.Context) {
 	displayMap := make(map[string]string)
 	for k, v := range s.cfg.Routes {
 		if strings.HasPrefix(k, "/") && !strings.HasPrefix(v, "__") {
 			displayMap[k] = v
 		}
 	}
-	writeJSON(w, http.StatusOK, displayMap)
+	writeJSON(ctx, iris.StatusOK, displayMap)
 }
 
 // ============================================================
-// /api/org-members
+// GET /api/org-members
 // ============================================================
 
-func (s *Server) handleOrgMembers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-		return
-	}
-	orgID := r.URL.Query().Get("orgId")
+func (s *Server) handleOrgMembers(ctx iris.Context) {
+	orgID := ctx.URLParam("orgId")
 	if orgID == "" {
 		orgID = "org_default"
 	}
 	members, err := s.db.GetOrgMembers(orgID)
 	if err != nil {
 		log.Printf("get org members failed, org=%s, err=%v", orgID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 		return
 	}
 	if members == nil {
 		members = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"members": members})
+	writeJSON(ctx, iris.StatusOK, map[string]any{"members": members})
 }
 
 // ============================================================
-// /api/me
+// GET /api/me（需要 AuthMiddleware）
 // ============================================================
 
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-		return
-	}
-	userID, ok := RequireAuth(w, r, s.tokenSecret)
-	if !ok {
-		return
-	}
+func (s *Server) handleMe(ctx iris.Context) {
+	userID := currentUserID(ctx)
 	orgID, err := s.db.FindUserOrg(userID)
 	if err != nil {
 		log.Printf("find user org failed, user=%s, err=%v", userID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(ctx, iris.StatusOK, map[string]any{
 		"userId": userID,
 		"orgId":  orgID,
 		"exp":    time.Now().Unix() + int64(s.expiryDays())*86400,
@@ -177,113 +175,135 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================
-// /api/login
+// POST /api/login
 // ============================================================
 
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-		return
-	}
+func (s *Server) handleLogin(ctx iris.Context) {
 	var req struct {
 		OrgID    string `json:"orgId"`
 		UserID   string `json:"userId"`
 		Password string `json:"password"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+	if err := readJSON(ctx, &req); err != nil {
+		writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
 		return
 	}
 	req.OrgID = strings.TrimSpace(req.OrgID)
 	req.UserID = strings.TrimSpace(req.UserID)
 	if req.OrgID == "" || req.UserID == "" || req.Password == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "orgId, userId and password are required"})
+		writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "orgId, userId and password are required"})
+		return
+	}
+
+	// 登录限流：检查 IP 失败次数
+	ip := clientIP(ctx)
+	if loginFailureCount(ip) >= loginMaxFailures {
+		writeJSON(ctx, iris.StatusTooManyRequests, map[string]string{"error": "Too many failed attempts, try later"})
 		return
 	}
 
 	pwdHash, exists, err := s.db.FindUser(req.OrgID, req.UserID)
 	if err != nil {
 		log.Printf("find user failed, org=%s, user=%s, err=%v", req.OrgID, req.UserID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 		return
 	}
 	if !exists || pwdHash == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{
+		recordLoginFailure(ip)
+		writeJSON(ctx, iris.StatusForbidden, map[string]string{
 			"error":   "password_not_set",
 			"message": "Password not set. Please set password first.",
 		})
 		return
 	}
-	if pwdHash != HashPassword(req.Password) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Invalid password"})
+	if !VerifyPassword(pwdHash, req.Password) {
+		recordLoginFailure(ip)
+		writeJSON(ctx, iris.StatusUnauthorized, map[string]string{"error": "Invalid password"})
 		return
 	}
 
+	clearLoginFailures(ip)
 	token := GenerateToken(req.UserID, s.tokenSecret, s.expiryDays())
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(ctx, iris.StatusOK, map[string]any{
 		"token": token,
 		"user":  map[string]string{"userId": req.UserID, "orgId": req.OrgID},
 	})
 }
 
 // ============================================================
-// /api/set-password
+// POST /api/set-password
 // ============================================================
 
-func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-		return
-	}
+func (s *Server) handleSetPassword(ctx iris.Context) {
 	var req struct {
 		OrgID       string `json:"orgId"`
 		UserID      string `json:"userId"`
 		OldPassword string `json:"oldPassword"`
 		NewPassword string `json:"newPassword"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+	if err := readJSON(ctx, &req); err != nil {
+		writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
 		return
 	}
 	req.OrgID = strings.TrimSpace(req.OrgID)
 	req.UserID = strings.TrimSpace(req.UserID)
 	if req.OrgID == "" || req.UserID == "" || req.NewPassword == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "orgId, userId and newPassword are required"})
+		writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "orgId, userId and newPassword are required"})
 		return
 	}
 
 	if err := s.db.EnsureOrg(req.OrgID); err != nil {
 		log.Printf("ensure org failed, org=%s, err=%v", req.OrgID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 		return
 	}
 
 	pwdHash, exists, err := s.db.FindUser(req.OrgID, req.UserID)
 	if err != nil {
 		log.Printf("find user failed, org=%s, user=%s, err=%v", req.OrgID, req.UserID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 		return
 	}
-	if exists && pwdHash != "" {
-		if req.OldPassword == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "oldPassword is required to change password"})
+	// 不存在用户：仅当系统无任何用户时允许创建（首次初始化），之后禁止开放注册
+	if !exists {
+		hasUsers, err := s.db.HasAnyUser()
+		if err != nil {
+			log.Printf("check has any user failed, err=%v", err)
+			writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 			return
 		}
-		if pwdHash != HashPassword(req.OldPassword) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Invalid old password"})
+		if hasUsers {
+			writeJSON(ctx, iris.StatusForbidden, map[string]string{
+				"error":   "user_not_found",
+				"message": "User does not exist. Contact admin to create account.",
+			})
+			return
+		}
+	} else if pwdHash != "" {
+		if req.OldPassword == "" {
+			writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "oldPassword is required to change password"})
+			return
+		}
+		if !VerifyPassword(pwdHash, req.OldPassword) {
+			writeJSON(ctx, iris.StatusUnauthorized, map[string]string{"error": "Invalid old password"})
 			return
 		}
 	}
 
-	newHash := HashPassword(req.NewPassword)
+	newHash, err := HashPassword(req.NewPassword)
+	if err != nil {
+		log.Printf("hash password failed, err=%v", err)
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		return
+	}
 	if err := s.db.UpsertUser(req.OrgID, req.UserID, newHash); err != nil {
 		log.Printf("upsert user failed, org=%s, user=%s, err=%v", req.OrgID, req.UserID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 		return
 	}
 
 	token := GenerateToken(req.UserID, s.tokenSecret, s.expiryDays())
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(ctx, iris.StatusOK, map[string]any{
 		"token": token,
 		"user":  map[string]string{"userId": req.UserID, "orgId": req.OrgID},
 	})
@@ -293,39 +313,25 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 // /tasks.json
 // ============================================================
 
-func (s *Server) handleTasksJSON(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.getTasksJSON(w, r)
-	case http.MethodPut:
-		s.putTasksJSON(w, r)
-	default:
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-	}
-}
-
-func (s *Server) getTasksJSON(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getTasksJSON(ctx iris.Context) {
 	data, err := s.db.GetTasksJSON()
 	if err != nil {
 		log.Printf("get tasks json failed, err=%v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 		return
 	}
-	w.Header().Set("Cache-Control", "no-cache")
-	writeJSON(w, http.StatusOK, data)
+	ctx.Header("Cache-Control", "no-cache")
+	writeJSON(ctx, iris.StatusOK, data)
 }
 
-func (s *Server) putTasksJSON(w http.ResponseWriter, r *http.Request) {
-	userID, ok := RequireAuth(w, r, s.tokenSecret)
-	if !ok {
-		return
-	}
+func (s *Server) putTasksJSON(ctx iris.Context) {
+	userID := currentUserID(ctx)
 
 	var req struct {
 		Orgs map[string]json.RawMessage `json:"orgs"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+	if err := readJSON(ctx, &req); err != nil {
+		writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
 		return
 	}
 
@@ -342,18 +348,18 @@ func (s *Server) putTasksJSON(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := s.db.EnsureOrg(orgID); err != nil {
 				log.Printf("ensure org failed, org=%s, err=%v", orgID, err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+				writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 				return
 			}
 			if err := s.db.UpsertTasks(orgID, memberID, member.Tasks); err != nil {
 				log.Printf("upsert tasks failed, org=%s, user=%s, err=%v", orgID, memberID, err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+				writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 				return
 			}
 		}
 	}
 	log.Printf("tasks.json updated by user=%s", userID)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "file": "tasks.json"})
+	writeJSON(ctx, iris.StatusOK, map[string]string{"status": "ok", "file": "tasks.json"})
 }
 
 // ============================================================
@@ -366,33 +372,27 @@ type treeItem struct {
 	Size  int64  `json:"size,omitempty"`
 }
 
-func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-		return
-	}
-	relPath := r.URL.Query().Get("path")
+func (s *Server) handleTree(ctx iris.Context) {
+	relPath := ctx.URLParam("path")
 	if relPath == "" {
 		relPath = "/"
 	}
 
-	// 安全检查：防止目录穿越
-	cleanPath := filepath.Clean(relPath)
-	if strings.Contains(cleanPath, "..") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid path"})
+	// 安全检查：防止目录穿越，校验最终路径必须落在 serDirAbs 内
+	fsPath, cleanPath, ok := safeJoin(s.serDirAbs, relPath)
+	if !ok {
+		writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "Invalid path"})
 		return
 	}
-
-	fsPath := filepath.Join(s.serDirAbs, cleanPath)
 	info, err := os.Stat(fsPath)
 	if err != nil || !info.IsDir() {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found or not a directory"})
+		writeJSON(ctx, iris.StatusNotFound, map[string]string{"error": "Not found or not a directory"})
 		return
 	}
 
 	entries, err := os.ReadDir(fsPath)
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Cannot read directory"})
+		writeJSON(ctx, iris.StatusForbidden, map[string]string{"error": "Cannot read directory"})
 		return
 	}
 
@@ -422,7 +422,7 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(dirs, func(i, j int) bool { return naturalLess(dirs[i].Name, dirs[j].Name) })
 	sort.Slice(files, func(i, j int) bool { return naturalLess(files[i].Name, files[j].Name) })
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(ctx, iris.StatusOK, map[string]any{
 		"path":  cleanPath,
 		"dirs":  dirs,
 		"files": files,
@@ -446,57 +446,64 @@ func (s *Server) isHidden(name string) bool {
 // 静态文件 + 目录列表
 // ============================================================
 
-func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	if s.handleRouteRedirect(w, r) {
+func (s *Server) handleStatic(ctx iris.Context) {
+	if s.handleRouteRedirect(ctx) {
 		return
 	}
 
+	reqPath := ctx.Path()
+
 	// 检查通过中文名访问
-	decodedPath, _ := url.QueryUnescape(r.URL.Path)
+	decodedPath, _ := url.QueryUnescape(reqPath)
 	for filePath, displayName := range s.cfg.Routes {
 		if !strings.HasPrefix(filePath, "/") || strings.HasPrefix(displayName, "__") {
 			continue
 		}
 		if decodedPath == "/"+displayName || strings.HasSuffix(decodedPath, "/"+displayName) {
-			r.URL.Path = filePath
+			reqPath = filePath
 			break
 		}
 	}
 
-	fsPath := filepath.Join(s.serDirAbs, filepath.Clean(r.URL.Path))
+	fsPath, _, ok := safeJoin(s.serDirAbs, reqPath)
+	if !ok {
+		ctx.NotFound()
+		return
+	}
 	info, err := os.Stat(fsPath)
 	if err != nil {
-		http.NotFound(w, r)
+		ctx.NotFound()
 		return
 	}
 
 	if info.IsDir() {
 		indexPath := filepath.Join(fsPath, "index.html")
 		if _, err := os.Stat(indexPath); err == nil {
-			http.ServeFile(w, r, indexPath)
+			ctx.ServeFile(indexPath)
 			return
 		}
-		s.listDirectory(w, r, fsPath)
+		s.listDirectory(ctx, fsPath)
 		return
 	}
 
 	content, err := os.ReadFile(fsPath)
 	if err != nil {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal Server Error"})
 		return
 	}
 
 	ext := strings.ToLower(filepath.Ext(fsPath))
-	// 二进制扩展名走 http.ServeFile 触发下载
+	// 二进制扩展名走 ServeFile 触发下载
 	if isBinaryExt(ext) {
-		http.ServeFile(w, r, fsPath)
+		ctx.ServeFile(fsPath)
 		return
 	}
-	w.Header().Set("Content-Type", contentType(ext)+"; charset=utf-8")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
-	w.WriteHeader(http.StatusOK)
-	w.Write(content)
+	ctx.ContentType(contentType(ext) + "; charset=utf-8")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("Content-Length", fmt.Sprintf("%d", len(content)))
+	ctx.Header("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+	ctx.StatusCode(iris.StatusOK)
+	ctx.Write(content)
 }
 
 // isBinaryExt 判断是否应触发下载而非内联展示
@@ -512,10 +519,10 @@ func isBinaryExt(ext string) bool {
 	return false
 }
 
-func (s *Server) listDirectory(w http.ResponseWriter, r *http.Request, dirPath string) {
+func (s *Server) listDirectory(ctx iris.Context, dirPath string) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		ctx.StatusCode(iris.StatusForbidden)
 		return
 	}
 
@@ -530,7 +537,7 @@ func (s *Server) listDirectory(w http.ResponseWriter, r *http.Request, dirPath s
 	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Name() < dirs[j].Name() })
 	sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
 
-	displayPath := html.EscapeString(r.URL.Path)
+	displayPath := html.EscapeString(ctx.Path())
 
 	var items []string
 	if displayPath != "/" {
@@ -593,50 +600,40 @@ func (s *Server) listDirectory(w http.ResponseWriter, r *http.Request, dirPath s
 </body>
 </html>`, displayPath, displayPath, strings.Join(items, ""))
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(body))
+	ctx.ContentType("text/html; charset=utf-8")
+	ctx.WriteString(body)
 }
 
 // ============================================================
-// 日志中间件
+// 访问日志中间件
 // ============================================================
 
-func withLogging(next http.Handler, s *Server) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-		next.ServeHTTP(lrw, r)
+func (s *Server) loggingMiddleware() iris.Handler {
+	return func(ctx iris.Context) {
+		ctx.Record()
+		ctx.Next()
 
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		statusCode := ctx.GetStatusCode()
+
+		ip, _, _ := net.SplitHostPort(ctx.RemoteAddr())
 		if ip == "" {
-			ip = r.RemoteAddr
+			ip = ctx.RemoteAddr()
 		}
-		ua := r.Header.Get("User-Agent")
+		ua := ctx.GetHeader("User-Agent")
 		if len(ua) > 50 {
 			ua = ua[:50]
 		}
 		visitorID := fmt.Sprintf("%s|%s", ip, ua)
 
 		go func() {
-			if err := s.db.LogVisit(visitorID, ip, ua, r.URL.Path, lrw.statusCode); err != nil {
+			if err := s.db.LogVisit(visitorID, ip, ua, ctx.Path(), statusCode); err != nil {
 				log.Printf("log visit failed, err=%v", err)
 			}
 		}()
 
 		timestamp := time.Now().Format("2006-01-02 15:04:05")
-		writeAccessLog(s.logFile, timestamp, visitorID, r.URL.Path, fmt.Sprintf("%d", lrw.statusCode))
-	})
-}
-
-type loggingResponseWriter struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-func (lrw *loggingResponseWriter) WriteHeader(code int) {
-	lrw.statusCode = code
-	lrw.ResponseWriter.WriteHeader(code)
+		writeAccessLog(s.logFile, timestamp, visitorID, ctx.Path(), fmt.Sprintf("%d", statusCode))
+	}
 }
 
 func writeAccessLog(logPath, timestamp, visitorID, path, status string) {
@@ -650,8 +647,101 @@ func writeAccessLog(logPath, timestamp, visitorID, path, status string) {
 }
 
 // ============================================================
+// 安全响应头中间件
+// ============================================================
+
+func (s *Server) securityHeadersMiddleware() iris.Handler {
+	return func(ctx iris.Context) {
+		ctx.Header("X-Content-Type-Options", "nosniff")
+		ctx.Header("X-Frame-Options", "SAMEORIGIN")
+		ctx.Header("Referrer-Policy", "no-referrer")
+		ctx.Next()
+	}
+}
+
+// ============================================================
+// 登录限流：每 IP 每分钟最多 loginMaxFailures 次失败
+// ============================================================
+
+const (
+	loginMaxFailures = 5
+	loginWindow      = time.Minute
+)
+
+var loginLimiter = struct {
+	sync.Mutex
+	fails map[string][]time.Time
+}{fails: make(map[string][]time.Time)}
+
+// loginFailureCount 返回 IP 在窗口内的失败次数
+func loginFailureCount(ip string) int {
+	loginLimiter.Lock()
+	defer loginLimiter.Unlock()
+	cutoff := time.Now().Add(-loginWindow)
+	count := 0
+	for _, t := range loginLimiter.fails[ip] {
+		if t.After(cutoff) {
+			count++
+		}
+	}
+	return count
+}
+
+// recordLoginFailure 记录一次登录失败并清理过期记录
+func recordLoginFailure(ip string) {
+	loginLimiter.Lock()
+	defer loginLimiter.Unlock()
+	now := time.Now()
+	cutoff := now.Add(-loginWindow)
+	old := loginLimiter.fails[ip]
+	valid := old[:0]
+	for _, t := range old {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	loginLimiter.fails[ip] = append(valid, now)
+}
+
+// clearLoginFailures 登录成功后清除 IP 的失败记录
+func clearLoginFailures(ip string) {
+	loginLimiter.Lock()
+	defer loginLimiter.Unlock()
+	delete(loginLimiter.fails, ip)
+}
+
+// clientIP 从 ctx.RemoteAddr 提取客户端 IP
+func clientIP(ctx iris.Context) string {
+	ip, _, err := net.SplitHostPort(ctx.RemoteAddr())
+	if err != nil {
+		return ctx.RemoteAddr()
+	}
+	return ip
+}
+
+// ============================================================
 // 工具函数
 // ============================================================
+
+// safeJoin 将 baseDir 与 relPath 安全拼接，确保结果落在 baseDir 目录内，防止路径遍历。
+// 返回拼接后的绝对路径、相对于 baseDir 的规范化路径（以 / 开头，根目录为 /）。
+func safeJoin(baseDir, relPath string) (fsPath, cleanRel string, ok bool) {
+	cleaned := filepath.Clean(relPath)
+	fsPath = filepath.Join(baseDir, cleaned)
+	rel, err := filepath.Rel(baseDir, fsPath)
+	if err != nil {
+		return "", "", false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "", false
+	}
+	if rel == "." {
+		cleanRel = "/"
+	} else {
+		cleanRel = "/" + filepath.ToSlash(rel)
+	}
+	return fsPath, cleanRel, true
+}
 
 func contentType(ext string) string {
 	switch ext {
@@ -678,15 +768,13 @@ func contentType(ext string) string {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+func writeJSON(ctx iris.Context, status int, data any) {
+	ctx.StatusCode(status)
+	ctx.JSON(data)
 }
 
-func readJSON(r *http.Request, v interface{}) error {
-	defer r.Body.Close()
-	data, err := io.ReadAll(r.Body)
+func readJSON(ctx iris.Context, v any) error {
+	data, err := io.ReadAll(ctx.Request().Body)
 	if err != nil {
 		return err
 	}

@@ -43,12 +43,16 @@
   /* Sidebar */
   .sidebar {
     width: 280px;
-    min-width: 160px;
     background: var(--sidebar-bg);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: width 0.2s ease;
+  }
+  .sidebar.collapsed {
+    width: 0;
+    border-right-color: transparent;
   }
   .sidebar-header {
     padding: 10px 20px;
@@ -125,6 +129,7 @@
     flex-direction: column;
     overflow: hidden;
     min-width: 0;
+    position: relative;
   }
   /* Tab bar */
   .tab-bar {
@@ -134,10 +139,57 @@
     height: 35px;
     align-items: flex-end;
     overflow-x: auto;
+    overflow-y: hidden;
     flex-shrink: 0;
+    padding-right: 80px;  /* 给 share 按钮留位置 */
+    scrollbar-width: thin;
+    scrollbar-color: #ccc transparent;
   }
-  .tab-bar::-webkit-scrollbar { height: 3px; }
+  .tab-bar::-webkit-scrollbar { height: 4px; }
+  .tab-bar::-webkit-scrollbar-track { background: transparent; }
   .tab-bar::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }
+  .tab-bar::-webkit-scrollbar-thumb:hover { background: #999; }
+  .tab-share {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 10;
+    padding: 0 14px;
+    height: 35px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    background: var(--header-bg);
+    border-left: 1px solid var(--tab-border);
+    white-space: nowrap;
+  }
+  .tab-share:hover { color: var(--accent); background: var(--hover); }
+  .tab-share.copied { color: #1a7f37; }
+
+  /* Toast 提示 */
+  .toast {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-20px);
+    background: #333;
+    color: #fff;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    opacity: 0;
+    transition: opacity 0.2s, transform 0.2s;
+    z-index: 9999;
+    pointer-events: none;
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
   .tab {
     display: flex;
     align-items: center;
@@ -150,8 +202,9 @@
     white-space: nowrap;
     font-size: 13px;
     color: var(--text-dim);
-    flex-shrink: 0;
-    min-width: 0;
+    flex-shrink: 1;
+    min-width: 100px;
+    max-width: 240px;
   }
   .tab.active {
     background: var(--tab-active-bg);
@@ -292,14 +345,47 @@
   .file-detail .btn-download:hover { background: #005a9e; }
 
   /* Resizer */
-  .resizer {
-    width: 4px;
-    cursor: col-resize;
-    background: transparent;
-    flex-shrink: 0;
-    transition: background 0.15s;
-  }
-  .resizer:hover, .resizer.active { background: var(--border); }
+.resizer {
+  position: relative;
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.resizer:hover, .resizer.active { background: var(--border); }
+.resizer-toggle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 36px;
+  border: 1px solid var(--border);
+  background: var(--sidebar-bg);
+  color: var(--text-dim);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+  z-index: 5;
+  user-select: none;
+}
+.resizer:hover .resizer-toggle,
+.sidebar.collapsed ~ .resizer .resizer-toggle,
+.resizer.active .resizer-toggle {
+  opacity: 1;
+}
+.resizer-toggle:hover {
+  background: var(--hover);
+  color: var(--text);
+}
 
   /* Spinner */
   .spinner {
@@ -314,6 +400,9 @@
 </head>
 <body>
 
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
 <!-- Sidebar -->
 <div class="sidebar">
   <div class="sidebar-header">EXPLORER</div>
@@ -325,6 +414,10 @@
 <!-- Main -->
 <div class="main">
   <div class="tab-bar" id="tabBar">
+  </div>
+  <div class="tab-share" id="shareBtn" title="Copy shareable link" style="display:none">
+    <svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm-.98 4.3l1.19.88-4.42 5.64-1.21-.91 4.44-5.61zM5.5 8a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm8 5.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" fill="currentColor"/></svg>
+    <span id="shareLabel">Share</span>
   </div>
   <div class="editor-area" id="editorArea">
     <div class="editor-empty">
@@ -341,6 +434,43 @@ const tabBar = document.getElementById('tabBar');
 
 const openTabs = new Map(); // path -> { name, ext, size }
 let activeTabPath = '';
+const shareBtn = document.getElementById('shareBtn');
+const shareLabel = document.getElementById('shareLabel');
+let currentInnerHash = '';
+
+shareBtn.addEventListener('click', () => {
+  const url = window.location.origin + '/#' + activeTabPath + currentInnerHash;
+  copyToClipboard(url);
+  showToast('Link copied to clipboard');
+});
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+
+function fallbackCopy(text) {
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  try { document.execCommand('copy'); } catch(e) {}
+  document.body.removeChild(input);
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
+}
 
 // ─── Icons (VS Code Codicons SVG) ───
 const ICONS = {
@@ -421,6 +551,7 @@ function buildRow(name, isDir, depth) {
   const nameEl = document.createElement('span');
   nameEl.className = 'tree-name';
   nameEl.textContent = name;
+  nameEl.title = name;  // hover 显示完整文件名（侧边栏宽度有限时尤其有用）
   row.appendChild(nameEl);
 
   return row;
@@ -608,13 +739,17 @@ function activateTab(path) {
   activeTabPath = path;
   tabBar.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.path === path));
   if (!path) {
+    shareBtn.style.display = 'none';
     showWelcome();
     return;
   }
+  shareBtn.style.display = 'flex';
   const info = openTabs.get(path);
   if (!info) return;
   renderEditor(path, info.name, info.ext, info.size);
   updateHash(path);
+  // 同步左侧目录树：高亮当前文件并展开父目录
+  navigateToPath(path).catch(() => {});
 }
 
 function closeTab(path, tabEl) {
@@ -649,11 +784,14 @@ function renderEditor(path, name, ext, size) {
     return;
   }
   if (['png','jpg','jpeg','gif','svg','webp','ico'].includes(ext)) {
-    editorArea.innerHTML = `<iframe src="${escapeHtml(path)}" style="width:100%;height:100%;border:none;"></iframe>`;
+    editorArea.innerHTML = `<iframe src="${escapeHtml(path)}" sandbox="" style="width:100%;height:100%;border:none;"></iframe>`;
     return;
   }
   if (['html','htm'].includes(ext)) {
-    editorArea.innerHTML = `<iframe src="${escapeHtml(path)}" style="width:100%;height:100%;border:none;background:#fff;"></iframe>`;
+    // src 直接带上内嵌锚点，iframe 加载完成后浏览器会自动滚到对应位置
+    const src = path + (currentInnerHash || '');
+    editorArea.innerHTML = `<iframe id="previewFrame" src="${escapeHtml(src)}" sandbox="allow-same-origin" style="width:100%;height:100%;border:none;background:#fff;"></iframe>`;
+    watchIframeHash();
     return;
   }
   if (ext === 'json') {
@@ -667,9 +805,9 @@ function renderEditor(path, name, ext, size) {
   }
   if (['md','markdown'].includes(ext)) {
     editorArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
-    loadMarked().then(() => {
+    Promise.all([loadMarked(), loadDomPurify()]).then(() => {
       fetch(path).then(r => r.text()).then(md => {
-        editorArea.innerHTML = `<div class="markdown-body">${marked.parse(md)}</div>`;
+        editorArea.innerHTML = `<div class="markdown-body">${DOMPurify.sanitize(marked.parse(md))}</div>`;
         loadMermaid().then(() => {
           try { mermaid.run({ querySelector: '.markdown-body .language-mermaid' }); } catch(e) {}
         });
@@ -776,6 +914,38 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// 监听 iframe 内锚点跳转，同步到外层地址栏
+let iframeHashTimer = null;
+function watchIframeHash() {
+  if (iframeHashTimer) clearInterval(iframeHashTimer);
+  currentInnerHash = '';
+  iframeHashTimer = setInterval(() => {
+    const iframe = document.getElementById('previewFrame');
+    if (!iframe) { clearInterval(iframeHashTimer); return; }
+    try {
+      currentInnerHash = iframe.contentWindow.location.hash;
+    } catch(e) { clearInterval(iframeHashTimer); }
+  }, 300);
+}
+function syncIframeHash() {
+  if (iframeHashTimer) clearInterval(iframeHashTimer);
+  let lastHash = '';
+  iframeHashTimer = setInterval(() => {
+    const iframe = document.getElementById('previewFrame');
+    if (!iframe) return;
+    try {
+      const h = iframe.contentWindow.location.hash;
+      if (h !== lastHash) {
+        lastHash = h;
+        const newHash = activeTabPath + h;
+        history.replaceState({ path: activeTabPath }, '', '#' + newHash);
+      }
+    } catch(e) {
+      clearInterval(iframeHashTimer);
+    }
+  }, 200);
+}
+
 let mermaidReady = null;
 function loadMermaid() {
   if (mermaidReady) return mermaidReady;
@@ -786,6 +956,8 @@ function loadMermaid() {
   mermaidReady = new Promise((resolve) => {
     const script = document.createElement('script');
     script.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+    script.integrity = 'sha384-T/0lMUdJpd2S1ZHtRiofG3htU3xPCrFVeAQ1UUE2TJwlEJSV5NUwn30kP28n238E';
+    script.crossOrigin = 'anonymous';
     script.onload = () => {
       mermaid.initialize({ startOnLoad: false, theme: 'default' });
       resolve();
@@ -805,12 +977,33 @@ function loadMarked() {
   }
   markedReady = new Promise((resolve) => {
     const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/marked/marked.min.js';
+    script.src = 'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js';
+    script.integrity = 'sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi';
+    script.crossOrigin = 'anonymous';
     script.onload = () => resolve();
     script.onerror = () => { markedReady = Promise.resolve(); };
     document.head.appendChild(script);
   });
   return markedReady;
+}
+
+let domPurifyReady = null;
+function loadDomPurify() {
+  if (domPurifyReady) return domPurifyReady;
+  if (typeof DOMPurify !== 'undefined') {
+    domPurifyReady = Promise.resolve();
+    return domPurifyReady;
+  }
+  domPurifyReady = new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js';
+    script.integrity = 'sha384-piCcpDdJ7qVeK4Tv8Z6Hpcr3ZBIgP16TxQTPVfsLFdZ5uDgwc3Y8Ho7oUnqf12qu';
+    script.crossOrigin = 'anonymous';
+    script.onload = () => resolve();
+    script.onerror = () => { domPurifyReady = Promise.resolve(); };
+    document.head.appendChild(script);
+  });
+  return domPurifyReady;
 }
 
 // ─── Hash routing ───
@@ -824,9 +1017,23 @@ function clearHash() {
 }
 
 function getHashPath() {
+  // 形如 #/path/to/file.html#inner-anchor → 返回 '/path/to/file.html'，inner anchor 由 watchIframeHash 跟踪
   const h = window.location.hash;
-  if (h && h.startsWith('#')) return decodeURIComponent(h.slice(1));
-  return '';
+  if (!h || !h.startsWith('#')) return '';
+  let raw = decodeURIComponent(h.slice(1));
+  // 拆出内嵌 #（仅第一个）作为 innerHash
+  const idx = raw.indexOf('#');
+  let filePath;
+  if (idx >= 0) {
+    currentInnerHash = raw.slice(idx);
+    filePath = raw.slice(0, idx);
+  } else {
+    currentInnerHash = '';
+    filePath = raw;
+  }
+  // 路径遍历防护：拒绝包含 .. 段的路径
+  if (/(^|\/)\.\.(\/|$)/.test(filePath)) return '';
+  return filePath;
 }
 
 window.addEventListener('popstate', (e) => {
@@ -857,18 +1064,86 @@ window.addEventListener('popstate', (e) => {
   }
 })();
 
-// ─── Resizer ───
+// ─── Resizer & Sidebar Toggle ───
 const resizer = document.getElementById('resizer');
 const sidebar = document.querySelector('.sidebar');
-let resizing = false;
+const SIDEBAR_KEY = 'workbench-sidebar';
+const SB_MIN = 160, SB_MAX = 500;
 
-resizer.addEventListener('mousedown', () => { resizing = true; document.body.style.cursor = 'col-resize'; resizer.classList.add('active'); });
+function loadSidebarState() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_KEY);
+    if (!raw) return { width: 280, collapsed: false };
+    const s = JSON.parse(raw);
+    const width = Math.max(SB_MIN, Math.min(SB_MAX, Number(s.width) || 280));
+    return { width, collapsed: !!s.collapsed };
+  } catch { return { width: 280, collapsed: false }; }
+}
+function saveSidebarState(width, collapsed) {
+  try { localStorage.setItem(SIDEBAR_KEY, JSON.stringify({ width, collapsed })); } catch {}
+}
+
+const sbState = loadSidebarState();
+if (sbState.collapsed) {
+  sidebar.classList.add('collapsed');
+} else {
+  sidebar.style.width = sbState.width + 'px';
+}
+
+const toggleBtn = document.createElement('button');
+toggleBtn.className = 'resizer-toggle';
+toggleBtn.type = 'button';
+toggleBtn.title = '切换侧边栏';
+resizer.appendChild(toggleBtn);
+function syncToggleIcon() {
+  toggleBtn.textContent = sidebar.classList.contains('collapsed') ? '›' : '‹';
+}
+syncToggleIcon();
+
+function toggleSidebar() {
+  if (!sidebar.classList.contains('collapsed')) {
+    const cur = Math.round(sidebar.getBoundingClientRect().width);
+    if (cur >= SB_MIN) sbState.width = cur;
+    sidebar.classList.add('collapsed');
+    sidebar.style.width = '';  // 清除 inline width，让 CSS .collapsed 的 width:0 生效
+  } else {
+    sidebar.classList.remove('collapsed');
+    sidebar.style.width = sbState.width + 'px';
+  }
+  syncToggleIcon();
+  saveSidebarState(sbState.width, sidebar.classList.contains('collapsed'));
+}
+
+toggleBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+toggleBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleSidebar(); });
+resizer.addEventListener('dblclick', (e) => {
+  if (e.target === toggleBtn) return;
+  toggleSidebar();
+});
+
+let resizing = false;
+resizer.addEventListener('mousedown', (e) => {
+  if (e.target === toggleBtn) return;
+  resizing = true;
+  document.body.style.cursor = 'col-resize';
+  resizer.classList.add('active');
+  e.preventDefault();
+});
 document.addEventListener('mousemove', (e) => {
   if (!resizing) return;
-  const w = Math.max(160, Math.min(500, e.clientX));
+  const w = Math.max(SB_MIN, Math.min(SB_MAX, e.clientX));
   sidebar.style.width = w + 'px';
+  sidebar.classList.remove('collapsed');
+  sbState.width = w;
+  syncToggleIcon();
 });
-document.addEventListener('mouseup', () => { resizing = false; document.body.style.cursor = ''; resizer.classList.remove('active'); });
+document.addEventListener('mouseup', () => {
+  if (!resizing) return;
+  resizing = false;
+  document.body.style.cursor = '';
+  resizer.classList.remove('active');
+  saveSidebarState(sbState.width, sidebar.classList.contains('collapsed'));
+});
 </script>
 
 </body>

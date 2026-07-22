@@ -2,6 +2,7 @@
 package db
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"os"
@@ -124,6 +125,12 @@ func (d *DB) migrate() error {
 		updated_at TEXT DEFAULT (datetime('now')),
 		PRIMARY KEY (id, user_id, org_id)
 	);
+
+	CREATE TABLE IF NOT EXISTS app_secrets (
+		key TEXT PRIMARY KEY,
+		value BLOB NOT NULL,
+		created_at TEXT DEFAULT (datetime('now'))
+	);
 	`
 	_, err := d.conn.Exec(schema)
 	if err != nil {
@@ -177,6 +184,43 @@ func (d *DB) migrateTasksColumns() error {
 	}
 
 	return nil
+}
+
+// ============================================================
+// 应用密钥
+// ============================================================
+
+// LoadOrCreateSecret 从数据库加载指定密钥；不存在时优先迁移旧文件，再无则生成新密钥。
+// legacyFilePath 非空且 db 无记录时，尝试读取旧文件并迁移入库、删除旧文件。
+func (d *DB) LoadOrCreateSecret(key, legacyFilePath string) ([]byte, error) {
+	// 1. 查 db
+	var val []byte
+	err := d.conn.QueryRow(`SELECT value FROM app_secrets WHERE key = ?`, key).Scan(&val)
+	if err == nil {
+		return val, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("query secret %s: %w", key, err)
+	}
+	// 2. db 无记录，尝试迁移旧文件
+	if legacyFilePath != "" {
+		if data, err := os.ReadFile(legacyFilePath); err == nil {
+			if _, err := d.conn.Exec(`INSERT INTO app_secrets (key, value) VALUES (?, ?)`, key, data); err != nil {
+				return nil, fmt.Errorf("migrate secret %s: %w", key, err)
+			}
+			os.Remove(legacyFilePath) // 迁移成功删除旧文件
+			return data, nil
+		}
+	}
+	// 3. 都没有，生成新密钥
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, fmt.Errorf("generate secret %s: %w", key, err)
+	}
+	if _, err := d.conn.Exec(`INSERT INTO app_secrets (key, value) VALUES (?, ?)`, key, secret); err != nil {
+		return nil, fmt.Errorf("insert secret %s: %w", key, err)
+	}
+	return secret, nil
 }
 
 // ============================================================
@@ -282,6 +326,13 @@ func (d *DB) EnsureOrg(orgID string) error {
 	const q = `INSERT OR IGNORE INTO orgs (id) VALUES (?)`
 	_, err := d.conn.Exec(q, orgID)
 	return err
+}
+
+// HasAnyUser 判断系统是否已存在任意用户（用于 set-password 首次初始化判断）
+func (d *DB) HasAnyUser() (bool, error) {
+	var count int
+	err := d.conn.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
+	return count > 0, err
 }
 
 // GetOrgMembers 获取组织成员列表

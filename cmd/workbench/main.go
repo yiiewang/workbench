@@ -5,12 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 
+	"github.com/kataras/iris/v12"
 	"github.com/yiiewang/workbench/internal/config"
 	"github.com/yiiewang/workbench/internal/db"
 	"github.com/yiiewang/workbench/internal/server"
@@ -46,8 +44,8 @@ func main() {
 	}
 	defer database.Close()
 
-	// 加载 token 秘钥
-	tokenSecret, err := server.LoadOrCreateTokenSecret(staticDir)
+	// 加载 token 秘钥（存入 db，自动迁移旧 .token_secret 文件）
+	tokenSecret, err := database.LoadOrCreateSecret("token", filepath.Join(staticDir, ".token_secret"))
 	if err != nil {
 		log.Fatalf("load token secret failed, err=%v", err)
 	}
@@ -60,22 +58,7 @@ func main() {
 		log.Fatalf("create server failed, err=%v", err)
 	}
 
-	addr := fmt.Sprintf(":%d", cfg.Server.Port)
-
-	// 优雅退出
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: srv.Handler(),
-	}
-
-	go func() {
-		<-sigCh
-		log.Println("server shutting down...")
-		httpServer.Close()
-	}()
+	app := srv.App()
 
 	log.Printf("Workbench started on http://localhost:%d", cfg.Server.Port)
 	log.Printf("Serving directory: %s", staticDir)
@@ -84,7 +67,8 @@ func main() {
 	log.Printf("Log file: %s", logFile)
 	log.Println("Press Ctrl+C to stop")
 
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	addr := fmt.Sprintf(":%d", cfg.Server.Port)
+	if err := app.Run(iris.Addr(addr), iris.WithoutServerError(iris.ErrServerClosed)); err != nil {
 		log.Fatalf("server failed, err=%v", err)
 	}
 	log.Println("server stopped")

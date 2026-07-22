@@ -36,3 +36,33 @@ func TestNaturalLess(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeJoin(t *testing.T) {
+	base := "/srv/static"
+	cases := []struct {
+		name    string
+		rel     string
+		wantOk  bool
+		wantRel string
+	}{
+		{"root", "/", true, "/"},
+		{"empty", "", true, "/"},
+		{"normal", "/foo/bar.md", true, "/foo/bar.md"},
+		{"nested", "/a/b/c", true, "/a/b/c"},
+		{"abs no escape", "/etc/passwd", true, "/etc/passwd"},
+		{"rel traversal", "../../etc/passwd", false, ""},
+		{"rel mid traversal", "foo/../../etc", false, ""},
+		{"rel single dotdot", "../secret", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, rel, ok := safeJoin(base, c.rel)
+			if ok != c.wantOk {
+				t.Fatalf("safeJoin(%q) ok=%v, want %v", c.rel, ok, c.wantOk)
+			}
+			if ok && rel != c.wantRel {
+				t.Errorf("safeJoin(%q) rel=%q, want %q", c.rel, rel, c.wantRel)
+			}
+		})
+	}
+}

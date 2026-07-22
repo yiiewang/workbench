@@ -5,14 +5,17 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/kataras/iris/v12"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // LoadOrCreateTokenSecret 加载或生成 token 签名秘钥
@@ -31,10 +34,25 @@ func LoadOrCreateTokenSecret(serveDir string) ([]byte, error) {
 	return secret, nil
 }
 
-// HashPassword 对密码进行 SHA-256 哈希
-func HashPassword(password string) string {
+// HashPassword 用 bcrypt 对密码加盐哈希，抵御彩虹表攻击
+func HashPassword(password string) (string, error) {
+	b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// VerifyPassword 校验密码哈希，优先 bcrypt，兼容旧 SHA-256 哈希（存量用户登录后改密即升级）
+func VerifyPassword(hash, password string) bool {
+	// 新密码：bcrypt
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err == nil {
+		return true
+	}
+	// 兼容旧 SHA-256 无盐哈希
 	h := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(h[:])
+	old := hex.EncodeToString(h[:])
+	return subtle.ConstantTimeCompare([]byte(hash), []byte(old)) == 1
 }
 
 // GenerateToken 生成带过期时间的 HMAC token
@@ -77,26 +95,39 @@ func ValidateToken(token string, secret []byte) (bool, string) {
 	return true, userID
 }
 
-// ExtractToken 从请求头提取 Bearer token
-func ExtractToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
+// extractTokenFromContext 从 iris.Context 请求头提取 Bearer token
+func extractTokenFromContext(ctx iris.Context) string {
+	auth := ctx.GetHeader("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		return auth[7:]
 	}
 	return ""
 }
 
-// RequireAuth 校验请求中的 token，失败时直接写 401 响应
-func RequireAuth(w http.ResponseWriter, r *http.Request, secret []byte) (userID string, ok bool) {
-	token := ExtractToken(r)
-	if token == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Missing token"})
-		return "", false
+// AuthMiddleware 是 iris 鉴权中间件，校验失败直接返回 401，成功把 userID 写入 ctx.Values()
+func AuthMiddleware(secret []byte) iris.Handler {
+	return func(ctx iris.Context) {
+		token := extractTokenFromContext(ctx)
+		if token == "" {
+			writeJSON(ctx, iris.StatusUnauthorized, map[string]string{"error": "Missing token"})
+			return
+		}
+		valid, uid := ValidateToken(token, secret)
+		if !valid {
+			writeJSON(ctx, iris.StatusUnauthorized, map[string]string{"error": "Invalid or expired token"})
+			return
+		}
+		ctx.Values().Set("userID", uid)
+		ctx.Next()
 	}
-	valid, uid := ValidateToken(token, secret)
-	if !valid {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Invalid or expired token"})
-		return "", false
+}
+
+// currentUserID 从 iris.Context 中取出 AuthMiddleware 写入的 userID
+func currentUserID(ctx iris.Context) string {
+	if v := ctx.Values().Get("userID"); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
 	}
-	return uid, true
+	return ""
 }

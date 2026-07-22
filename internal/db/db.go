@@ -4,6 +4,7 @@ package db
 import (
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,46 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// FlexString 兼容 JSON 中 string 和 number 两种类型的字符串字段
+type FlexString string
+
+// UnmarshalJSON 兼容 string 和 number，统一转为 string
+func (f *FlexString) UnmarshalJSON(data []byte) error {
+	// 尝试作为 string 解析
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*f = FlexString(s)
+		return nil
+	}
+	// 尝试作为 number 解析
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = FlexString(n.String())
+		return nil
+	}
+	return fmt.Errorf("FlexString: cannot unmarshal %s into string", string(data))
+}
+
+// Scan 实现 sql.Scanner 接口，支持从数据库读取
+func (f *FlexString) Scan(src interface{}) error {
+	switch v := src.(type) {
+	case string:
+		*f = FlexString(v)
+	case []byte:
+		*f = FlexString(string(v))
+	case nil:
+		*f = ""
+	default:
+		return fmt.Errorf("FlexString: cannot scan %T into string", src)
+	}
+	return nil
+}
+
+// String 返回底层 string 值
+func (f FlexString) String() string {
+	return string(f)
+}
+
 // DB 封装 SQLite 操作
 type DB struct {
 	conn *sql.DB
@@ -19,18 +60,18 @@ type DB struct {
 
 // TaskItem 任务条目
 type TaskItem struct {
-	ID             string `json:"id"`
-	Title          string `json:"title"`
-	Content        string `json:"content"`
-	Status         string `json:"status"`
-	Priority       string `json:"priority"`
-	Scheduled      string `json:"scheduled"`
-	Due            string `json:"due"`
-	Progress       int    `json:"progress"`
-	Assignee       string `json:"assignee"`
-	PostponedCount int    `json:"postponedCount"`
-	AutoPostponed  bool   `json:"autoPostponed"`
-	SortOrder      int    `json:"sort_order,omitempty"`
+	ID             FlexString `json:"id"`
+	Title          string     `json:"title"`
+	Content        string     `json:"content"`
+	Status         string     `json:"status"`
+	Priority       string     `json:"priority"`
+	Scheduled      string     `json:"scheduled"`
+	Due            string     `json:"due"`
+	Progress       int        `json:"progress"`
+	Assignee       string     `json:"assignee"`
+	PostponedCount int        `json:"postponedCount"`
+	AutoPostponed  bool       `json:"autoPostponed"`
+	SortOrder      int        `json:"sort_order,omitempty"`
 	// 向后兼容旧版字段
 	Text string `json:"text"`
 	Done bool   `json:"done"`
@@ -101,6 +142,7 @@ func (d *DB) migrate() error {
 		id TEXT NOT NULL,
 		org_id TEXT NOT NULL,
 		password_hash TEXT DEFAULT '',
+		version_json TEXT DEFAULT '',
 		created_at TEXT DEFAULT (datetime('now')),
 		updated_at TEXT DEFAULT (datetime('now')),
 		PRIMARY KEY (org_id, id)
@@ -137,7 +179,39 @@ func (d *DB) migrate() error {
 		return err
 	}
 	// 自动迁移：补齐旧表缺失的列
-	return d.migrateTasksColumns()
+	if err := d.migrateTasksColumns(); err != nil {
+		return err
+	}
+	return d.migrateUsersColumns()
+}
+
+// migrateUsersColumns 检测 users 表列，自动补齐缺失列（兼容旧 schema）
+func (d *DB) migrateUsersColumns() error {
+	rows, err := d.conn.Query(`PRAGMA table_info(users)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defVal sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defVal, &pk); err != nil {
+			return err
+		}
+		existing[name] = true
+	}
+
+	if !existing["version_json"] {
+		if _, err := d.conn.Exec(`ALTER TABLE users ADD COLUMN version_json TEXT DEFAULT ''`); err != nil {
+			return fmt.Errorf("add column version_json: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // migrateTasksColumns 检测 tasks 表列，自动补齐缺失列（兼容旧 schema）
@@ -365,8 +439,8 @@ func (d *DB) FindUserOrg(userID string) (string, error) {
 	return orgID, err
 }
 
-// UpsertTasks 批量替换用户任务
-func (d *DB) UpsertTasks(orgID, userID string, tasks []TaskItem) error {
+// UpsertTasks 批量替换用户任务，同时存储客户端发来的 version JSON
+func (d *DB) UpsertTasks(orgID, userID string, tasks []TaskItem, versionJSON string) error {
 	tx, err := d.conn.Begin()
 	if err != nil {
 		return err
@@ -389,12 +463,12 @@ func (d *DB) UpsertTasks(orgID, userID string, tasks []TaskItem) error {
 		if t.AutoPostponed {
 			autoP = 1
 		}
-		if _, err := stmt.Exec(t.ID, userID, orgID, t.Title, t.Content, t.Status, t.Priority, t.Scheduled, t.Due, t.Progress, t.Assignee, t.PostponedCount, autoP, t.SortOrder); err != nil {
+		if _, err := stmt.Exec(string(t.ID), userID, orgID, t.Title, t.Content, t.Status, t.Priority, t.Scheduled, t.Due, t.Progress, t.Assignee, t.PostponedCount, autoP, t.SortOrder); err != nil {
 			return err
 		}
 	}
 
-	_, err = tx.Exec(`UPDATE users SET updated_at = datetime('now') WHERE org_id = ? AND id = ?`, orgID, userID)
+	_, err = tx.Exec(`UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE org_id = ? AND id = ?`, versionJSON, orgID, userID)
 	if err != nil {
 		return err
 	}
@@ -433,7 +507,8 @@ func (d *DB) GetTasksJSON() (map[string]interface{}, error) {
 	orgsMap := make(map[string]map[string]interface{})
 
 	rows, err := d.conn.Query(`
-		SELECT u.org_id, u.id, t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due, t.progress, t.assignee, t.postponed_count, t.auto_postponed, t.sort_order
+		SELECT u.org_id, u.id, u.updated_at, u.version_json,
+		       t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due, t.progress, t.assignee, t.postponed_count, t.auto_postponed, t.sort_order
 		FROM users u
 		LEFT JOIN tasks t ON t.org_id = u.org_id AND t.user_id = u.id
 		ORDER BY u.org_id, u.id, t.sort_order
@@ -444,26 +519,27 @@ func (d *DB) GetTasksJSON() (map[string]interface{}, error) {
 	defer rows.Close()
 
 	type userData struct {
-		tasks []TaskItem
+		tasks       []TaskItem
+		versionJSON string
 	}
 	orgUsers := make(map[string]map[string]*userData)
 
 	for rows.Next() {
-		var orgID, userID string
+		var orgID, userID, updatedAt, versionJSON string
 		var taskID, taskTitle, taskContent, taskStatus, taskPriority, taskScheduled, taskDue, taskAssignee sql.NullString
 		var taskProgress, taskPostponed, taskAutoPostponed, sortOrder sql.NullInt64
-		if err := rows.Scan(&orgID, &userID, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder); err != nil {
+		if err := rows.Scan(&orgID, &userID, &updatedAt, &versionJSON, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder); err != nil {
 			return nil, err
 		}
 		if orgUsers[orgID] == nil {
 			orgUsers[orgID] = make(map[string]*userData)
 		}
 		if orgUsers[orgID][userID] == nil {
-			orgUsers[orgID][userID] = &userData{}
+			orgUsers[orgID][userID] = &userData{versionJSON: versionJSON}
 		}
 		if taskID.Valid {
 			orgUsers[orgID][userID].tasks = append(orgUsers[orgID][userID].tasks, TaskItem{
-				ID:             taskID.String,
+				ID:             FlexString(taskID.String),
 				Title:          taskTitle.String,
 				Content:        taskContent.String,
 				Status:         taskStatus.String,
@@ -486,8 +562,18 @@ func (d *DB) GetTasksJSON() (map[string]interface{}, error) {
 			if tasks == nil {
 				tasks = []TaskItem{}
 			}
+			// 优先使用客户端上传时存储的 version JSON（哈希由客户端计算，确保一致）
+			// 无存储 version 时回退到 {"md5": "init"}
+			var version interface{}
+			if ud.versionJSON != "" {
+				if err := json.Unmarshal([]byte(ud.versionJSON), &version); err != nil {
+					version = map[string]string{"md5": "init"}
+				}
+			} else {
+				version = map[string]string{"md5": "init"}
+			}
 			usersMap[userID] = map[string]interface{}{
-				"version": map[string]string{"md5": "init"},
+				"version": version,
 				"tasks":   tasks,
 			}
 		}

@@ -337,10 +337,13 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 
 	for orgID, rawOrg := range req.Orgs {
 		var org map[string]struct {
-			Tasks []db.TaskItem `json:"tasks"`
+			Tasks   []db.TaskItem  `json:"tasks"`
+			Version json.RawMessage `json:"version"`
 		}
 		if err := json.Unmarshal(rawOrg, &org); err != nil {
-			continue
+			log.Printf("unmarshal org tasks failed, org=%s, err=%v", orgID, err)
+			writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "Invalid tasks JSON"})
+			return
 		}
 		for memberID, member := range org {
 			if memberID != userID {
@@ -351,7 +354,12 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 				writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 				return
 			}
-			if err := s.db.UpsertTasks(orgID, memberID, member.Tasks); err != nil {
+			// 存储客户端发来的 version JSON，GET 时原样回传，确保哈希一致
+			versionJSON := ""
+			if len(member.Version) > 0 && string(member.Version) != "null" {
+				versionJSON = string(member.Version)
+			}
+			if err := s.db.UpsertTasks(orgID, memberID, member.Tasks, versionJSON); err != nil {
 				log.Printf("upsert tasks failed, org=%s, user=%s, err=%v", orgID, memberID, err)
 				writeJSON(ctx, iris.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 				return

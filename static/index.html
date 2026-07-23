@@ -166,6 +166,33 @@
     border-left: 1px solid var(--tab-border);
     white-space: nowrap;
   }
+  .share-menu {
+    position: absolute;
+    top: 35px;
+    right: 0;
+    z-index: 20;
+    display: none;
+    flex-direction: column;
+    background: var(--bg);
+    border: 1px solid var(--tab-border);
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    min-width: 160px;
+    overflow: hidden;
+  }
+  .share-menu.show { display: flex; }
+  .share-menu-item {
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .share-menu-item:hover { background: var(--hover); color: var(--accent); }
+  .share-menu-item .share-desc { color: var(--text-muted); font-size: 10px; }
   .tab-download {
     position: absolute;
     top: 0;
@@ -436,6 +463,16 @@
   <div class="tab-share" id="shareBtn" title="Copy shareable link" style="display:none">
     <svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm-.98 4.3l1.19.88-4.42 5.64-1.21-.91 4.44-5.61zM5.5 8a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm8 5.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" fill="currentColor"/></svg>
     <span id="shareLabel">Share</span>
+    <div class="share-menu" id="shareMenu">
+      <div class="share-menu-item" data-mode="ui">
+        🖥️ UI 链接
+        <span class="share-desc">浏览器打开</span>
+      </div>
+      <div class="share-menu-item" data-mode="raw">
+        📄 内容链接
+        <span class="share-desc">curl 下载</span>
+      </div>
+    </div>
   </div>
   <div class="tab-download" id="downloadBtn" title="Download this file" style="display:none">
     <svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1a.5.5 0 01.5.5v7.793l2.146-2.147a.5.5 0 01.708.708l-3 3a.5.5 0 01-.708 0l-3-3a.5.5 0 11.708-.708L7.5 9.293V1.5A.5.5 0 018 1zM2 13.5a.5.5 0 01.5-.5h11a.5.5 0 010 1h-11a.5.5 0 01-.5-.5z" fill="currentColor"/></svg>
@@ -461,10 +498,34 @@ const shareLabel = document.getElementById('shareLabel');
 const downloadBtn = document.getElementById('downloadBtn');
 let currentInnerHash = '';
 
-shareBtn.addEventListener('click', () => {
-  const url = window.location.origin + '/#' + activeTabPath + currentInnerHash;
-  copyToClipboard(url);
-  showToast('Link copied to clipboard');
+const shareMenu = document.getElementById('shareMenu');
+
+// 点击 Share 按钮切换菜单
+shareBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  shareMenu.classList.toggle('show');
+});
+
+// 点击菜单项复制对应链接
+shareMenu.querySelectorAll('.share-menu-item').forEach(item => {
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const mode = item.dataset.mode;
+    let url;
+    if (mode === 'ui') {
+      url = window.location.origin + '/#' + activeTabPath + currentInnerHash;
+    } else {
+      url = window.location.origin + '/__raw__?path=' + activeTabPath;
+    }
+    copyToClipboard(url);
+    shareMenu.classList.remove('show');
+    showToast(mode === 'ui' ? 'UI 链接已复制' : '内容链接已复制');
+  });
+});
+
+// 点击页面其他地方关闭菜单
+document.addEventListener('click', () => {
+  shareMenu.classList.remove('show');
 });
 
 downloadBtn.addEventListener('click', () => {
@@ -838,7 +899,37 @@ function renderEditor(path, name, ext, size) {
   if (ext === 'json') {
     editorArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
     fetch(path).then(r => r.text()).then(text => {
-      editorArea.innerHTML = renderJson(text);
+      const toolbar = `<div style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-bottom:1px solid var(--tab-border);background:var(--header-bg);font-size:12px;">
+        <button class="btn-raw-json" data-action="copy" style="padding:3px 10px;cursor:pointer;border:1px solid var(--tab-border);border-radius:4px;background:var(--bg);color:var(--text);">📋 Copy raw</button>
+        <button class="btn-raw-json" data-action="toggle" style="padding:3px 10px;cursor:pointer;border:1px solid var(--tab-border);border-radius:4px;background:var(--bg);color:var(--text);">{ } Raw view</button>
+      </div>`;
+      const rawHtml = `<pre class="text-preview" style="margin:0;padding:16px 24px;">${escapeHtml(text)}</pre>`;
+      const viewerHtml = renderJson(text);
+      editorArea.innerHTML = `<div style="display:flex;flex-direction:column;height:100%;">${toolbar}<div class="json-content" style="flex:1;overflow:auto;">${viewerHtml}</div></div>`;
+      // Store raw text for copy/toggle
+      editorArea.querySelector('.json-content').dataset.raw = text;
+      // Copy raw JSON
+      editorArea.querySelectorAll('.btn-raw-json').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (btn.dataset.action === 'copy') {
+            const raw = editorArea.querySelector('.json-content').dataset.raw;
+            copyToClipboard(raw);
+            showToast('JSON copied to clipboard');
+          } else if (btn.dataset.action === 'toggle') {
+            const content = editorArea.querySelector('.json-content');
+            const isRaw = content.dataset.mode === 'raw';
+            if (isRaw) {
+              content.innerHTML = viewerHtml;
+              content.dataset.mode = 'viewer';
+              btn.textContent = '{ } Raw view';
+            } else {
+              content.innerHTML = rawHtml;
+              content.dataset.mode = 'raw';
+              btn.textContent = '▼ Tree view';
+            }
+          }
+        });
+      });
     }).catch(err => {
       editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
     });

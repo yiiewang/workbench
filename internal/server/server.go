@@ -63,6 +63,7 @@ func (s *Server) App() *iris.Application {
 	app.Get("/__map__", s.handleMap)
 	app.Get("/__map__.json", s.handleMap)
 	app.Get("/__tree__", s.handleTree)
+	app.Get("/__raw__", s.handleRaw)
 	app.Get("/api/org-members", s.handleOrgMembers)
 	app.Post("/api/login", s.handleLogin)
 	app.Post("/api/set-password", s.handleSetPassword)
@@ -460,6 +461,30 @@ func (s *Server) isHidden(name string) bool {
 // ============================================================
 // 静态文件 + 目录列表
 // ============================================================
+
+// handleRaw 返回原始文件内容（供 curl 等工具直接获取）
+// 用法: GET /__raw__?path=/goModule/v2.3.9.json
+func (s *Server) handleRaw(ctx iris.Context) {
+	relPath := ctx.URLParam("path")
+	if relPath == "" {
+		writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "path parameter is required"})
+		return
+	}
+
+	fsPath, _, ok := safeJoin(s.serDirAbs, relPath)
+	if !ok {
+		ctx.NotFound()
+		return
+	}
+
+	info, err := os.Stat(fsPath)
+	if err != nil || info.IsDir() {
+		ctx.NotFound()
+		return
+	}
+
+	ctx.ServeFile(fsPath)
+}
 
 func (s *Server) handleStatic(ctx iris.Context) {
 	if s.handleRouteRedirect(ctx) {

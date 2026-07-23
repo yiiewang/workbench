@@ -2926,6 +2926,12 @@
                         return { hasConflict: false, action: 'none' };
                     }
 
+                    // 迁移：baseMd5 为旧占位符 "init"，无法正确判断冲突，强制下载
+                    if (localVersion.baseMd5 === 'init') {
+                        console.log('[checkConflict] migration: baseMd5 is "init" (old placeholder), downloading from server');
+                        return { hasConflict: false, action: 'download' };
+                    }
+
                     // 判断本地是否有修改（当前 md5 != 基准 md5）
                     const localModified = localVersion.md5 !== localVersion.baseMd5;
                     // 判断服务器是否有修改（服务器当前 md5 != 本地基准 md5）
@@ -3094,7 +3100,9 @@
                             tasks.value = serverTasks;
                             // 更新 localStorage（包含版本信息）
                             // 直接使用服务器 version，不重算哈希，确保 md5 与服务器一致
-                            const wrapped = { version: serverVersion, tasks: serverTasks };
+                            // 修正 baseMd5 = md5，标记客户端与服务器已同步
+                            const syncedVersion = { ...serverVersion, baseMd5: serverVersion.md5, baseTimestamp: serverVersion.timestamp };
+                            const wrapped = { version: syncedVersion, tasks: serverTasks };
                             localStorage.setItem(userKey, JSON.stringify(wrapped));
                         } else if (localTasks && localTasks.length > 0) {
                             // 服务器无数据，使用本地数据

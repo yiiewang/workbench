@@ -141,7 +141,7 @@
     overflow-x: auto;
     overflow-y: hidden;
     flex-shrink: 0;
-    padding-right: 80px;  /* 给 share 按钮留位置 */
+    padding-right: 150px;  /* 给 download + share 按钮留位置 */
     scrollbar-width: thin;
     scrollbar-color: #ccc transparent;
   }
@@ -166,7 +166,25 @@
     border-left: 1px solid var(--tab-border);
     white-space: nowrap;
   }
+  .tab-download {
+    position: absolute;
+    top: 0;
+    right: 76px;
+    z-index: 10;
+    padding: 0 14px;
+    height: 35px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    background: var(--header-bg);
+    border-left: 1px solid var(--tab-border);
+    white-space: nowrap;
+  }
   .tab-share:hover { color: var(--accent); background: var(--hover); }
+  .tab-download:hover { color: var(--accent); background: var(--hover); }
   .tab-share.copied { color: #1a7f37; }
 
   /* Toast 提示 */
@@ -419,6 +437,10 @@
     <svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm-.98 4.3l1.19.88-4.42 5.64-1.21-.91 4.44-5.61zM5.5 8a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm8 5.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" fill="currentColor"/></svg>
     <span id="shareLabel">Share</span>
   </div>
+  <div class="tab-download" id="downloadBtn" title="Download this file" style="display:none">
+    <svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1a.5.5 0 01.5.5v7.793l2.146-2.147a.5.5 0 01.708.708l-3 3a.5.5 0 01-.708 0l-3-3a.5.5 0 11.708-.708L7.5 9.293V1.5A.5.5 0 018 1zM2 13.5a.5.5 0 01.5-.5h11a.5.5 0 010 1h-11a.5.5 0 01-.5-.5z" fill="currentColor"/></svg>
+    <span>Download</span>
+  </div>
   <div class="editor-area" id="editorArea">
     <div class="editor-empty">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
@@ -436,12 +458,23 @@ const openTabs = new Map(); // path -> { name, ext, size }
 let activeTabPath = '';
 const shareBtn = document.getElementById('shareBtn');
 const shareLabel = document.getElementById('shareLabel');
+const downloadBtn = document.getElementById('downloadBtn');
 let currentInnerHash = '';
 
 shareBtn.addEventListener('click', () => {
   const url = window.location.origin + '/#' + activeTabPath + currentInnerHash;
   copyToClipboard(url);
   showToast('Link copied to clipboard');
+});
+
+downloadBtn.addEventListener('click', () => {
+  if (!activeTabPath) return;
+  const a = document.createElement('a');
+  a.href = activeTabPath;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 });
 
 function copyToClipboard(text) {
@@ -746,10 +779,12 @@ function activateTab(path) {
   tabBar.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.path === path));
   if (!path) {
     shareBtn.style.display = 'none';
+    downloadBtn.style.display = 'none';
     showWelcome();
     return;
   }
   shareBtn.style.display = 'flex';
+  downloadBtn.style.display = 'flex';
   const info = openTabs.get(path);
   if (!info) return;
   renderEditor(path, info.name, info.ext, info.size);
@@ -796,7 +831,7 @@ function renderEditor(path, name, ext, size) {
   if (['html','htm'].includes(ext)) {
     // src 直接带上内嵌锚点，iframe 加载完成后浏览器会自动滚到对应位置
     const src = path + (currentInnerHash || '');
-    editorArea.innerHTML = `<iframe id="previewFrame" src="${escapeHtml(src)}" sandbox="allow-same-origin" style="width:100%;height:100%;border:none;background:#fff;"></iframe>`;
+    editorArea.innerHTML = `<iframe id="previewFrame" src="${escapeHtml(src)}" sandbox="allow-scripts allow-forms allow-popups" style="width:100%;height:100%;border:none;background:#fff;"></iframe>`;
     watchIframeHash();
     return;
   }

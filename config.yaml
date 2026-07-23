@@ -4,8 +4,6 @@ server:
   static_dir: ./preview
   hidden:
     - "index.html"
-    - "todo.html"
-    - "*.json"
     - ".*"
 
 database:

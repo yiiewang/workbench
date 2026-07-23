@@ -72,6 +72,13 @@ func (s *Server) App() *iris.Application {
 	app.Get("/tasks.json", s.getTasksJSON)
 	app.Put("/tasks.json", AuthMiddleware(s.tokenSecret), s.putTasksJSON)
 
+	// CORS 预检请求（sandboxed iframe null origin）
+	app.Options("/api/me", func(ctx iris.Context) { ctx.StatusCode(204) })
+	app.Options("/api/login", func(ctx iris.Context) { ctx.StatusCode(204) })
+	app.Options("/api/set-password", func(ctx iris.Context) { ctx.StatusCode(204) })
+	app.Options("/api/org-members", func(ctx iris.Context) { ctx.StatusCode(204) })
+	app.Options("/tasks.json", func(ctx iris.Context) { ctx.StatusCode(204) })
+
 	// 静态文件兜底路由：匹配所有其他路径
 	app.Get("/{path:path}", s.handleStatic)
 	app.Post("/{path:path}", s.handleStatic)
@@ -663,6 +670,21 @@ func (s *Server) securityHeadersMiddleware() iris.Handler {
 		ctx.Header("X-Content-Type-Options", "nosniff")
 		ctx.Header("X-Frame-Options", "SAMEORIGIN")
 		ctx.Header("Referrer-Policy", "no-referrer")
+
+		// CORS for sandboxed iframe（null origin）— 仅 API 路径
+		// 预览窗口 iframe 使用 sandbox（无 allow-same-origin），origin 为 null
+		// 不设置 Allow-Credentials，因为使用 Bearer token 而非 cookie
+		path := ctx.Path()
+		if strings.HasPrefix(path, "/api/") || path == "/tasks.json" {
+			ctx.Header("Access-Control-Allow-Origin", "null")
+			ctx.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			ctx.Header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+			if ctx.Method() == "OPTIONS" {
+				ctx.StatusCode(204)
+				return
+			}
+		}
+
 		ctx.Next()
 	}
 }

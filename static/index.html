@@ -390,47 +390,47 @@
   .file-detail .btn-download:hover { background: #005a9e; }
 
   /* Resizer */
-.resizer {
-  position: relative;
-  width: 4px;
-  cursor: col-resize;
-  background: transparent;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-.resizer:hover, .resizer.active { background: var(--border); }
-.resizer-toggle {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 16px;
-  height: 36px;
-  border: 1px solid var(--border);
-  background: var(--sidebar-bg);
-  color: var(--text-dim);
-  border-radius: 3px;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  opacity: 0;
-  transition: opacity 0.15s, background 0.15s, color 0.15s;
-  z-index: 5;
-  user-select: none;
-}
-.resizer:hover .resizer-toggle,
-.sidebar.collapsed ~ .resizer .resizer-toggle,
-.resizer.active .resizer-toggle {
-  opacity: 1;
-}
-.resizer-toggle:hover {
-  background: var(--hover);
-  color: var(--text);
-}
+  .resizer {
+    position: relative;
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    flex-shrink: 0;
+    transition: background 0.15s;
+  }
+  .resizer:hover, .resizer.active { background: var(--border); }
+  .resizer-toggle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 16px;
+    height: 36px;
+    border: 1px solid var(--border);
+    background: var(--sidebar-bg);
+    color: var(--text-dim);
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    z-index: 5;
+    user-select: none;
+  }
+  .resizer:hover .resizer-toggle,
+  .sidebar.collapsed ~ .resizer .resizer-toggle,
+  .resizer.active .resizer-toggle {
+    opacity: 1;
+  }
+  .resizer-toggle:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
 
   /* Spinner */
   .spinner {
@@ -487,57 +487,26 @@
 </div>
 
 <script>
+// ============================================================
+// DOM References
+// ============================================================
 const treeEl = document.getElementById('tree');
 const editorArea = document.getElementById('editorArea');
 const tabBar = document.getElementById('tabBar');
+const shareBtn = document.getElementById('shareBtn');
+const shareMenu = document.getElementById('shareMenu');
+const downloadBtn = document.getElementById('downloadBtn');
 
+// ============================================================
+// State
+// ============================================================
 const openTabs = new Map(); // path -> { name, ext, size }
 let activeTabPath = '';
-const shareBtn = document.getElementById('shareBtn');
-const shareLabel = document.getElementById('shareLabel');
-const downloadBtn = document.getElementById('downloadBtn');
 let currentInnerHash = '';
 
-const shareMenu = document.getElementById('shareMenu');
-
-// 点击 Share 按钮切换菜单
-shareBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  shareMenu.classList.toggle('show');
-});
-
-// 点击菜单项复制对应链接
-shareMenu.querySelectorAll('.share-menu-item').forEach(item => {
-  item.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const mode = item.dataset.mode;
-    let url;
-    if (mode === 'ui') {
-      url = window.location.origin + '/#' + activeTabPath + currentInnerHash;
-    } else {
-      url = window.location.origin + '/__raw__?path=' + activeTabPath;
-    }
-    copyToClipboard(url);
-    shareMenu.classList.remove('show');
-    showToast(mode === 'ui' ? 'UI 链接已复制' : '内容链接已复制');
-  });
-});
-
-// 点击页面其他地方关闭菜单
-document.addEventListener('click', () => {
-  shareMenu.classList.remove('show');
-});
-
-downloadBtn.addEventListener('click', () => {
-  if (!activeTabPath) return;
-  const a = document.createElement('a');
-  a.href = activeTabPath;
-  a.download = '';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-});
-
+// ============================================================
+// Utilities
+// ============================================================
 function copyToClipboard(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
@@ -566,7 +535,22 @@ function showToast(msg) {
   toastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
 }
 
-// ─── Icons (VS Code Codicons SVG) ───
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function formatSize(bytes) {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+// ============================================================
+// Icons (VS Code Codicons SVG)
+// ============================================================
 const ICONS = {
   chevron: '<svg viewBox="0 0 16 16"><path d="M5.7 13.7L4.3 12.3 8.6 8 4.3 3.7 5.7 2.3l6 6-6 6z"/></svg>',
   folder: '<svg viewBox="0 0 16 16"><path d="M1.5 3h4l1 1h7v9h-12V3z" fill="currentColor"/></svg>',
@@ -611,7 +595,9 @@ function fileIconSvg(ext, name) {
   return ICONS.defaultFile;
 }
 
-// ─── Tree ───
+// ============================================================
+// File Tree
+// ============================================================
 async function fetchTree(path) {
   const resp = await fetch(`/__tree__?path=${encodeURIComponent(path)}`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -811,7 +797,9 @@ function renderTree(parentEl, data, depth) {
   }
 }
 
-// ─── Tabs ───
+// ============================================================
+// Tabs
+// ============================================================
 function openTab(path, name, ext, size) {
   if (openTabs.has(path)) {
     activateTab(path);
@@ -869,7 +857,9 @@ function closeTab(path, tabEl) {
   }
 }
 
-// ─── Editor ───
+// ============================================================
+// Editor Rendering
+// ============================================================
 function showWelcome() {
   editorArea.innerHTML = `
     <div class="editor-empty">
@@ -943,6 +933,12 @@ function renderEditor(path, name, ext, size) {
         loadMermaid().then(() => {
           try { mermaid.run({ querySelector: '.markdown-body .language-mermaid' }); } catch(e) {}
         });
+        // 滚动到 anchor（处理 #/path#anchor 格式的 inner hash）
+        if (currentInnerHash) {
+          const anchorId = decodeURIComponent(currentInnerHash.replace(/^#/, ''));
+          const target = document.getElementById(anchorId) || editorArea.querySelector(`[name="${anchorId}"]`);
+          if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
       }).catch(err => {
         editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
       });
@@ -1010,7 +1006,11 @@ function row(key, value, indent, isEmpty, isInline) {
   return `<div style="padding-left:${indent}px;line-height:1.6;"><span class="json-key">${escapeHtml(key)}</span>: ${value}</div>`;
 }
 
-// 折叠/展开交互
+// ============================================================
+// UI Events (JSON toggle, markdown link interception, Share/Download)
+// ============================================================
+
+// 折叠/展开 JSON 节点
 document.addEventListener('click', (e) => {
   if (!e.target.classList.contains('json-toggle')) return;
   const target = document.getElementById(e.target.dataset.target);
@@ -1019,6 +1019,80 @@ document.addEventListener('click', (e) => {
   e.target.textContent = collapsed ? '▶' : '▼';
 });
 
+// 拦截编辑器内的本地文件链接（markdown 中的跨文件跳转）
+// 相对路径 → 转换为 hash 路由，走文件浏览器
+editorArea.addEventListener('click', (e) => {
+  const a = e.target.closest('a');
+  if (!a) return;
+  const href = a.getAttribute('href');
+  if (!href) return;
+  // 跳过外部链接、纯锚点、邮件等
+  if (/^(https?:|mailto:|tel:|#)/i.test(href)) return;
+
+  e.preventDefault();
+  // 拆分路径和 anchor
+  const [linkPath, linkAnchor] = href.split('#');
+  // 相对于当前激活文件所在目录解析
+  const baseDir = activeTabPath ? activeTabPath.replace(/\/[^/]+$/, '') : '';
+  let resolved = linkPath;
+  if (!linkPath.startsWith('/')) {
+    // 相对路径拼接
+    const parts = (baseDir + '/' + linkPath).split('/');
+    const stack = [];
+    for (const p of parts) {
+      if (p === '' || p === '.') continue;
+      if (p === '..') stack.pop();
+      else stack.push(p);
+    }
+    resolved = '/' + stack.join('/');
+  }
+  // 转换为 hash 路由（不编码，由浏览器处理，hashchange 触发时 getHashPath 会 decode）
+  const newHash = '#' + resolved + (linkAnchor ? '#' + linkAnchor : '');
+  window.location.hash = newHash;
+});
+
+// Share 按钮下拉菜单
+shareBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  shareMenu.classList.toggle('show');
+});
+
+// 点击菜单项复制对应链接
+shareMenu.querySelectorAll('.share-menu-item').forEach(item => {
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const mode = item.dataset.mode;
+    let url;
+    if (mode === 'ui') {
+      url = window.location.origin + '/#' + activeTabPath + currentInnerHash;
+    } else {
+      url = window.location.origin + activeTabPath;
+    }
+    copyToClipboard(url);
+    shareMenu.classList.remove('show');
+    showToast(mode === 'ui' ? 'UI 链接已复制' : '内容链接已复制');
+  });
+});
+
+// 点击页面其他地方关闭 Share 菜单
+document.addEventListener('click', () => {
+  shareMenu.classList.remove('show');
+});
+
+// Download 按钮
+downloadBtn.addEventListener('click', () => {
+  if (!activeTabPath) return;
+  const a = document.createElement('a');
+  a.href = activeTabPath;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+});
+
+// ============================================================
+// File Detail (binary files)
+// ============================================================
 function showFileDetail(name, path, ext, size) {
   editorArea.innerHTML = `
     <div class="file-detail">
@@ -1033,19 +1107,9 @@ function showFileDetail(name, path, ext, size) {
     </div>`;
 }
 
-function formatSize(bytes) {
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-}
-
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
-}
-
+// ============================================================
+// iframe Hash Sync
+// ============================================================
 // 监听 iframe 内锚点跳转，同步到外层地址栏
 let iframeHashTimer = null;
 function watchIframeHash() {
@@ -1059,25 +1123,10 @@ function watchIframeHash() {
     } catch(e) { clearInterval(iframeHashTimer); }
   }, 300);
 }
-function syncIframeHash() {
-  if (iframeHashTimer) clearInterval(iframeHashTimer);
-  let lastHash = '';
-  iframeHashTimer = setInterval(() => {
-    const iframe = document.getElementById('previewFrame');
-    if (!iframe) return;
-    try {
-      const h = iframe.contentWindow.location.hash;
-      if (h !== lastHash) {
-        lastHash = h;
-        const newHash = activeTabPath + h;
-        history.replaceState({ path: activeTabPath }, '', '#' + newHash);
-      }
-    } catch(e) {
-      clearInterval(iframeHashTimer);
-    }
-  }, 200);
-}
 
+// ============================================================
+// CDN Loaders (marked, DOMPurify, Mermaid)
+// ============================================================
 let mermaidReady = null;
 function loadMermaid() {
   if (mermaidReady) return mermaidReady;
@@ -1138,7 +1187,9 @@ function loadDomPurify() {
   return domPurifyReady;
 }
 
-// ─── Hash routing ───
+// ============================================================
+// Hash Routing
+// ============================================================
 function updateHash(path) {
   if (history.state && history.state.path === path) return;
   history.pushState({ path }, '', '#' + path);
@@ -1178,7 +1229,23 @@ window.addEventListener('popstate', (e) => {
   }
 });
 
-// ─── Init ───
+window.addEventListener('hashchange', () => {
+  const p = getHashPath();
+  if (!p) return;
+  navigateToPath(p).finally(() => {
+    if (openTabs.has(p)) {
+      activateTab(p);
+    } else {
+      const name = p.split('/').pop();
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      openTab(p, name, ext, 0);
+    }
+  });
+});
+
+// ============================================================
+// Init
+// ============================================================
 (async () => {
   try {
     const data = await fetchTree('/');
@@ -1196,7 +1263,9 @@ window.addEventListener('popstate', (e) => {
   }
 })();
 
-// ─── Resizer & Sidebar Toggle ───
+// ============================================================
+// Resizer & Sidebar Toggle
+// ============================================================
 const resizer = document.getElementById('resizer');
 const sidebar = document.querySelector('.sidebar');
 const SIDEBAR_KEY = 'workbench-sidebar';

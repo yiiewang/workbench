@@ -63,7 +63,6 @@ func (s *Server) App() *iris.Application {
 	app.Get("/__map__", s.handleMap)
 	app.Get("/__map__.json", s.handleMap)
 	app.Get("/__tree__", s.handleTree)
-	app.Get("/__raw__", s.handleRaw)
 	app.Get("/api/org-members", s.handleOrgMembers)
 	app.Post("/api/login", s.handleLogin)
 	app.Post("/api/set-password", s.handleSetPassword)
@@ -82,7 +81,6 @@ func (s *Server) App() *iris.Application {
 
 	// 静态文件兜底路由：匹配所有其他路径
 	app.Get("/{path:path}", s.handleStatic)
-	app.Post("/{path:path}", s.handleStatic)
 
 	return app
 }
@@ -345,7 +343,7 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 
 	for orgID, rawOrg := range req.Orgs {
 		var org map[string]struct {
-			Tasks   []db.TaskItem  `json:"tasks"`
+			Tasks   []db.TaskItem   `json:"tasks"`
 			Version json.RawMessage `json:"version"`
 		}
 		if err := json.Unmarshal(rawOrg, &org); err != nil {
@@ -462,28 +460,29 @@ func (s *Server) isHidden(name string) bool {
 // 静态文件 + 目录列表
 // ============================================================
 
-// handleRaw 返回原始文件内容（供 curl 等工具直接获取）
-// 用法: GET /__raw__?path=/goModule/v2.3.9.json
-func (s *Server) handleRaw(ctx iris.Context) {
-	relPath := ctx.URLParam("path")
-	if relPath == "" {
-		writeJSON(ctx, iris.StatusBadRequest, map[string]string{"error": "path parameter is required"})
-		return
-	}
-
+// resolveStaticPath 安全解析静态文件路径，防止目录穿越和符号链接越界
+// 当 allow_symlink=false 时，解析符号链接后校验实际路径仍在 static_dir 下
+func (s *Server) resolveStaticPath(relPath string) (string, bool) {
 	fsPath, _, ok := safeJoin(s.serDirAbs, relPath)
 	if !ok {
-		ctx.NotFound()
-		return
+		return "", false
 	}
-
-	info, err := os.Stat(fsPath)
-	if err != nil || info.IsDir() {
-		ctx.NotFound()
-		return
+	if s.cfg.Server.AllowSymlink {
+		return fsPath, true
 	}
-
-	ctx.ServeFile(fsPath)
+	// 严格模式：解析符号链接后校验路径仍在 static_dir 下
+	realPath, err := filepath.EvalSymlinks(fsPath)
+	if err != nil {
+		return "", false
+	}
+	realBase, err := filepath.EvalSymlinks(s.serDirAbs)
+	if err != nil {
+		return "", false
+	}
+	if realPath != realBase && !strings.HasPrefix(realPath, realBase+string(filepath.Separator)) {
+		return "", false
+	}
+	return realPath, true
 }
 
 func (s *Server) handleStatic(ctx iris.Context) {
@@ -505,7 +504,7 @@ func (s *Server) handleStatic(ctx iris.Context) {
 		}
 	}
 
-	fsPath, _, ok := safeJoin(s.serDirAbs, reqPath)
+	fsPath, ok := s.resolveStaticPath(reqPath)
 	if !ok {
 		ctx.NotFound()
 		return

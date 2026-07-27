@@ -21,9 +21,10 @@ type Config struct {
 
 // ServerConfig HTTP 服务配置
 type ServerConfig struct {
-	Port      int      `yaml:"port"`
-	StaticDir string   `yaml:"static_dir"`
-	Hidden    []string `yaml:"hidden"`
+	Port        int      `yaml:"port"`
+	StaticDir   string   `yaml:"static_dir"`
+	Hidden      []string `yaml:"hidden"`
+	AllowSymlink bool    `yaml:"allow_symlink"`
 }
 
 // DBConfig 数据库配置
@@ -122,7 +123,7 @@ func ResolvePath(p string) string {
 	return p
 }
 
-// ApplyEnv 用环境变量覆盖配置（PORT, STATIC_DIR, DB_PATH, LOG_DIR）
+// ApplyEnv 用环境变量覆盖配置（PORT, STATIC_DIR, DB_PATH, LOG_DIR, ALLOW_SYMLINK）
 func ApplyEnv(cfg *Config) {
 	if v := os.Getenv("PORT"); v != "" {
 		var port int
@@ -138,5 +139,9 @@ func ApplyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("LOG_DIR"); v != "" {
 		cfg.Logging.Dir = v
+	}
+	// ALLOW_SYMLINK=true 开启符号链接支持（默认关闭，严格校验资源路径必须在 static_dir 下）
+	if v := os.Getenv("ALLOW_SYMLINK"); v == "true" || v == "1" {
+		cfg.Server.AllowSymlink = true
 	}
 }

@@ -1,7 +1,7 @@
 # Workbench configuration
 server:
   port: 80
-  static_dir: ./preview
+  static_dir: ./static
   # 严格校验资源路径：符号链接指向 static_dir 外的文件时返回 404
   # 默认关闭符号链接支持，需通过环境变量 ALLOW_SYMLINK=true 开启
   allow_symlink: false

@@ -1,16 +1,26 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.token_secret
+
+# 系统/编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 运行时产物
 nohup.out
 *.log
-.DS_Store
+.token_secret
 
 # Go
 /workbench
-*.db
+build/
 vendor/
+
+# 数据
+*.db
 /data/
 /preview/
-/preview/
-build

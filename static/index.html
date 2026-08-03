@@ -5,8 +5,30 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Workbench</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='1' width='12' height='14' rx='1' fill='%23007acc'/><path d='M6 4h4l2 2v7H4V4z' fill='%23fff' opacity='.8'/></svg>">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+  <script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
+  <script src="/common.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  [v-cloak] { display: none !important; }
+
+  /* 时间选择器弹层：直接覆盖 Element Plus 默认样式，限制宽度并提高层级 */
+  /* 仅作用于本页面内的 el-date-range-picker，todo 在 iframe 内不受影响 */
+  .el-date-range-picker.el-popper {
+    max-width: 580px !important;
+  }
+  .el-date-range-picker.el-popper .el-date-range-picker__content {
+    padding: 8px !important;
+  }
+  .el-date-range-picker.el-popper .el-date-range-picker__header {
+    padding: 8px 12px !important;
+  }
+
+  /* share modal 使用与 todo 一致的 z-index: 1000，让 Element Plus 默认弹层(2000) 自然浮于其上 */
+  .modal-mask.share-modal {
+    z-index: 1000;
+  }
   :root {
     --bg: #ffffff;
     --sidebar-bg: #f3f3f3;
@@ -38,6 +60,52 @@
     color: var(--text);
     height: 100vh;
     display: flex;
+  }
+
+  /* Activity Bar — 功能门户入口 */
+  .activity-bar {
+    width: 48px;
+    flex-shrink: 0;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 8px;
+    gap: 4px;
+  }
+  .activity-item {
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: color 0.15s, background 0.15s;
+    position: relative;
+    text-decoration: none;
+  }
+  .activity-item:hover { color: var(--text); background: var(--hover); }
+  .activity-item.active { color: var(--text); border-left-color: var(--accent); }
+  .activity-item svg { width: 24px; height: 24px; }
+  .activity-item .badge {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    font-size: 9px;
+    background: var(--accent);
+    color: #fff;
+    padding: 1px 4px;
+    border-radius: 8px;
+    line-height: 1.2;
+  }
+  .activity-divider {
+    width: 32px;
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
   }
 
   /* Sidebar */
@@ -166,33 +234,6 @@
     border-left: 1px solid var(--tab-border);
     white-space: nowrap;
   }
-  .share-menu {
-    position: absolute;
-    top: 35px;
-    right: 0;
-    z-index: 20;
-    display: none;
-    flex-direction: column;
-    background: var(--bg);
-    border: 1px solid var(--tab-border);
-    border-radius: 4px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    min-width: 160px;
-    overflow: hidden;
-  }
-  .share-menu.show { display: flex; }
-  .share-menu-item {
-    padding: 8px 14px;
-    cursor: pointer;
-    font-size: 12px;
-    color: var(--text);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-  }
-  .share-menu-item:hover { background: var(--hover); color: var(--accent); }
-  .share-menu-item .share-desc { color: var(--text-muted); font-size: 10px; }
   .tab-download {
     position: absolute;
     top: 0;
@@ -441,6 +482,166 @@
     animation: spin 0.6s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Login Modal */
+  .modal-mask {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9000;
+  }
+  .modal-content {
+    background: var(--bg);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+    max-width: 400px;
+    width: 90%;
+    overflow: visible;
+  }
+  .modal-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .modal-body { padding: 20px 24px; }
+  .modal-actions {
+    padding: 12px 24px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .form-group { margin-bottom: 14px; }
+  .form-group label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .form-group input, .form-group select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 13px;
+    box-sizing: border-box;
+  }
+  .form-group input:focus, .form-group select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .form-group .hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+  .btn {
+    padding: 7px 16px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .btn:hover { background: var(--hover); }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .btn-primary:hover { background: #005a9e; }
+  .btn-danger {
+    background: #d73a49;
+    color: #fff;
+    border-color: #d73a49;
+  }
+  .btn-danger:hover { background: #b31d2a; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+  /* User badge in activity bar */
+  .user-badge {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    z-index: 2;
+  }
+  .user-badge:hover { opacity: 0.85; }
+
+  /* Share Panel */
+  .share-panel {
+    display: none;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+  }
+  .share-panel.active { display: flex; }
+  .share-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+  .share-item {
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    cursor: default;
+  }
+  .share-item:hover { background: var(--hover); }
+  .share-item-path {
+    font-size: 12px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 3px;
+  }
+  .share-item-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .share-item-meta .tag {
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--code-bg);
+  }
+  .share-item-meta .tag.file { color: #0550ae; }
+  .share-item-meta .tag.dir { color: #1a7f37; }
+  .share-item-meta .tag.lock { color: #cf222e; }
+  .share-item-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .share-item-actions .btn-sm {
+    padding: 2px 8px;
+    font-size: 11px;
+  }
+  .share-panel-empty {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  /* Sidebar view switching */
+  .tree-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .tree-panel.active { display: flex; }
 </style>
 </head>
 <body>
@@ -448,10 +649,85 @@
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
+<!-- Login Modal -->
+<div class="modal-mask" id="loginModal" style="display:none">
+  <div class="modal-content">
+    <div class="modal-header">用户登录</div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>用户ID <span style="color:#e53935;">*</span></label>
+        <input type="text" id="loginUserId" placeholder="请输入用户ID">
+      </div>
+      <div class="form-group">
+        <label>密码 <span style="color:#e53935;">*</span></label>
+        <input type="password" id="loginPassword" placeholder="请输入密码">
+      </div>
+      <div class="form-group">
+        <label>组织ID <span style="color:#e53935;">*</span></label>
+        <input type="text" id="loginOrgId" placeholder="请输入组织ID">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="loginCancelBtn">取消</button>
+      <button class="btn btn-primary" id="loginSubmitBtn">登录</button>
+    </div>
+  </div>
+</div>
+
+<!-- Create Share Modal (Vue + Element Plus) -->
+<div class="modal-mask share-modal" id="shareModal" style="display:none">
+  <div class="modal-content" style="max-width:480px">
+    <div class="modal-header">创建分享</div>
+    <div class="modal-body" style="display:block;padding:20px 24px;">
+      <div id="shareApp" v-cloak></div>
+    </div>
+  </div>
+</div>
+
+<!-- Activity Bar — 功能门户 -->
+<div class="activity-bar">
+  <div class="activity-item active" title="文件浏览器" id="explorerBtn">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+    </svg>
+  </div>
+  <div class="activity-item" title="分享管理" id="sharePanelBtn">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <circle cx="18" cy="5" r="3"/>
+      <circle cx="6" cy="12" r="3"/>
+      <circle cx="18" cy="19" r="3"/>
+      <path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/>
+    </svg>
+    <span class="badge" id="shareBadge" style="display:none"></span>
+  </div>
+  <div class="activity-item" title="Todo 看板" id="todoBtn">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M9 11l3 3L22 4"/>
+      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+    </svg>
+  </div>
+  <div class="activity-divider"></div>
+  <div class="activity-item" style="margin-top: auto;" id="userBtn" title="登录">
+    <svg id="userIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+      <circle cx="12" cy="7" r="4"/>
+    </svg>
+    <div class="user-badge" id="userAvatar" style="display:none"></div>
+  </div>
+</div>
+
 <!-- Sidebar -->
 <div class="sidebar">
-  <div class="sidebar-header">EXPLORER</div>
-  <div class="file-tree" id="tree"></div>
+  <div class="tree-panel active" id="explorerPanel">
+    <div class="sidebar-header">EXPLORER</div>
+    <div class="file-tree" id="tree"></div>
+  </div>
+  <div class="share-panel" id="sharesPanel">
+    <div class="sidebar-header">MY SHARES</div>
+    <div class="share-list" id="shareList">
+      <div class="share-panel-empty">No shares yet</div>
+    </div>
+  </div>
 </div>
 
 <div class="resizer" id="resizer"></div>
@@ -460,19 +736,9 @@
 <div class="main">
   <div class="tab-bar" id="tabBar">
   </div>
-  <div class="tab-share" id="shareBtn" title="Copy shareable link" style="display:none">
+  <div class="tab-share" id="shareBtn" title="Create share link" style="display:none">
     <svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm-.98 4.3l1.19.88-4.42 5.64-1.21-.91 4.44-5.61zM5.5 8a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm8 5.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" fill="currentColor"/></svg>
     <span id="shareLabel">Share</span>
-    <div class="share-menu" id="shareMenu">
-      <div class="share-menu-item" data-mode="ui">
-        🖥️ UI 链接
-        <span class="share-desc">浏览器打开</span>
-      </div>
-      <div class="share-menu-item" data-mode="raw">
-        📄 内容链接
-        <span class="share-desc">curl 下载</span>
-      </div>
-    </div>
   </div>
   <div class="tab-download" id="downloadBtn" title="Download this file" style="display:none">
     <svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1a.5.5 0 01.5.5v7.793l2.146-2.147a.5.5 0 01.708.708l-3 3a.5.5 0 01-.708 0l-3-3a.5.5 0 11.708-.708L7.5 9.293V1.5A.5.5 0 018 1zM2 13.5a.5.5 0 01.5-.5h11a.5.5 0 010 1h-11a.5.5 0 01-.5-.5z" fill="currentColor"/></svg>
@@ -494,8 +760,117 @@ const treeEl = document.getElementById('tree');
 const editorArea = document.getElementById('editorArea');
 const tabBar = document.getElementById('tabBar');
 const shareBtn = document.getElementById('shareBtn');
-const shareMenu = document.getElementById('shareMenu');
 const downloadBtn = document.getElementById('downloadBtn');
+
+// ============================================================
+// Auth State & Token Management（依赖 common.js 的工具函数）
+// ============================================================
+let authToken = getAuthToken();
+let currentUser = restoreUser();
+
+function updateUserUI() {
+  const avatar = document.getElementById('userAvatar');
+  const userBtn = document.getElementById('userBtn');
+  const userIcon = document.getElementById('userIcon');
+  if (currentUser) {
+    avatar.style.display = 'flex';
+    avatar.textContent = currentUser.userId.charAt(0).toUpperCase();
+    if (userIcon) userIcon.style.display = 'none';
+    userBtn.title = `${currentUser.userId} (${currentUser.orgId}) — 点击登出`;
+  } else {
+    avatar.style.display = 'none';
+    if (userIcon) userIcon.style.display = '';
+    userBtn.title = '登录';
+  }
+}
+
+async function checkAuth() {
+  if (!authToken) return false;
+  try {
+    const resp = await fetch('/api/me', { headers: authHeaders() });
+    if (resp.ok) {
+      const data = await resp.json();
+      currentUser = { userId: data.userId, orgId: data.orgId };
+      saveAuthState(authToken, currentUser);
+      updateUserUI();
+      return true;
+    }
+    if (resp.status === 401) {
+      clearAuthState();
+      authToken = '';
+      currentUser = null;
+    }
+  } catch (e) {
+    // server unreachable: try restore user from localStorage for offline mode
+    currentUser = restoreUser();
+    if (currentUser) { updateUserUI(); return true; }
+    return !!authToken;
+  }
+  return false;
+}
+
+function showLoginModal() {
+  document.getElementById('loginModal').style.display = 'flex';
+}
+function hideLoginModal() {
+  document.getElementById('loginModal').style.display = 'none';
+  document.getElementById('loginPassword').value = '';
+}
+
+async function doLogin() {
+  const userId = document.getElementById('loginUserId').value.trim();
+  const password = document.getElementById('loginPassword').value.trim();
+  const orgId = document.getElementById('loginOrgId').value.trim();
+  if (!userId || !password || !orgId) {
+    showToast('请填写所有字段');
+    return;
+  }
+
+  try {
+    let resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orgId, userId, password })
+    });
+
+    if (resp.status === 403) {
+      const err = await resp.json().catch(() => ({}));
+      if (err.error === 'password_not_set') {
+        resp = await fetch('/api/set-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orgId, userId, newPassword: password })
+        });
+      }
+    }
+
+    if (resp.ok) {
+      const data = await resp.json();
+      authToken = data.token;
+      currentUser = data.user;
+      saveAuthState(authToken, currentUser);
+      updateUserUI();
+      hideLoginModal();
+      showToast(`欢迎，${data.user.userId}！`);
+      initApp();
+    } else if (resp.status === 401) {
+      showToast('密码错误');
+    } else {
+      showToast('登录失败');
+    }
+  } catch (e) {
+    showToast('无法连接服务器');
+  }
+}
+
+function logout() {
+  clearAuthState();
+  authToken = '';
+  currentUser = null;
+  updateUserUI();
+  showToast('已登出');
+  setTimeout(() => location.reload(), 500);
+}
 
 // ============================================================
 // State
@@ -503,50 +878,6 @@ const downloadBtn = document.getElementById('downloadBtn');
 const openTabs = new Map(); // path -> { name, ext, size }
 let activeTabPath = '';
 let currentInnerHash = '';
-
-// ============================================================
-// Utilities
-// ============================================================
-function copyToClipboard(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
-  } else {
-    fallbackCopy(text);
-  }
-}
-
-function fallbackCopy(text) {
-  const input = document.createElement('textarea');
-  input.value = text;
-  input.style.position = 'fixed';
-  input.style.opacity = '0';
-  document.body.appendChild(input);
-  input.select();
-  try { document.execCommand('copy'); } catch(e) {}
-  document.body.removeChild(input);
-}
-
-let toastTimer = null;
-function showToast(msg) {
-  const toast = document.getElementById('toast');
-  toast.textContent = msg;
-  toast.classList.add('show');
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
-}
-
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
-}
-
-function formatSize(bytes) {
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-}
 
 // ============================================================
 // Icons (VS Code Codicons SVG)
@@ -596,13 +927,82 @@ function fileIconSvg(ext, name) {
 }
 
 // ============================================================
-// File Tree
+// Data Source Abstraction
+// 统一抽象：登录态走 /__tree__ + authFetch(path)，分享态走 /api/share/{token}?path=
+// 后端已统一返回 {path, dirs, files} 格式，前端不需要做格式适配
 // ============================================================
-async function fetchTree(path) {
-  const resp = await fetch(`/__tree__?path=${encodeURIComponent(path)}`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
-}
+
+const dataSource = {
+  mode: 'browser',
+  shareToken: '',
+  sharePassword: '',
+
+  // 获取目录列表
+  // 返回统一格式: { path, dirs: [{name, isDir, size}], files: [{name, isDir, size}] }
+  async listDir(path) {
+    if (this.mode === 'share') {
+      let url = '/api/share/' + this.shareToken;
+      const params = new URLSearchParams();
+      if (path) params.set('path', path);
+      if (params.toString()) url += '?' + params.toString();
+      const opts = this.sharePassword
+        ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: this.sharePassword }) }
+        : {};
+      const resp = await fetch(url, opts);
+      const data = await resp.json();
+      if (!resp.ok) throw { status: resp.status, data };
+      // 后端已返回 {path, dirs, files} 格式，直接透传
+      return data;
+    }
+    // 浏览器模式：走 /__tree__?path=
+    const resp = await authFetch('/__tree__?path=' + encodeURIComponent(path));
+    if (!resp.ok) {
+      if (resp.status === 401) { showLoginModal(); throw new Error('Auth required'); }
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    return resp.json();
+  },
+
+  // 获取文件内容
+  // 返回统一格式: { name, ext, size, text: () => Promise<string>, blob: () => Promise<Blob>, isBinary }
+  async getFile(path) {
+    if (this.mode === 'share') {
+      let url = '/api/share/' + this.shareToken;
+      const params = new URLSearchParams();
+      if (path) params.set('path', path);
+      if (params.toString()) url += '?' + params.toString();
+      const opts = this.sharePassword
+        ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: this.sharePassword }) }
+        : {};
+      const resp = await fetch(url, opts);
+      const data = await resp.json();
+      if (!resp.ok) throw { status: resp.status, data };
+      const ext = (data.ext || '').replace('.', '').toLowerCase();
+      const bytes = base64ToBytes(data.content);
+      const text = data.isBinary ? null : new TextDecoder().decode(bytes);
+      const blob = new Blob([bytes], { type: data.contentType });
+      return {
+        name: data.fileName,
+        ext,
+        size: data.size,
+        isBinary: data.isBinary,
+        text: () => Promise.resolve(text || ''),
+        blob: () => Promise.resolve(blob)
+      };
+    }
+    // 浏览器模式：用 URL fetch，懒加载 text/blob
+    const name = path.split('/').pop() || 'file';
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    return {
+      name,
+      ext,
+      size: 0,
+      isBinary: isBinaryExt(ext),
+      text: () => authFetch(path).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); }),
+      blob: () => authFetch(path).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.blob(); })
+    };
+  }
+};
 
 function buildRow(name, isDir, depth) {
   const row = document.createElement('div');
@@ -649,7 +1049,8 @@ async function expandNode(nodeEl, path) {
 
   expandIcon.innerHTML = '<span class="spinner"></span>';
   try {
-    const data = await fetchTree(path);
+    const data = await dataSource.listDir(path);
+    // 后端已统一返回 {path, dirs, files} 格式，直接渲染
     childrenEl.innerHTML = '';
     renderTree(childrenEl, data, parseInt(nodeEl.dataset.depth || 0) + 1);
     childrenEl.dataset.loaded = 'true';
@@ -658,7 +1059,16 @@ async function expandNode(nodeEl, path) {
     expandIcon.classList.add('open');
   } catch (err) {
     expandIcon.innerHTML = ICONS.chevron;
-    childrenEl.innerHTML = `<div class="empty">Failed: ${err.message}</div>`;
+    expandIcon.classList.remove('open');
+    if (err.status === 401) {
+      if (dataSource.mode === 'share') {
+        showSharePasswordModal();
+      } else {
+        showLoginModal();
+      }
+    } else if (err.message !== 'Auth required') {
+      showToast('Failed to load: ' + (err.message || 'unknown'));
+    }
   }
 }
 
@@ -778,12 +1188,32 @@ function renderTree(parentEl, data, depth) {
       row.classList.add('active');
 
       if (item.isDir) {
+        // 文件夹：选中 + 展开/折叠
+        activeTabPath = childPath;
+        if (dataSource.mode !== 'share') {
+          shareBtn.style.display = 'flex';
+          downloadBtn.style.display = 'flex';
+        }
+        updateHash(childPath);
         expandNode(nodeEl, childPath);
       } else {
         const ext = (item.name.split('.').pop() || '').toLowerCase();
         openTab(childPath, item.name, ext, item.size || 0);
       }
     });
+
+    // 右键菜单：分享（share 模式禁用）
+    if (dataSource.mode !== 'share') {
+      row.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        document.querySelectorAll('.tree-row.active').forEach(el => el.classList.remove('active'));
+        row.classList.add('active');
+        activeTabPath = childPath;
+        shareBtn.style.display = 'flex';
+        downloadBtn.style.display = 'flex';
+        openShareModal(item.isDir ? 'dir' : 'file');
+      });
+    }
 
     nodeEl.appendChild(row);
 
@@ -824,6 +1254,8 @@ function openTab(path, name, ext, size) {
 }
 
 function activateTab(path) {
+  // 如果 Todo iframe 正在显示，先关闭
+  if (todoFrameActive) closeTodoFrame();
   activeTabPath = path;
   tabBar.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.path === path));
   if (!path) {
@@ -832,8 +1264,11 @@ function activateTab(path) {
     showWelcome();
     return;
   }
-  shareBtn.style.display = 'flex';
-  downloadBtn.style.display = 'flex';
+  // share 模式不显示 share/download 按钮
+  if (dataSource.mode !== 'share') {
+    shareBtn.style.display = 'flex';
+    downloadBtn.style.display = 'flex';
+  }
   const info = openTabs.get(path);
   if (!info) return;
   renderEditor(path, info.name, info.ext, info.size);
@@ -869,44 +1304,82 @@ function showWelcome() {
 }
 
 function renderEditor(path, name, ext, size) {
-  const binaryExts = ['zip','tar','gz','tgz','rar','7z','bz2','xz','exe','dll','so','dylib','bin','ttf','otf','woff','woff2'];
+  // 统一走 dataSource.getFile，由 dataSource 抽象层处理登录/分享差异
+  dataSource.getFile(path).then(file => {
+    renderToContainer(editorArea, file.name, file.ext, file.size || size, file);
+  }).catch(err => {
+    if (err.status === 401 && err.data?.error === 'password_required') {
+      showSharePasswordModal();
+    } else {
+      editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message || err.data?.message || 'unknown')}</div>`;
+    }
+  });
+}
 
-  if (binaryExts.includes(ext)) {
-    showFileDetail(name, path, ext, size);
+// 通用渲染器：被文件浏览器和分享视图共用
+// loader: { text: () => Promise<string>, blob: () => Promise<Blob> }
+function renderToContainer(container, name, ext, size, loader) {
+  if (isBinaryExt(ext)) {
+    // 二进制：直接走 loader.blob 生成下载链接
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
+    loader.blob().then(blob => {
+      const url = URL.createObjectURL(blob);
+      container.innerHTML = `
+        <div class="file-detail">
+          <div class="name">${escapeHtml(name)}</div>
+          <table>
+            <tr><td>Type</td><td>${ext.toUpperCase()}</td></tr>
+            <tr><td>Size</td><td>${formatSize(size||0)}</td></tr>
+          </table>
+          <a href="${url}" download="${escapeHtml(name)}" class="btn-download">Download</a>
+        </div>`;
+    }).catch(err => {
+      container.innerHTML = `<div style="padding:20px;color:#d00;">Failed: ${escapeHtml(err.message)}</div>`;
+    });
     return;
   }
-  if (['png','jpg','jpeg','gif','svg','webp','ico'].includes(ext)) {
-    editorArea.innerHTML = `<iframe src="${escapeHtml(path)}" sandbox="" style="width:100%;height:100%;border:none;"></iframe>`;
+  if (isImageExt(ext)) {
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
+    loader.blob().then(blob => {
+      const url = URL.createObjectURL(blob);
+      container.innerHTML = `<img src="${url}" style="max-width:100%;max-height:100%;display:block;margin:auto;" onload="this.parentElement.style.display='flex';this.parentElement.style.alignItems='center';this.parentElement.style.justifyContent='center'">`;
+    }).catch(err => {
+      container.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
+    });
     return;
   }
   if (['html','htm'].includes(ext)) {
-    // src 直接带上内嵌锚点，iframe 加载完成后浏览器会自动滚到对应位置
-    const src = path + (currentInnerHash || '');
-    editorArea.innerHTML = `<iframe id="previewFrame" src="${escapeHtml(src)}" sandbox="allow-scripts allow-forms allow-popups" style="width:100%;height:100%;border:none;background:#fff;"></iframe>`;
-    watchIframeHash();
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
+    const innerHash = (container === editorArea ? (currentInnerHash || '') : '');
+    loader.blob().then(blob => {
+      const url = URL.createObjectURL(blob);
+      const frameId = container === editorArea ? 'previewFrame' : 'shareFrame';
+      container.innerHTML = `<iframe id="${frameId}" src="${url}${innerHash}" sandbox="allow-scripts allow-forms allow-popups" style="width:100%;height:100%;border:none;background:#fff;"></iframe>`;
+      if (container === editorArea) watchIframeHash();
+    }).catch(err => {
+      container.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
+    });
     return;
   }
   if (ext === 'json') {
-    editorArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
-    fetch(path).then(r => r.text()).then(text => {
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
+    loader.text().then(text => {
       const toolbar = `<div style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-bottom:1px solid var(--tab-border);background:var(--header-bg);font-size:12px;">
         <button class="btn-raw-json" data-action="copy" style="padding:3px 10px;cursor:pointer;border:1px solid var(--tab-border);border-radius:4px;background:var(--bg);color:var(--text);">📋 Copy raw</button>
         <button class="btn-raw-json" data-action="toggle" style="padding:3px 10px;cursor:pointer;border:1px solid var(--tab-border);border-radius:4px;background:var(--bg);color:var(--text);">{ } Raw view</button>
       </div>`;
       const rawHtml = `<pre class="text-preview" style="margin:0;padding:16px 24px;">${escapeHtml(text)}</pre>`;
       const viewerHtml = renderJson(text);
-      editorArea.innerHTML = `<div style="display:flex;flex-direction:column;height:100%;">${toolbar}<div class="json-content" style="flex:1;overflow:auto;">${viewerHtml}</div></div>`;
-      // Store raw text for copy/toggle
-      editorArea.querySelector('.json-content').dataset.raw = text;
-      // Copy raw JSON
-      editorArea.querySelectorAll('.btn-raw-json').forEach(btn => {
+      container.innerHTML = `<div style="display:flex;flex-direction:column;height:100%;">${toolbar}<div class="json-content" style="flex:1;overflow:auto;">${viewerHtml}</div></div>`;
+      container.querySelector('.json-content').dataset.raw = text;
+      container.querySelectorAll('.btn-raw-json').forEach(btn => {
         btn.addEventListener('click', () => {
           if (btn.dataset.action === 'copy') {
-            const raw = editorArea.querySelector('.json-content').dataset.raw;
+            const raw = container.querySelector('.json-content').dataset.raw;
             copyToClipboard(raw);
             showToast('JSON copied to clipboard');
           } else if (btn.dataset.action === 'toggle') {
-            const content = editorArea.querySelector('.json-content');
+            const content = container.querySelector('.json-content');
             const isRaw = content.dataset.mode === 'raw';
             if (isRaw) {
               content.innerHTML = viewerHtml;
@@ -921,35 +1394,34 @@ function renderEditor(path, name, ext, size) {
         });
       });
     }).catch(err => {
-      editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
+      container.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
     });
     return;
   }
   if (['md','markdown'].includes(ext)) {
-    editorArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span class="spinner"></span></div>';
     Promise.all([loadMarked(), loadDomPurify()]).then(() => {
-      fetch(path).then(r => r.text()).then(md => {
-        editorArea.innerHTML = `<div class="markdown-body">${DOMPurify.sanitize(marked.parse(md))}</div>`;
+      loader.text().then(md => {
+        container.innerHTML = `<div class="markdown-body">${DOMPurify.sanitize(marked.parse(md))}</div>`;
         loadMermaid().then(() => {
           try { mermaid.run({ querySelector: '.markdown-body .language-mermaid' }); } catch(e) {}
         });
-        // 滚动到 anchor（处理 #/path#anchor 格式的 inner hash）
-        if (currentInnerHash) {
+        if (container === editorArea && currentInnerHash) {
           const anchorId = decodeURIComponent(currentInnerHash.replace(/^#/, ''));
-          const target = document.getElementById(anchorId) || editorArea.querySelector(`[name="${anchorId}"]`);
+          const target = document.getElementById(anchorId) || container.querySelector(`[name="${anchorId}"]`);
           if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
       }).catch(err => {
-        editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
+        container.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
       });
     });
     return;
   }
-  // text
-  fetch(path).then(r => r.text()).then(text => {
-    editorArea.innerHTML = `<div class="text-preview">${escapeHtml(text)}</div>`;
+  // 文本/代码
+  loader.text().then(text => {
+    container.innerHTML = `<div class="text-preview">${escapeHtml(text)}</div>`;
   }).catch(err => {
-    editorArea.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
+    container.innerHTML = `<div style="padding:20px;color:#d00;">Failed to load: ${escapeHtml(err.message)}</div>`;
   });
 }
 
@@ -1051,43 +1523,37 @@ editorArea.addEventListener('click', (e) => {
   window.location.hash = newHash;
 });
 
-// Share 按钮下拉菜单
-shareBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  shareMenu.classList.toggle('show');
-});
-
-// 点击菜单项复制对应链接
-shareMenu.querySelectorAll('.share-menu-item').forEach(item => {
-  item.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const mode = item.dataset.mode;
-    let url;
-    if (mode === 'ui') {
-      url = window.location.origin + '/#' + activeTabPath + currentInnerHash;
-    } else {
-      url = window.location.origin + activeTabPath;
-    }
-    copyToClipboard(url);
-    shareMenu.classList.remove('show');
-    showToast(mode === 'ui' ? 'UI 链接已复制' : '内容链接已复制');
-  });
-});
-
-// 点击页面其他地方关闭 Share 菜单
-document.addEventListener('click', () => {
-  shareMenu.classList.remove('show');
-});
-
-// Download 按钮
-downloadBtn.addEventListener('click', () => {
+// Share 按钮：直接打开创建分享 Modal
+shareBtn.addEventListener('click', () => {
   if (!activeTabPath) return;
-  const a = document.createElement('a');
-  a.href = activeTabPath;
-  a.download = '';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  // 根据当前选中的树节点判断类型
+  const activeRow = document.querySelector('.tree-row.active');
+  let resourceType = 'file';
+  if (activeRow) {
+    const icon = activeRow.querySelector('.tree-icon');
+    if (icon && icon.classList.contains('dir')) resourceType = 'dir';
+  }
+  openShareModal(resourceType);
+});
+
+// Download 按钮（带 token fetch → blob 下载）
+downloadBtn.addEventListener('click', async () => {
+  if (!activeTabPath) return;
+  try {
+    const resp = await authFetch(activeTabPath);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = activeTabPath.split('/').pop() || 'download';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (err) {
+    showToast('Download failed: ' + err.message);
+  }
 });
 
 // ============================================================
@@ -1204,6 +1670,8 @@ function getHashPath() {
   const h = window.location.hash;
   if (!h || !h.startsWith('#')) return '';
   let raw = decodeURIComponent(h.slice(1));
+  // 排除特殊视图标记
+  if (raw === 'todo' || raw === 'shares') return '';
   // 拆出内嵌 #（仅第一个）作为 innerHash
   const idx = raw.indexOf('#');
   let filePath;
@@ -1220,6 +1688,31 @@ function getHashPath() {
 }
 
 window.addEventListener('popstate', (e) => {
+  isPopstateNavigating = true;
+  const hash = window.location.hash;
+
+  // #todo → Todo 视图
+  if (hash === '#todo') {
+    if (!todoFrameActive) openTodoFrame();
+    isPopstateNavigating = false;
+    return;
+  }
+
+  // #shares → 分享管理面板
+  if (hash === '#shares') {
+    if (todoFrameActive) closeTodoFrame();
+    document.getElementById('explorerPanel').classList.remove('active');
+    document.getElementById('sharesPanel').classList.add('active');
+    loadShares();
+    isPopstateNavigating = false;
+    return;
+  }
+
+  // 文件路径或空 → Explorer 视图
+  if (todoFrameActive) closeTodoFrame();
+  document.getElementById('explorerPanel').classList.add('active');
+  document.getElementById('sharesPanel').classList.remove('active');
+
   const p = getHashPath();
   if (p && openTabs.has(p)) {
     activateTab(p);
@@ -1227,6 +1720,7 @@ window.addEventListener('popstate', (e) => {
     activeTabPath = '';
     showWelcome();
   }
+  isPopstateNavigating = false;
 });
 
 window.addEventListener('hashchange', () => {
@@ -1244,13 +1738,491 @@ window.addEventListener('hashchange', () => {
 });
 
 // ============================================================
+// Share Management (Vue + Element Plus)
+// ============================================================
+
+// Share Vue app 单例
+let shareApp = null;
+let shareAppInstance = null;
+
+function mountShareApp() {
+  if (shareAppInstance) return;
+  const { createApp, ref, reactive, watch } = Vue;
+  shareApp = createApp({
+    setup() {
+      const resourcePath = ref('');
+      const resourceType = ref('file');
+      const maxAccessCount = ref(0);
+      const password = ref('');
+      const dateRange = ref([]);  // [effectiveAt, expiresAt] (RFC3339)
+      const submitting = ref(false);
+
+      // 将 dateRange 转为 effectiveAt / expiresAt
+      const effectiveAt = ref('');
+      const expiresAt = ref('');
+      watch(dateRange, (v) => {
+        if (Array.isArray(v) && v.length === 2) {
+          effectiveAt.value = new Date(v[0]).toISOString();
+          expiresAt.value = new Date(v[1]).toISOString();
+        } else {
+          effectiveAt.value = '';
+          expiresAt.value = '';
+        }
+      });
+
+      const open = (path, type) => {
+        resourcePath.value = path;
+        resourceType.value = type || 'file';
+        maxAccessCount.value = 0;
+        password.value = '';
+        dateRange.value = [];
+        submitting.value = false;
+      };
+
+      const close = () => {
+        document.getElementById('shareModal').style.display = 'none';
+      };
+
+      const submit = async () => {
+        if (submitting.value) return;
+        submitting.value = true;
+        try {
+          const resp = await authFetch('/api/share', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              resourcePath: resourcePath.value,
+              resourceType: resourceType.value,
+              maxAccessCount: maxAccessCount.value,
+              password: password.value,
+              effectiveAt: effectiveAt.value,
+              expiresAt: expiresAt.value
+            })
+          });
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${resp.status}`);
+          }
+          const data = await resp.json();
+          copyToClipboard(data.url);
+          showToast('分享创建成功，链接已复制');
+          close();
+          loadShares();
+        } catch (err) {
+          showToast('创建分享失败: ' + err.message);
+        } finally {
+          submitting.value = false;
+        }
+      };
+
+      return { resourcePath, resourceType, maxAccessCount, password, dateRange, submitting, open, close, submit };
+    },
+    template: `
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item label="资源路径">
+          <el-input :model-value="resourcePath" readonly></el-input>
+          <div style="font-size:11px;color:#999;margin-top:3px;">类型：{{ resourceType === 'dir' ? '文件夹' : '文件' }}</div>
+        </el-form-item>
+        <el-form-item label="最大访问次数 (0=不限)">
+          <el-input-number v-model="maxAccessCount" :min="0" :step="1" controls-position="right" style="width:100%;"></el-input-number>
+        </el-form-item>
+        <el-form-item label="访问密码 (可选)">
+          <el-input v-model="password" placeholder="留空则无需密码" clearable></el-input>
+        </el-form-item>
+        <el-form-item label="时间范围 (可选)">
+          <el-date-picker
+            v-model="dateRange"
+            type="datetimerange"
+            range-separator="至"
+            start-placeholder="生效时间"
+            end-placeholder="过期时间"
+            format="YYYY-MM-DD HH:mm"
+            value-format="X"
+            style="width:100%;">
+          </el-date-picker>
+        </el-form-item>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+          <el-button @click="close">取消</el-button>
+          <el-button type="primary" :loading="submitting" @click="submit">创建分享</el-button>
+        </div>
+      </el-form>
+    `
+  });
+  shareApp.use(ElementPlus);
+  shareAppInstance = shareApp.mount('#shareApp');
+}
+
+function openShareModal(resourceType) {
+  if (!authToken) { showLoginModal(); return; }
+  if (!activeTabPath) { showToast('请先选择文件'); return; }
+  mountShareApp();
+  document.getElementById('shareModal').style.display = 'flex';
+  shareAppInstance.open(activeTabPath, resourceType || 'file');
+}
+
+function hideShareModal() {
+  document.getElementById('shareModal').style.display = 'none';
+}
+
+// 加载分享列表
+async function loadShares() {
+  if (!authToken) return;
+  try {
+    const resp = await authFetch('/api/share');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    renderShareList(data.shares || []);
+  } catch (err) {
+    console.error('load shares failed', err);
+  }
+}
+
+// 渲染分享列表
+function renderShareList(shares) {
+  const listEl = document.getElementById('shareList');
+  const badge = document.getElementById('shareBadge');
+  if (shares.length === 0) {
+    listEl.innerHTML = '<div class="share-panel-empty">暂无分享<br>点击文件 Share 按钮创建</div>';
+    badge.style.display = 'none';
+    return;
+  }
+  badge.style.display = 'inline';
+  badge.textContent = shares.length;
+
+  listEl.innerHTML = shares.map(s => {
+    const typeTag = s.resourceType === 'dir' ?
+      '<span class="tag dir">📁 文件夹</span>' :
+      '<span class="tag file">📄 文件</span>';
+    const lockTag = s.hasPassword ? '<span class="tag lock">🔒 密码</span>' : '';
+    const countTag = s.maxAccessCount > 0 ?
+      `<span class="tag">访问 ${s.accessCount}/${s.maxAccessCount}</span>` :
+      `<span class="tag">访问 ${s.accessCount}/∞</span>`;
+    const timeTag = s.expiresAt ? `<span class="tag">⏰ ${s.expiresAt.slice(0,10)}</span>` : '';
+    return `
+      <div class="share-item" data-id="${s.id}">
+        <div class="share-item-path" title="${escapeHtml(s.resourcePath)}">${escapeHtml(s.resourcePath)}</div>
+        <div class="share-item-meta">
+          ${typeTag} ${lockTag} ${countTag} ${timeTag}
+        </div>
+        <div class="share-item-actions">
+          <button class="btn btn-sm" onclick="copyShareUrl('${s.token}')">复制链接</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteShare('${s.id}')">撤销</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// 复制分享链接
+function copyShareUrl(token) {
+  const url = window.location.origin + '/s/' + token;
+  copyToClipboard(url);
+  showToast('分享链接已复制');
+}
+
+// 撤销分享
+async function deleteShare(id) {
+  if (!confirm('确定撤销此分享？')) return;
+  try {
+    const resp = await authFetch('/api/share/' + id, { method: 'DELETE' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    showToast('分享已撤销');
+    loadShares();
+  } catch (err) {
+    showToast('撤销失败: ' + err.message);
+  }
+}
+
+// popstate 导航标志：防止 popstate 触发的视图切换再次更新 URL
+let isPopstateNavigating = false;
+
+// ============================================================
+// Sidebar View Switching (Activity Bar)
+// URL hash 规范:
+//   #/path/to/file  → Explorer + 打开文件
+//   #shares         → Explorer 隐藏，显示 Shares 面板
+//   #todo           → Todo iframe
+// ============================================================
+
+function showExplorer() {
+  document.getElementById('explorerPanel').classList.add('active');
+  document.getElementById('sharesPanel').classList.remove('active');
+  const wasTodoActive = todoFrameActive;
+  closeTodoFrame();
+  // 更新 URL（仅当不是来自 popstate 时）
+  if (!isPopstateNavigating) {
+    if (wasTodoActive) {
+      // 从 Todo 切回 Explorer，恢复之前的文件 hash
+      history.replaceState(null, '', activeTabPath ? '#' + activeTabPath + (currentInnerHash || '') : window.location.pathname);
+    } else {
+      // 从 Shares 切回 Explorer，恢复文件 hash
+      history.replaceState(null, '', activeTabPath ? '#' + activeTabPath + (currentInnerHash || '') : window.location.pathname);
+    }
+  }
+}
+
+function showShares() {
+  document.getElementById('explorerPanel').classList.remove('active');
+  document.getElementById('sharesPanel').classList.add('active');
+  closeTodoFrame();
+  loadShares();
+  if (!isPopstateNavigating) {
+    history.replaceState(null, '', '#shares');
+  }
+}
+
+// ============================================================
+// Todo iframe (embedded in editor area)
+// ============================================================
+let todoFrameActive = false;
+
+function openTodoFrame() {
+  if (!authToken) { showLoginModal(); return; }
+
+  // 隐藏 tab bar、share、download 按钮
+  tabBar.style.display = 'none';
+  shareBtn.style.display = 'none';
+  downloadBtn.style.display = 'none';
+
+  // 在 editor area 中加载 todo.html（同源 iframe，共享 localStorage）
+  editorArea.innerHTML = `<iframe id="todoFrame" src="/todo.html" sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-downloads" style="width:100%;height:100%;border:none;background:#fff;"></iframe>`;
+  todoFrameActive = true;
+
+  // 更新 URL hash
+  history.replaceState(null, '', '#todo');
+
+  // 高亮 Todo 按钮
+  document.getElementById('todoBtn').classList.add('active');
+  document.getElementById('explorerBtn').classList.remove('active');
+}
+
+function closeTodoFrame() {
+  if (!todoFrameActive) return;
+  const frame = document.getElementById('todoFrame');
+  if (frame) frame.remove();
+  todoFrameActive = false;
+
+  // 恢复 tab bar
+  tabBar.style.display = '';
+  // 恢复 share/download 按钮显示状态（share 模式除外）
+  if (activeTabPath && dataSource.mode !== 'share') {
+    shareBtn.style.display = 'flex';
+    downloadBtn.style.display = 'flex';
+  }
+
+  // 恢复高亮
+  document.getElementById('todoBtn').classList.remove('active');
+  document.getElementById('explorerBtn').classList.add('active');
+
+  // 恢复 URL hash
+  if (activeTabPath) {
+    history.replaceState(null, '', '#' + activeTabPath + (currentInnerHash || ''));
+  } else {
+    history.replaceState(null, '', window.location.pathname);
+  }
+
+  // 如果有打开的 tab，重新渲染；否则显示欢迎页
+  if (activeTabPath && openTabs.has(activeTabPath)) {
+    const info = openTabs.get(activeTabPath);
+    renderEditor(activeTabPath, info.name, info.ext, info.size);
+  } else {
+    showWelcome();
+  }
+}
+
+document.getElementById('todoBtn').addEventListener('click', () => {
+  if (todoFrameActive) {
+    closeTodoFrame();
+  } else {
+    openTodoFrame();
+  }
+});
+
+document.getElementById('explorerBtn').addEventListener('click', showExplorer);
+
+document.getElementById('sharePanelBtn').addEventListener('click', () => {
+  if (!authToken) { showLoginModal(); return; }
+  // toggle
+  const isActive = document.getElementById('sharesPanel').classList.contains('active');
+  if (isActive) showExplorer(); else showShares();
+});
+
+// ============================================================
+// Login Modal Events
+// ============================================================
+document.getElementById('loginSubmitBtn').addEventListener('click', doLogin);
+document.getElementById('loginCancelBtn').addEventListener('click', hideLoginModal);
+document.getElementById('loginPassword').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doLogin();
+});
+
+// User button: click to login or logout
+document.getElementById('userBtn').addEventListener('click', () => {
+  if (currentUser) {
+    if (confirm('确定登出？')) logout();
+  } else {
+    showLoginModal();
+  }
+});
+
+// ============================================================
 // Init
 // ============================================================
-(async () => {
+
+// 检测是否是分享链接 /s/{token} 或 /s/{token}/sub/path
+function parseShareURL() {
+  const p = window.location.pathname;
+  const parts = p.split('/').filter(Boolean);
+  if (parts.length >= 2 && parts[0] === 's') {
+    return { token: parts[1], subPath: parts.slice(2).join('/') };
+  }
+  return null;
+}
+
+
+function showSharePasswordModal() {
+  editorArea.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;height:100%;">
+      <div style="background:#fff;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.15);padding:32px;min-width:320px;">
+        <h3 style="margin-bottom:16px;font-size:16px;">🔒 此分享需要密码</h3>
+        <div id="sharePwdError" style="color:#d73a49;font-size:12px;margin-bottom:8px;display:none;"></div>
+        <input type="password" id="sharePwdInput" placeholder="请输入密码" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:4px;font-size:14px;margin-bottom:16px;box-sizing:border-box;">
+        <button id="sharePwdBtn" style="padding:8px 24px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:14px;width:100%;">确认</button>
+      </div>
+    </div>`;
+  const input = document.getElementById('sharePwdInput');
+  input.focus();
+  const submit = async () => {
+    shareViewPassword = input.value.trim();
+    if (!shareViewPassword) return;
+    // 注意：不持久化密码到 localStorage，避免跨窗口/标签共享
+    dataSource.sharePassword = shareViewPassword;
+    document.getElementById('sharePwdError').style.display = 'none';
+    // 清空密码弹窗，避免后续渲染完成后密码框仍覆盖在内容之上
+    editorArea.innerHTML = '';
+    // 重新初始化分享视图
+    const shareInfo = parseShareURL();
+    if (shareInfo) {
+      try {
+        // 先尝试加载为目录（文件分享走 GET 也返回 isDir=false）
+        const data = await dataSource.listDir(shareInfo.subPath);
+        if (data.isDir === false) {
+          // 文件分享：渲染文件内容到 editorArea（不调 openTab，避免重复请求）
+          const ext = (data.ext || '').replace('.', '').toLowerCase();
+          const bytes = base64ToBytes(data.content);
+          const text = data.isBinary ? null : new TextDecoder().decode(bytes);
+          const blob = new Blob([bytes], { type: data.contentType });
+          renderToContainer(editorArea, data.fileName, ext, data.size, {
+            text: () => Promise.resolve(text || ''),
+            blob: () => Promise.resolve(blob)
+          });
+        } else {
+          // 目录分享：渲染 sidebar
+          renderTree(treeEl, data, 0);
+          if (shareInfo.subPath) {
+            const name = shareInfo.subPath.split('/').pop();
+            const ext = (name.split('.').pop() || '').toLowerCase();
+            openTab('/' + shareInfo.subPath, name, ext, 0);
+          } else {
+            showWelcome();
+          }
+        }
+      } catch (err) {
+        if (err.status === 401 && err.data?.error === 'invalid_password') {
+          showSharePasswordModal();
+          document.getElementById('sharePwdError').textContent = '密码错误，请重试';
+          document.getElementById('sharePwdError').style.display = 'block';
+        } else {
+          showShareError(getShareErrorTitle(err.status), err.data?.message || err.message || '');
+        }
+      }
+    }
+  };
+  document.getElementById('sharePwdBtn').addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+}
+
+function getSubPath() {
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  if (parts.length >= 3 && parts[0] === 's') return parts.slice(2).join('/');
+  return '';
+}
+
+async function initApp() {
+  // 检测是否是分享链接
+  const shareInfo = parseShareURL();
+  if (shareInfo) {
+    // 分享视图：完全复用登录态 UI 和渲染逻辑，只需切换 dataSource 到 share 模式
+    document.querySelector('.activity-bar').style.display = 'none';
+    // 隐藏分享/下载按钮（share 视图不应能再创建分享或下载自己）
+    shareBtn.style.display = 'none';
+    downloadBtn.style.display = 'none';
+    const header = document.querySelector('#explorerPanel .sidebar-header');
+    if (header) header.textContent = 'SHARED';
+    // 设置 dataSource 为 share 模式
+    dataSource.mode = 'share';
+    dataSource.shareToken = shareInfo.token;
+    // 用 sessionStorage 存密码：同一标签页内共享，关闭后清除；不跨标签页
+    dataSource.sharePassword = sessionStorage.getItem('workbench-share-pwd') || '';
+
+    try {
+      // 加载分享数据（可能是目录或文件）
+      const data = await dataSource.listDir(shareInfo.subPath);
+      if (data.isDir === false) {
+        // 文件分享：直接渲染文件内容到 editorArea（不调 openTab，避免重复请求）
+        const ext = (data.ext || '').replace('.', '').toLowerCase();
+        const bytes = base64ToBytes(data.content);
+        const text = data.isBinary ? null : new TextDecoder().decode(bytes);
+        const blob = new Blob([bytes], { type: data.contentType });
+        renderToContainer(editorArea, data.fileName, ext, data.size, {
+          text: () => Promise.resolve(text || ''),
+          blob: () => Promise.resolve(blob)
+        });
+      } else {
+        // 目录分享：渲染 sidebar
+        renderTree(treeEl, data, 0);
+        if (shareInfo.subPath) {
+          const name = shareInfo.subPath.split('/').pop();
+          const ext = (name.split('.').pop() || '').toLowerCase();
+          openTab('/' + shareInfo.subPath, name, ext, 0);
+        } else {
+          showWelcome();
+        }
+      }
+    } catch (err) {
+      if (err.status === 401 && err.data?.error === 'password_required') {
+        showSharePasswordModal();
+      } else {
+        showShareError(getShareErrorTitle(err.status), err.data?.message || err.message || '');
+      }
+    }
+    return;
+  }
+
+  if (!authToken) {
+    showLoginModal();
+    return;
+  }
+  const authed = await checkAuth();
+  if (!authed) {
+    showLoginModal();
+    return;
+  }
   try {
-    const data = await fetchTree('/');
+    const data = await dataSource.listDir('/');
     renderTree(treeEl, data, 0);
-    // 恢复 hash 中的文件并展开目录树
+
+    if (window.location.hash === '#todo') {
+      openTodoFrame();
+      return;
+    }
+
+    if (window.location.hash === '#shares') {
+      document.getElementById('explorerPanel').classList.remove('active');
+      document.getElementById('sharesPanel').classList.add('active');
+      loadShares();
+      return;
+    }
+
     const hashPath = getHashPath();
     if (hashPath) {
       await navigateToPath(hashPath);
@@ -1259,9 +2231,31 @@ window.addEventListener('hashchange', () => {
       openTab(hashPath, name, ext, 0);
     }
   } catch (err) {
+    if (err.message === 'Auth required') return;
     treeEl.innerHTML = `<div class="empty">Failed: ${escapeHtml(err.message)}</div>`;
   }
+}
+
+// 启动
+(async () => {
+  await initApp();
 })();
+
+// Token 定时刷新（每小时校验一次）
+setInterval(async () => {
+  if (!authToken) return;
+  try {
+    const resp = await fetch('/api/me', { headers: authHeaders() });
+    if (resp.status === 401) {
+      localStorage.removeItem('workbench_auth_token');
+      localStorage.removeItem('workbench-current-user');
+      authToken = '';
+      currentUser = null;
+      updateUserUI();
+      showLoginModal();
+    }
+  } catch (e) { /* server unreachable, ignore */ }
+}, 3600000);
 
 // ============================================================
 // Resizer & Sidebar Toggle

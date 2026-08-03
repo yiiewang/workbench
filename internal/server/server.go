@@ -58,19 +58,34 @@ func (s *Server) App() *iris.Application {
 	app.Use(s.loggingMiddleware())
 	app.Use(s.securityHeadersMiddleware())
 
+	// 公开页面入口（不鉴权）
+	// index.html, todo.html 等通过静态文件路由访问但不需要 token
+
 	// 公开 API
-	app.Get("/__stats__", s.handleStats)
-	app.Get("/__map__", s.handleMap)
-	app.Get("/__map__.json", s.handleMap)
-	app.Get("/__tree__", s.handleTree)
-	app.Get("/api/org-members", s.handleOrgMembers)
 	app.Post("/api/login", s.handleLogin)
 	app.Post("/api/set-password", s.handleSetPassword)
 
+	// 分享：/s/{token} 返回 index.html 页面，/api/share/{token} 返回数据
+	app.Get("/s/{token}", s.handleShareAccess)
+	app.Get("/s/{token}/{p:path}", s.handleShareAccess)
+	app.Get("/api/share/{token}", s.handleShareData)
+	app.Post("/api/share/{token}", s.handleShareData) // POST 用于密码提交
+
 	// 需要鉴权的 API
-	app.Get("/api/me", AuthMiddleware(s.tokenSecret), s.handleMe)
-	app.Get("/tasks.json", s.getTasksJSON)
-	app.Put("/tasks.json", AuthMiddleware(s.tokenSecret), s.putTasksJSON)
+	auth := AuthMiddleware(s.tokenSecret)
+	app.Get("/api/me", auth, s.handleMe)
+	app.Get("/__stats__", auth, s.handleStats)
+	app.Get("/__map__", auth, s.handleMap)
+	app.Get("/__map__.json", auth, s.handleMap)
+	app.Get("/__tree__", auth, s.handleTree)
+	app.Get("/api/org-members", auth, s.handleOrgMembers)
+	app.Get("/tasks.json", auth, s.getTasksJSON)
+	app.Put("/tasks.json", auth, s.putTasksJSON)
+
+	// 分享管理 API（需鉴权）
+	app.Get("/api/share", auth, s.handleListShares)
+	app.Post("/api/share", auth, s.handleCreateShare)
+	app.Delete("/api/share/{id}", auth, s.handleDeleteShare)
 
 	// CORS 预检请求（sandboxed iframe null origin）
 	app.Options("/api/me", func(ctx iris.Context) { ctx.StatusCode(204) })
@@ -78,9 +93,11 @@ func (s *Server) App() *iris.Application {
 	app.Options("/api/set-password", func(ctx iris.Context) { ctx.StatusCode(204) })
 	app.Options("/api/org-members", func(ctx iris.Context) { ctx.StatusCode(204) })
 	app.Options("/tasks.json", func(ctx iris.Context) { ctx.StatusCode(204) })
+	app.Options("/api/share", func(ctx iris.Context) { ctx.StatusCode(204) })
+	app.Options("/api/share/{token}", func(ctx iris.Context) { ctx.StatusCode(204) })
 
-	// 静态文件兜底路由：匹配所有其他路径
-	app.Get("/{path:path}", s.handleStatic)
+	// 静态文件兜底路由：页面入口公开，其余需鉴权
+	app.Get("/{path:path}", s.handleStaticWithAuth)
 
 	return app
 }
@@ -483,6 +500,54 @@ func (s *Server) resolveStaticPath(relPath string) (string, bool) {
 		return "", false
 	}
 	return realPath, true
+}
+
+// isPublicEntry 判断路径是否为公开页面入口（无需鉴权即可访问）
+func (s *Server) isPublicEntry(path string) bool {
+	// 根路径
+	if path == "/" || path == "" {
+		return true
+	}
+	// 页面入口文件
+	cleaned := strings.TrimPrefix(path, "/")
+	publicFiles := map[string]bool{
+		"index.html": true,
+		"todo.html":  true,
+		"common.js":  true,
+	}
+	if publicFiles[cleaned] {
+		return true
+	}
+	// 路由映射中配置的公开路径（如 /todo 重定向到 /todo.html）
+	if _, exists := s.cfg.Routes[path]; exists {
+		return true
+	}
+	return false
+}
+
+// handleStaticWithAuth 静态文件访问：页面入口公开，其余需 Bearer token
+func (s *Server) handleStaticWithAuth(ctx iris.Context) {
+	reqPath := ctx.Path()
+
+	// 公开页面入口：放行
+	if s.isPublicEntry(reqPath) {
+		s.handleStatic(ctx)
+		return
+	}
+
+	// 其余文件：需要鉴权
+	token := extractTokenFromContext(ctx)
+	if token == "" {
+		writeJSON(ctx, iris.StatusUnauthorized, map[string]string{"error": "Authentication required"})
+		return
+	}
+	valid, userID := ValidateToken(token, s.tokenSecret)
+	if !valid {
+		writeJSON(ctx, iris.StatusUnauthorized, map[string]string{"error": "Invalid or expired token"})
+		return
+	}
+	ctx.Values().Set("userID", userID)
+	s.handleStatic(ctx)
 }
 
 func (s *Server) handleStatic(ctx iris.Context) {

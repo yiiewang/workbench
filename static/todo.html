@@ -2814,7 +2814,7 @@
         const app = createApp({
             setup() {
                 // --- Constants ---
-                const STORAGE_KEY_USER = 'todo-current-user';
+                const STORAGE_KEY_USER = 'workbench-current-user';
                 const columns = [
                     { key: 'todo', label: '待办', icon: '🔴' },
                     { key: 'progress', label: '进行中', icon: '🟡' },
@@ -2994,7 +2994,9 @@
                     if (!forceRefresh && _tasksJsonCache && (now - _tasksJsonCacheTime) < TASKS_JSON_CACHE_TTL) {
                         return _tasksJsonCache;
                     }
-                    const resp = await fetch('/tasks.json');
+                    const resp = await fetch('/tasks.json', {
+                        headers: { 'Authorization': 'Bearer ' + authToken.value }
+                    });
                     if (resp.ok) {
                         const data = await resp.json();
                         _tasksJsonCache = data;
@@ -3574,7 +3576,7 @@
                 // --- User init ---
                 async function checkUser() {
                     // 1. 从 localStorage 恢复 token
-                    const savedToken = localStorage.getItem('todo_auth_token');
+                    const savedToken = localStorage.getItem('workbench_auth_token');
                     if (!savedToken) return false;
 
                     // 2. 调用 /api/me 校验 token 是否有效
@@ -3591,7 +3593,7 @@
                         }
                         if (resp.status === 401) {
                             // token 无效或过期
-                            localStorage.removeItem('todo_auth_token');
+                            localStorage.removeItem('workbench_auth_token');
                             authToken.value = '';
                         }
                     } catch (e) {
@@ -3645,7 +3647,7 @@
                             const data = await resp.json();
                             authToken.value = data.token;
                             currentUser.value = data.user;
-                            localStorage.setItem('todo_auth_token', data.token);
+                            localStorage.setItem('workbench_auth_token', data.token);
                             localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(data.user));
                             showUserModal.value = false;
                             viewingMember.value = null;
@@ -3683,7 +3685,7 @@
                             });
                             if (!resp.ok) {
                                 authToken.value = '';
-                                localStorage.removeItem('todo_auth_token');
+                                localStorage.removeItem('workbench_auth_token');
                                 showToast('登录已过期，请重新登录', 'error');
                                 openUserModal();
                             }

@@ -66,11 +66,12 @@ logging:
 - **File Browser** — Directory tree, tabbed editor, syntax highlighting for code/markdown/JSON
 - **Markdown Viewer** — Rendered markdown with Mermaid diagrams, cross-file link navigation, anchor scrolling
 - **JSON Viewer** — Collapsible tree view, raw text toggle, copy raw to clipboard
-- **Download & Share** — Download any file; share UI link (browser) or raw content link (curl)
+- **Download & Share** — Download any file; create time-limited, access-controlled shares for files or folders
 - **Static File Serving** — HTML, Markdown, JSON, CSS, JS, images with path traversal protection
 - **Route Mapping** — Clean URLs, display name aliases, redirects, directory listings
 - **Visit Tracking** — Per-visitor and per-page statistics persisted in SQLite (`GET /__stats__`)
-- **Token Auth** — HMAC-SHA256 authentication for write operations
+- **Token Auth** — HMAC-SHA256 authentication; all file access requires valid Bearer token (fully private mode)
+- **Share Management** — Create shares with access count limits, time ranges, optional passwords; manage all shares from sidebar panel
 - **Todo Board** — User/org task management with conflict detection, version sync, multi-device support
 - **SQLite Storage** — All data in a single portable `workbench.db` file (WAL mode)
 - **CORS Security** — Sandboxed iframe preview with null-origin CORS (no token leakage)
@@ -79,15 +80,19 @@ logging:
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/__stats__` | GET | Visit statistics |
-| `/__map__` | GET | Route configuration map |
-| `/__tree__` | GET | File directory tree (JSON) |
-| `/api/org-members` | GET | List org members (`?orgId=xxx`) |
+| `/__stats__` | GET | Visit statistics (requires token) |
+| `/__map__` | GET | Route configuration map (requires token) |
+| `/__tree__` | GET | File directory tree (JSON, requires token) |
+| `/api/org-members` | GET | List org members (`?orgId=xxx`, requires token) |
 | `/api/login` | POST | Login (`{orgId, userId, password}`) |
 | `/api/set-password` | POST | Set/change password |
 | `/api/me` | GET | Current user info (requires token) |
-| `/tasks.json` | GET | Task data with version info (passwords filtered) |
+| `/tasks.json` | GET | Task data with version info (requires token) |
 | `/tasks.json` | PUT | Update tasks + version (requires `Authorization: Bearer <token>`) |
+| `/api/share` | GET | List my shares (requires token) |
+| `/api/share` | POST | Create share `{resourcePath, resourceType, maxAccessCount, password, effectiveAt, expiresAt}` (requires token) |
+| `/api/share/{id}` | DELETE | Revoke share (requires token) |
+| `/s/{token}` | GET | Access shared resource (public, subject to share permissions) |
 | `/api/*`, `/tasks.json` | OPTIONS | CORS preflight (returns 204) |
 
 ### Raw File Access
@@ -110,6 +115,8 @@ SQLite database (`data/workbench.db`, WAL mode):
 | `orgs` | Organizations |
 | `users` | Users with SHA-256 password hashes, `version_json` for sync conflict detection |
 | `tasks` | Per-user task lists |
+| `shares` | Resource shares with access count, time range, password protection |
+| `app_secrets` | Application secrets (token signing key, etc.) |
 
 ## Security
 
@@ -127,8 +134,9 @@ workbench/
 │   ├── config/config.go        # Config loading (YAML + env overrides)
 │   ├── db/db.go                # SQLite data layer, migrations, FlexString type
 │   └── server/
-│       ├── server.go           # HTTP handlers, file serving, CORS, raw endpoint
-│       └── auth.go             # Token authentication
+│       ├── server.go           # HTTP handlers, file serving, CORS, auth middleware
+│       ├── auth.go             # Token authentication
+│       └── share.go            # Share management handlers
 ├── static/                     # Source files (index.html, todo.html)
 ├── preview/                    # Default serve directory (symlinks to static/)
 ├── config.yaml                 # Configuration file

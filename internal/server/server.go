@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kataras/iris/v12"
+	"github.com/yiiewang/workbench"
 	"github.com/yiiewang/workbench/internal/config"
 	"github.com/yiiewang/workbench/internal/db"
 )
@@ -502,20 +503,57 @@ func (s *Server) resolveStaticPath(relPath string) (string, bool) {
 	return realPath, true
 }
 
+// serveUIAsset 从 embed FS 服务内置 UI 资源（index.html/todo.html/css/js）
+// 命中返回 true（已写入响应），未命中返回 false 由调用方走磁盘
+func (s *Server) serveUIAsset(ctx iris.Context, reqPath string) bool {
+	rel := strings.TrimPrefix(reqPath, "/")
+	if rel == "" {
+		rel = "index.html"
+	}
+	if !isUIAsset(rel) {
+		return false
+	}
+	data, err := workbench.UIFS.ReadFile("static/" + rel)
+	if err != nil {
+		return false
+	}
+	ctx.ContentType(mimeTypeByExt(rel))
+	_, _ = ctx.Write(data)
+	return true
+}
+
+// isUIAsset 判断是否为内置 UI 资源（embed 打包，不可变）
+func isUIAsset(rel string) bool {
+	switch rel {
+	case "index.html", "todo.html":
+		return true
+	}
+	return strings.HasPrefix(rel, "css/") || strings.HasPrefix(rel, "js/")
+}
+
+// mimeTypeByExt 按扩展名返回 Content-Type
+func mimeTypeByExt(path string) string {
+	switch filepath.Ext(path) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js":
+		return "application/javascript; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 // isPublicEntry 判断路径是否为公开页面入口（无需鉴权即可访问）
 func (s *Server) isPublicEntry(path string) bool {
 	// 根路径
 	if path == "/" || path == "" {
 		return true
 	}
-	// 页面入口文件
 	cleaned := strings.TrimPrefix(path, "/")
-	publicFiles := map[string]bool{
-		"index.html": true,
-		"todo.html":  true,
-		"common.js":  true,
-	}
-	if publicFiles[cleaned] {
+	// UI 资源（embed 内置：index.html/todo.html/css/*/js/*）一律公开，无需鉴权
+	if isUIAsset(cleaned) {
 		return true
 	}
 	// 路由映射中配置的公开路径（如 /todo 重定向到 /todo.html）
@@ -567,6 +605,11 @@ func (s *Server) handleStatic(ctx iris.Context) {
 			reqPath = filePath
 			break
 		}
+	}
+
+	// UI 资源走 embed（内置模板，不可变），未命中再走磁盘 static_dir
+	if s.serveUIAsset(ctx, reqPath) {
+		return
 	}
 
 	fsPath, ok := s.resolveStaticPath(reqPath)

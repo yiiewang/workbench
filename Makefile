@@ -6,8 +6,8 @@ BUILD_DIR    := build
 VERSION      := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS      := -s -w -X main.version=$(VERSION)
 
-# 分发包包含的额外文件
-ASSETS       := static/index.html static/todo.html config.yaml README.md
+# 分发包包含的额外文件（UI 已 embed 进 binary，不再单独打包 static/）
+ASSETS       := config.yaml README.md
 
 # ============================================================
 # Local build
@@ -24,7 +24,7 @@ run: build
 # ============================================================
 # Cross-platform build + package (requires xgo + Docker)
 # 产出: build/workbench-<version>-<platform>.tar.gz / .zip
-# 每个包包含: 二进制 + static/ + config.yaml + README.md
+# 每个包包含: 二进制（含 embed UI）+ config.yaml + README.md
 # ============================================================
 .PHONY: build-all
 build-all:

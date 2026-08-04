@@ -86,6 +86,7 @@ func (s *Server) handleCreateShare(ctx iris.Context) {
 		ResourceType   string `json:"resourceType"`
 		MaxAccessCount int    `json:"maxAccessCount"`
 		Password       string `json:"password"`
+		Remark         string `json:"remark"`
 		EffectiveAt    string `json:"effectiveAt"`
 		ExpiresAt      string `json:"expiresAt"`
 	}
@@ -160,6 +161,7 @@ func (s *Server) handleCreateShare(ctx iris.Context) {
 		ResourceType:   resourceType,
 		MaxAccessCount: req.MaxAccessCount,
 		PasswordHash:   passwordHash,
+		Remark:         strings.TrimSpace(req.Remark),
 		EffectiveAt:    req.EffectiveAt,
 		ExpiresAt:      req.ExpiresAt,
 	}
@@ -179,6 +181,7 @@ func (s *Server) handleCreateShare(ctx iris.Context) {
 		"resourceType":   share.ResourceType,
 		"maxAccessCount": share.MaxAccessCount,
 		"hasPassword":    passwordHash != "",
+		"remark":         share.Remark,
 		"effectiveAt":    share.EffectiveAt,
 		"expiresAt":      share.ExpiresAt,
 	})
@@ -443,6 +446,7 @@ func (s *Server) handleShareData(ctx iris.Context) {
 		"expiresAt":      share.ExpiresAt,
 		"effectiveAt":    share.EffectiveAt,
 		"hasPassword":    share.PasswordHash != "",
+		"remark":         share.Remark,
 	}
 
 	if info.IsDir() {

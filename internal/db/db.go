@@ -184,6 +184,7 @@ func (d *DB) migrate() error {
 		max_access_count INTEGER DEFAULT 0,
 		access_count INTEGER DEFAULT 0,
 		password_hash TEXT DEFAULT '',
+		remark TEXT DEFAULT '',
 		effective_at TEXT DEFAULT '',
 		expires_at TEXT DEFAULT '',
 		created_at TEXT DEFAULT (datetime('now')),
@@ -198,6 +199,9 @@ func (d *DB) migrate() error {
 	}
 	// 自动迁移：补齐旧表缺失的列
 	if err := d.migrateTasksColumns(); err != nil {
+		return err
+	}
+	if err := d.migrateSharesColumns(); err != nil {
 		return err
 	}
 	return d.migrateUsersColumns()
@@ -270,6 +274,43 @@ func (d *DB) migrateTasksColumns() error {
 			continue
 		}
 		q := fmt.Sprintf("ALTER TABLE tasks ADD COLUMN %s %s", col.name, col.def)
+		if _, err := d.conn.Exec(q); err != nil {
+			return fmt.Errorf("add column %s: %w", col.name, err)
+		}
+	}
+
+	return nil
+}
+
+// migrateSharesColumns 检测 shares 表列，自动补齐缺失列（兼容旧 schema）
+func (d *DB) migrateSharesColumns() error {
+	rows, err := d.conn.Query(`PRAGMA table_info(shares)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defVal sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defVal, &pk); err != nil {
+			return err
+		}
+		existing[name] = true
+	}
+
+	columns := []struct{ name, def string }{
+		{"remark", "TEXT DEFAULT ''"},
+	}
+
+	for _, col := range columns {
+		if existing[col.name] {
+			continue
+		}
+		q := fmt.Sprintf("ALTER TABLE shares ADD COLUMN %s %s", col.name, col.def)
 		if _, err := d.conn.Exec(q); err != nil {
 			return fmt.Errorf("add column %s: %w", col.name, err)
 		}
@@ -532,6 +573,7 @@ type Share struct {
 	AccessCount    int    `json:"accessCount"`
 	PasswordHash   string `json:"-"` // 不序列化
 	HasPassword    bool   `json:"hasPassword"`
+	Remark         string `json:"remark"` // 分享备注（复制链接时附带）
 	EffectiveAt    string `json:"effectiveAt"`
 	ExpiresAt      string `json:"expiresAt"`
 	CreatedAt      string `json:"createdAt"`
@@ -539,17 +581,17 @@ type Share struct {
 
 // CreateShare 创建分享记录
 func (d *DB) CreateShare(s *Share) error {
-	const q = `INSERT INTO shares (id, token, owner_user_id, owner_org_id, resource_path, resource_type, max_access_count, access_count, password_hash, effective_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
+	const q = `INSERT INTO shares (id, token, owner_user_id, owner_org_id, resource_path, resource_type, max_access_count, access_count, password_hash, remark, effective_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`
 	_, err := d.conn.Exec(q, s.ID, s.Token, s.OwnerUserID, s.OwnerOrgID, s.ResourcePath, s.ResourceType,
-		s.MaxAccessCount, s.PasswordHash, s.EffectiveAt, s.ExpiresAt)
+		s.MaxAccessCount, s.PasswordHash, s.Remark, s.EffectiveAt, s.ExpiresAt)
 	return err
 }
 
 // ListSharesByOwner 查询用户的所有分享
 func (d *DB) ListSharesByOwner(orgID, userID string) ([]Share, error) {
 	rows, err := d.conn.Query(`SELECT id, token, owner_user_id, owner_org_id, resource_path, resource_type,
-		max_access_count, access_count, password_hash, effective_at, expires_at, created_at
+		max_access_count, access_count, password_hash, remark, effective_at, expires_at, created_at
 		FROM shares WHERE owner_org_id = ? AND owner_user_id = ? ORDER BY created_at DESC`, orgID, userID)
 	if err != nil {
 		return nil, err
@@ -560,7 +602,7 @@ func (d *DB) ListSharesByOwner(orgID, userID string) ([]Share, error) {
 	for rows.Next() {
 		var s Share
 		if err := rows.Scan(&s.ID, &s.Token, &s.OwnerUserID, &s.OwnerOrgID, &s.ResourcePath, &s.ResourceType,
-			&s.MaxAccessCount, &s.AccessCount, &s.PasswordHash, &s.EffectiveAt, &s.ExpiresAt, &s.CreatedAt); err != nil {
+			&s.MaxAccessCount, &s.AccessCount, &s.PasswordHash, &s.Remark, &s.EffectiveAt, &s.ExpiresAt, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		s.HasPassword = s.PasswordHash != ""
@@ -573,10 +615,10 @@ func (d *DB) ListSharesByOwner(orgID, userID string) ([]Share, error) {
 func (d *DB) GetShareByToken(token string) (*Share, error) {
 	var s Share
 	err := d.conn.QueryRow(`SELECT id, token, owner_user_id, owner_org_id, resource_path, resource_type,
-		max_access_count, access_count, password_hash, effective_at, expires_at, created_at
+		max_access_count, access_count, password_hash, remark, effective_at, expires_at, created_at
 		FROM shares WHERE token = ?`, token).Scan(
 		&s.ID, &s.Token, &s.OwnerUserID, &s.OwnerOrgID, &s.ResourcePath, &s.ResourceType,
-		&s.MaxAccessCount, &s.AccessCount, &s.PasswordHash, &s.EffectiveAt, &s.ExpiresAt, &s.CreatedAt)
+		&s.MaxAccessCount, &s.AccessCount, &s.PasswordHash, &s.Remark, &s.EffectiveAt, &s.ExpiresAt, &s.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

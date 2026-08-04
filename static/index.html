@@ -595,7 +595,7 @@
     padding: 4px 0;
   }
   .share-item {
-    padding: 8px 16px;
+    padding: 10px 16px;
     border-bottom: 1px solid var(--border);
     cursor: default;
   }
@@ -606,7 +606,15 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    margin-bottom: 3px;
+    margin-bottom: 4px;
+  }
+  .share-item-remark {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .share-item-meta {
     font-size: 10px;
@@ -614,6 +622,7 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    margin-bottom: 6px;
   }
   .share-item-meta .tag {
     padding: 1px 6px;
@@ -626,7 +635,6 @@
   .share-item-actions {
     display: flex;
     gap: 4px;
-    margin-top: 6px;
   }
   .share-item-actions .btn-sm {
     padding: 2px 8px;
@@ -1603,7 +1611,6 @@ function loadMermaid() {
   mermaidReady = new Promise((resolve) => {
     const script = document.createElement('script');
     script.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
-    script.integrity = 'sha384-T/0lMUdJpd2S1ZHtRiofG3htU3xPCrFVeAQ1UUE2TJwlEJSV5NUwn30kP28n238E';
     script.crossOrigin = 'anonymous';
     script.onload = () => {
       mermaid.initialize({ startOnLoad: false, theme: 'default' });
@@ -1625,7 +1632,6 @@ function loadMarked() {
   markedReady = new Promise((resolve) => {
     const script = document.createElement('script');
     script.src = 'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js';
-    script.integrity = 'sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi';
     script.crossOrigin = 'anonymous';
     script.onload = () => resolve();
     script.onerror = () => { markedReady = Promise.resolve(); };
@@ -1644,7 +1650,6 @@ function loadDomPurify() {
   domPurifyReady = new Promise((resolve) => {
     const script = document.createElement('script');
     script.src = 'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js';
-    script.integrity = 'sha384-piCcpDdJ7qVeK4Tv8Z6Hpcr3ZBIgP16TxQTPVfsLFdZ5uDgwc3Y8Ho7oUnqf12qu';
     script.crossOrigin = 'anonymous';
     script.onload = () => resolve();
     script.onerror = () => { domPurifyReady = Promise.resolve(); };
@@ -1700,18 +1705,22 @@ window.addEventListener('popstate', (e) => {
 
   // #shares → 分享管理面板
   if (hash === '#shares') {
-    if (todoFrameActive) closeTodoFrame();
     document.getElementById('explorerPanel').classList.remove('active');
     document.getElementById('sharesPanel').classList.add('active');
+    if (todoFrameActive) closeTodoFrame();
+    document.getElementById('explorerBtn').classList.remove('active');
+    document.getElementById('sharePanelBtn').classList.add('active');
     loadShares();
     isPopstateNavigating = false;
     return;
   }
 
   // 文件路径或空 → Explorer 视图
-  if (todoFrameActive) closeTodoFrame();
   document.getElementById('explorerPanel').classList.add('active');
   document.getElementById('sharesPanel').classList.remove('active');
+  if (todoFrameActive) closeTodoFrame();
+  document.getElementById('sharePanelBtn').classList.remove('active');
+  document.getElementById('explorerBtn').classList.add('active');
 
   const p = getHashPath();
   if (p && openTabs.has(p)) {
@@ -1754,6 +1763,7 @@ function mountShareApp() {
       const resourceType = ref('file');
       const maxAccessCount = ref(0);
       const password = ref('');
+      const remark = ref('');
       const dateRange = ref([]);  // [effectiveAt, expiresAt] (RFC3339)
       const submitting = ref(false);
 
@@ -1775,6 +1785,7 @@ function mountShareApp() {
         resourceType.value = type || 'file';
         maxAccessCount.value = 0;
         password.value = '';
+        remark.value = '';
         dateRange.value = [];
         submitting.value = false;
       };
@@ -1795,6 +1806,7 @@ function mountShareApp() {
               resourceType: resourceType.value,
               maxAccessCount: maxAccessCount.value,
               password: password.value,
+              remark: remark.value,
               effectiveAt: effectiveAt.value,
               expiresAt: expiresAt.value
             })
@@ -1804,7 +1816,13 @@ function mountShareApp() {
             throw new Error(err.error || `HTTP ${resp.status}`);
           }
           const data = await resp.json();
-          copyToClipboard(data.url);
+          // 缓存明文密码到 localStorage，供列表复制时取出（百度网盘风格）
+          if (password.value) {
+            try { localStorage.setItem('share_pwd_' + data.token, password.value); } catch(e) {}
+          }
+          // 复制格式化文本（链接+提取码+备注）
+          const clipText = formatShareText(data.url, password.value, remark.value);
+          copyToClipboard(clipText);
           showToast('分享创建成功，链接已复制');
           close();
           loadShares();
@@ -1815,7 +1833,7 @@ function mountShareApp() {
         }
       };
 
-      return { resourcePath, resourceType, maxAccessCount, password, dateRange, submitting, open, close, submit };
+      return { resourcePath, resourceType, maxAccessCount, password, remark, dateRange, submitting, open, close, submit };
     },
     template: `
       <el-form label-position="top" @submit.prevent>
@@ -1823,11 +1841,16 @@ function mountShareApp() {
           <el-input :model-value="resourcePath" readonly></el-input>
           <div style="font-size:11px;color:#999;margin-top:3px;">类型：{{ resourceType === 'dir' ? '文件夹' : '文件' }}</div>
         </el-form-item>
-        <el-form-item label="最大访问次数 (0=不限)">
-          <el-input-number v-model="maxAccessCount" :min="0" :step="1" controls-position="right" style="width:100%;"></el-input-number>
-        </el-form-item>
-        <el-form-item label="访问密码 (可选)">
-          <el-input v-model="password" placeholder="留空则无需密码" clearable></el-input>
+        <div style="display:flex;gap:12px;">
+          <el-form-item label="最大访问次数 (0=不限)" style="flex:1;">
+            <el-input-number v-model="maxAccessCount" :min="0" :step="1" controls-position="right" style="width:100%;"></el-input-number>
+          </el-form-item>
+          <el-form-item label="访问密码 (可选)" style="flex:1;">
+            <el-input v-model="password" placeholder="留空则无需密码" clearable></el-input>
+          </el-form-item>
+        </div>
+        <el-form-item label="备注 (可选)">
+          <el-input v-model="remark" placeholder="复制链接时附带此备注" clearable maxlength="200" show-word-limit></el-input>
         </el-form-item>
         <el-form-item label="时间范围 (可选)">
           <el-date-picker
@@ -1898,9 +1921,11 @@ function renderShareList(shares) {
       `<span class="tag">访问 ${s.accessCount}/${s.maxAccessCount}</span>` :
       `<span class="tag">访问 ${s.accessCount}/∞</span>`;
     const timeTag = s.expiresAt ? `<span class="tag">⏰ ${s.expiresAt.slice(0,10)}</span>` : '';
+    const remarkHtml = s.remark ? `<div class="share-item-remark" title="${escapeHtml(s.remark)}">📝 ${escapeHtml(s.remark)}</div>` : '';
     return `
-      <div class="share-item" data-id="${s.id}">
+      <div class="share-item" data-id="${s.id}" data-token="${s.token}" data-remark="${escapeHtml(s.remark || '')}">
         <div class="share-item-path" title="${escapeHtml(s.resourcePath)}">${escapeHtml(s.resourcePath)}</div>
+        ${remarkHtml}
         <div class="share-item-meta">
           ${typeTag} ${lockTag} ${countTag} ${timeTag}
         </div>
@@ -1912,11 +1937,29 @@ function renderShareList(shares) {
   }).join('');
 }
 
-// 复制分享链接
+// 格式化分享复制文本（百度网盘风格：链接+提取码+备注）
+function formatShareText(url, password, remark) {
+  let text = '链接: ' + url;
+  if (password) {
+    text += '\n提取码: ' + password;
+  }
+  if (remark) {
+    text += '\n备注: ' + remark;
+  }
+  return text;
+}
+
+// 复制分享链接（从列表复制时，从 localStorage 取缓存的明文密码）
 function copyShareUrl(token) {
   const url = window.location.origin + '/s/' + token;
-  copyToClipboard(url);
-  showToast('分享链接已复制');
+  let pwd = '';
+  try { pwd = localStorage.getItem('share_pwd_' + token) || ''; } catch(e) {}
+  // remark 从列表 DOM 的 data 属性获取
+  const item = document.querySelector('.share-item[data-token="' + token + '"]');
+  const remark = item ? (item.getAttribute('data-remark') || '') : '';
+  const clipText = formatShareText(url, pwd, remark);
+  copyToClipboard(clipText);
+  showToast(pwd ? '链接+提取码已复制' : '分享链接已复制');
 }
 
 // 撤销分享
@@ -1946,6 +1989,8 @@ let isPopstateNavigating = false;
 function showExplorer() {
   document.getElementById('explorerPanel').classList.add('active');
   document.getElementById('sharesPanel').classList.remove('active');
+  document.getElementById('sharePanelBtn').classList.remove('active');
+  document.getElementById('explorerBtn').classList.add('active');
   const wasTodoActive = todoFrameActive;
   closeTodoFrame();
   // 更新 URL（仅当不是来自 popstate 时）
@@ -1963,6 +2008,8 @@ function showExplorer() {
 function showShares() {
   document.getElementById('explorerPanel').classList.remove('active');
   document.getElementById('sharesPanel').classList.add('active');
+  document.getElementById('explorerBtn').classList.remove('active');
+  document.getElementById('sharePanelBtn').classList.add('active');
   closeTodoFrame();
   loadShares();
   if (!isPopstateNavigating) {
@@ -1993,6 +2040,7 @@ function openTodoFrame() {
   // 高亮 Todo 按钮
   document.getElementById('todoBtn').classList.add('active');
   document.getElementById('explorerBtn').classList.remove('active');
+  document.getElementById('sharePanelBtn').classList.remove('active');
 }
 
 function closeTodoFrame() {
@@ -2011,7 +2059,11 @@ function closeTodoFrame() {
 
   // 恢复高亮
   document.getElementById('todoBtn').classList.remove('active');
-  document.getElementById('explorerBtn').classList.add('active');
+  if (document.getElementById('sharesPanel').classList.contains('active')) {
+    document.getElementById('sharePanelBtn').classList.add('active');
+  } else {
+    document.getElementById('explorerBtn').classList.add('active');
+  }
 
   // 恢复 URL hash
   if (activeTabPath) {
@@ -2219,6 +2271,8 @@ async function initApp() {
     if (window.location.hash === '#shares') {
       document.getElementById('explorerPanel').classList.remove('active');
       document.getElementById('sharesPanel').classList.add('active');
+      document.getElementById('explorerBtn').classList.remove('active');
+      document.getElementById('sharePanelBtn').classList.add('active');
       loadShares();
       return;
     }

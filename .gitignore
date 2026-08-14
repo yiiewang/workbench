@@ -25,3 +25,8 @@ vendor/
 *.db
 /data/
 /preview/
+
+# 前端依赖与构建产物（均不入库：node_modules + dist）
+# frontend/dist 由 make frontend/all 生成，fresh clone 需先 make all 才能 go build/check
+/frontend/node_modules/
+/frontend/dist/

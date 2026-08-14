@@ -4,7 +4,8 @@ package workbench
 
 import "embed"
 
-// UIFS 内置 UI 资源文件系统，包含 index.html / todo.html / css / js
+// UIFS 内置 UI 资源文件系统，由 frontend/ 的 Vite 构建产物 frontend/dist 提供
+// （index.html / todo.html / assets/*）。构建命令：make frontend 或 make all。
 //
-//go:embed static
+//go:embed frontend/dist
 var UIFS embed.FS

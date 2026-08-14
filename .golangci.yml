@@ -1,0 +1,46 @@
+# golangci-lint 配置
+# 用法: golangci-lint run ./...  或  make lint
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # 检查未处理的错误返回值
+    - gosimple      # 简化代码建议
+    - govet         # go vet 检查
+    - ineffassign   # 检测无效赋值
+    - staticcheck   # 综合静态分析
+    - unused        # 未使用的代码
+    - revive        # 风格/命名检查（替代 golint）
+    - misspell      # 拼写错误
+    - gocritic      # 代码改进建议
+    - gofmt         # 格式化检查
+
+linters-settings:
+  errcheck:
+    # 允许显式忽略这些函数的返回值
+    exclude-functions:
+      - (io.Closer).Close
+  revive:
+    rules:
+      - name: exported
+        disabled: true  # 暂不强求所有导出符号都有注释
+  gocritic:
+    disabled-tags:
+      - performance  # 性能建议噪音较多，暂关闭
+  gofmt:
+    simplify: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # 测试代码放宽部分检查
+    - path: _test\.go
+      linters: [gocritic, revive]
+    # 测试中使用 httpexpect 的弃用 API（Equal→IsEqual）暂不阻塞
+    - path: _test\.go
+      linters: [staticcheck]
+      text: "SA1019"

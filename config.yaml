@@ -23,9 +23,11 @@ auth:
 #   "__listdir__"  -> show file listing
 #   "Display Name" -> display name alias in directory listing
 routes:
-  "/todo": "/todo.html"
+  "/todo": "__spa__"
+  "/shares": "__spa__"
   "/index": "__listdir__"
   "/todo.html": "Todo Board"
 
 logging:
   dir: logs
+  level: info  # debug | info | warn | error

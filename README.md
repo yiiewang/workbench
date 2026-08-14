@@ -5,20 +5,25 @@ Personal dev platform — file browser, markdown viewer, todo board, and API too
 ## Quick Start
 
 ```bash
-# Build
-go build -o workbench ./cmd/workbench/
+# 前置：Go 1.25+、Node 18+、pnpm（前端构建工具链）
+
+# Fresh clone 或改过前端：一键构建（前端编译 + Go build，embed frontend/dist）
+make all
+
+# 只改 Go 代码：直接 build（embed 已生成的 frontend/dist）
+make build
 
 # Run (with default config.yaml)
-./workbench
+make run
 
-# Or use the launcher (auto-builds on source change)
-./preview.sh
+# 前端开发服务器（Vite 热更新，不 embed）
+cd frontend && pnpm dev
 
 # Custom config
-./workbench --config /path/to/config.yaml
+make preview ARGS="--config /path/to/config.yaml"
 
 # Environment overrides
-PORT=3000 STATIC_DIR=/var/www ./workbench
+PORT=3000 STATIC_DIR=/var/www make run
 ```
 
 Then open http://localhost:80 in your browser.
@@ -49,6 +54,7 @@ routes:                       # URL routing
 
 logging:
   dir: ~/.local/state/workbench  # Access log directory
+  level: info                    # Operational log level: debug | info | warn | error (structured JSON to stdout)
 ```
 
 ### Environment Variables
@@ -130,18 +136,21 @@ SQLite database (`data/workbench.db`, WAL mode):
 ```
 workbench/
 ├── cmd/workbench/main.go       # Entry point
+├── embed.go                    # //go:embed frontend/dist — 内置 UI 资源
 ├── internal/
-│   ├── config/config.go        # Config loading (YAML + env overrides)
-│   ├── db/db.go                # SQLite data layer, migrations, FlexString type
-│   └── server/
-│       ├── server.go           # HTTP handlers, file serving, CORS, auth middleware
-│       ├── auth.go             # Token authentication
-│       └── share.go            # Share management handlers
-├── static/                     # Source files (index.html, todo.html)
-├── preview/                    # Default serve directory (symlinks to static/)
+│   ├── config/                 # Config loading (YAML + env overrides, logging level)
+│   ├── db/                     # SQLite layer: db/migrate/secrets/visits/users/tasks/shares/rate_limits
+│   └── server/                 # HTTP handlers, auth, share, codes/response helpers, handler_test
+├── frontend/                   # Vite + Vue3 + TypeScript 工程
+│   ├── src/                    # 源码: TodoApp.vue / TaskItem.vue / MarkdownEditor.vue / todo-app.ts / common.ts
+│   ├── dist/                   # 构建产物 (gitignored, make frontend 生成, //go:embed 嵌入)
+│   ├── index.html / todo.html  # Vite 多入口
+│   └── vite.config.ts          # manualChunks 拆 vendor + highlight.js 按需
+├── preview/                    # Default serve directory (用户文件)
+├── scripts/package.sh          # Cross-platform packaging (used by `make package`)
 ├── config.yaml                 # Configuration file
 ├── data/                       # Runtime data (gitignored)
-├── preview.sh                  # Launcher script
+├── Makefile                    # build / frontend / all / check
 ├── go.mod / go.sum
 ├── README.md
 └── .gitignore

@@ -55,9 +55,12 @@ func VerifyPassword(hash, password string) bool {
 	return subtle.ConstantTimeCompare([]byte(hash), []byte(old)) == 1
 }
 
+// secondsPerDay 一天的秒数，用于 token 过期时间换算
+const secondsPerDay = 24 * 60 * 60
+
 // GenerateToken 生成带过期时间的 HMAC token
 func GenerateToken(userID string, secret []byte, expiryDays int) string {
-	expiry := time.Now().Unix() + int64(expiryDays)*86400
+	expiry := time.Now().Unix() + int64(expiryDays)*secondsPerDay
 	payload := fmt.Sprintf("%s:%d", userID, expiry)
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(payload))
@@ -79,7 +82,9 @@ func ValidateToken(token string, secret []byte) (bool, string) {
 	userID, expiryStr, sigHex := parts[0], parts[1], parts[2]
 
 	expiry := int64(0)
-	fmt.Sscanf(expiryStr, "%d", &expiry)
+	if _, err := fmt.Sscanf(expiryStr, "%d", &expiry); err != nil {
+		return false, ""
+	}
 	if time.Now().Unix() > expiry {
 		return false, ""
 	}
@@ -109,12 +114,12 @@ func AuthMiddleware(secret []byte) iris.Handler {
 	return func(ctx iris.Context) {
 		token := extractTokenFromContext(ctx)
 		if token == "" {
-			writeJSON(ctx, iris.StatusUnauthorized, map[string]string{"error": "Missing token"})
+			writeFail(ctx, iris.StatusUnauthorized, CodeMissingToken)
 			return
 		}
 		valid, uid := ValidateToken(token, secret)
 		if !valid {
-			writeJSON(ctx, iris.StatusUnauthorized, map[string]string{"error": "Invalid or expired token"})
+			writeFail(ctx, iris.StatusUnauthorized, CodeInvalidToken)
 			return
 		}
 		ctx.Values().Set("userID", uid)

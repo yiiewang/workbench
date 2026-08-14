@@ -2,11 +2,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kataras/iris/v12"
 	"github.com/yiiewang/workbench/internal/config"
@@ -15,14 +17,43 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("fatal", "err", err)
+		os.Exit(1)
+	}
+}
+
+// parseLogLevel 将配置字符串转为 slog.Level，默认 info。
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// run 承载全部启动逻辑；返回 error 时 main 中的 slog.Error+os.Exit 才执行，
+// 此时 run 内的 defer（如 database.Close）已正常释放，避免 exitAfterDefer。
+func run() error {
+	// 先用默认级别初始化结构化日志，配置加载后按 cfg.Logging.Level 调整
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	configPath := flag.String("config", "config.yaml", "path to config YAML file")
 	flag.Parse()
 
 	// 加载配置
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("load config failed, err=%v", err)
+		return fmt.Errorf("load config: %w", err)
 	}
+
+	// 按配置级别重建 logger
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(cfg.Logging.Level)})))
 
 	// 环境变量覆盖
 	config.ApplyEnv(cfg)
@@ -33,21 +64,23 @@ func main() {
 	logDir := config.ResolvePath(cfg.Logging.Dir)
 
 	// 确保目录存在
-	os.MkdirAll(staticDir, 0755)
-	os.MkdirAll(logDir, 0755)
-	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	for _, dir := range []string{staticDir, logDir, filepath.Dir(dbPath)} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("create directory %s: %w", dir, err)
+		}
+	}
 
 	// 初始化数据库
 	database, err := db.Open(dbPath)
 	if err != nil {
-		log.Fatalf("open database failed, err=%v", err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
 	// 加载 token 秘钥（存入 db，自动迁移旧 .token_secret 文件）
-	tokenSecret, err := database.LoadOrCreateSecret("token", filepath.Join(staticDir, ".token_secret"))
+	tokenSecret, err := database.LoadOrCreateSecret(context.Background(), "token", filepath.Join(staticDir, ".token_secret"))
 	if err != nil {
-		log.Fatalf("load token secret failed, err=%v", err)
+		return fmt.Errorf("load token secret: %w", err)
 	}
 
 	logFile := filepath.Join(logDir, "preview.log")
@@ -55,21 +88,22 @@ func main() {
 	// 初始化 HTTP Server
 	srv, err := server.New(database, cfg, tokenSecret, logFile)
 	if err != nil {
-		log.Fatalf("create server failed, err=%v", err)
+		return fmt.Errorf("create server: %w", err)
 	}
 
 	app := srv.App()
 
-	log.Printf("Workbench started on http://localhost:%d", cfg.Server.Port)
-	log.Printf("Serving directory: %s", staticDir)
-	log.Printf("Database: %s", dbPath)
-	log.Printf("Visit stats: http://localhost:%d/__stats__", cfg.Server.Port)
-	log.Printf("Log file: %s", logFile)
-	log.Println("Press Ctrl+C to stop")
+	slog.Info("server started",
+		"url", fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
+		"port", cfg.Server.Port,
+		"static_dir", staticDir,
+		"db", dbPath,
+		"log_file", logFile,
+	)
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	if err := app.Run(iris.Addr(addr), iris.WithoutServerError(iris.ErrServerClosed)); err != nil {
-		log.Fatalf("server failed, err=%v", err)
+		return fmt.Errorf("server run: %w", err)
 	}
-	log.Println("server stopped")
+	return nil
 }

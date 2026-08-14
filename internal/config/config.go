@@ -12,19 +12,19 @@ import (
 
 // Config 应用总配置
 type Config struct {
-	Server  ServerConfig       `yaml:"server"`
-	DB      DBConfig           `yaml:"database"`
-	Auth    AuthConfig         `yaml:"auth"`
-	Routes  map[string]string  `yaml:"routes"`
-	Logging LogConfig          `yaml:"logging"`
+	Server  ServerConfig      `yaml:"server"`
+	DB      DBConfig          `yaml:"database"`
+	Auth    AuthConfig        `yaml:"auth"`
+	Routes  map[string]string `yaml:"routes"`
+	Logging LogConfig         `yaml:"logging"`
 }
 
 // ServerConfig HTTP 服务配置
 type ServerConfig struct {
-	Port        int      `yaml:"port"`
-	StaticDir   string   `yaml:"static_dir"`
-	Hidden      []string `yaml:"hidden"`
-	AllowSymlink bool    `yaml:"allow_symlink"`
+	Port         int      `yaml:"port"`
+	StaticDir    string   `yaml:"static_dir"`
+	Hidden       []string `yaml:"hidden"`
+	AllowSymlink bool     `yaml:"allow_symlink"`
 }
 
 // DBConfig 数据库配置
@@ -39,7 +39,8 @@ type AuthConfig struct {
 
 // LogConfig 日志配置
 type LogConfig struct {
-	Dir string `yaml:"dir"`
+	Dir   string `yaml:"dir"`
+	Level string `yaml:"level"` // debug | info | warn | error，默认 info
 }
 
 // DefaultConfig 返回默认配置
@@ -62,7 +63,8 @@ func DefaultConfig() *Config {
 			"/todo.html": "Todo Board",
 		},
 		Logging: LogConfig{
-			Dir: "~/.local/state/workbench",
+			Dir:   "~/.local/state/workbench",
+			Level: "info",
 		},
 	}
 }
@@ -108,6 +110,9 @@ func mergeConfig(dst, src *Config) {
 	}
 	if src.Logging.Dir != "" {
 		dst.Logging.Dir = src.Logging.Dir
+	}
+	if src.Logging.Level != "" {
+		dst.Logging.Level = src.Logging.Level
 	}
 	if src.Routes != nil {
 		dst.Routes = src.Routes

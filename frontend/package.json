@@ -1,0 +1,33 @@
+{
+  "name": "workbench-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:nocheck": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "element-plus": "^2.8.0",
+    "highlight.js": "^11.9.0",
+    "marked": "^12.0.2",
+    "spark-md5": "^3.0.2",
+    "vue": "^3.5.0",
+    "vue-router": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/spark-md5": "^3.0.4",
+    "@vitejs/plugin-vue": "^5.1.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vue-tsc": "^2.1.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

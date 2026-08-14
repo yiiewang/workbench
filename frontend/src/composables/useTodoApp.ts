@@ -8,7 +8,7 @@ import {
     conflictChoices, showConfirmSummary, confirmSummary, filterSeverity,
     orgTasks, activeTaskId,
 } from '../stores/todoStore'
-import { showLoginModalFn, checkAuth } from '../stores/indexStore'
+import { checkAuth } from '../stores/indexStore'
 import * as taskApi from '../api/tasks'
 import { ElNotification } from 'element-plus'
 import { marked, Renderer } from 'marked'
@@ -787,11 +787,7 @@ export function setupTodoApp() {
     // --- User init ---
     // 认证校验委托给 auth store 的 checkAuth()，避免重复实现 /api/me 调用逻辑。
     // checkAuth() 会自动处理：401 清除认证 / 200 刷新 user / 网络错误离线兜底。
-
-    // 触发全局登录弹窗
-    function showGlobalLogin() {
-        showLoginModalFn?.()
-    }
+    // 未登录时路由守卫已拦截跳转 /login，此处不再弹窗。
 
     async function init() {
         if (await checkAuth()) {
@@ -799,19 +795,11 @@ export function setupTodoApp() {
             await loadUserTasks()
             return
         }
-        // 未登录 → 弹出全局登录框，轮询等待登录完成
-        showGlobalLogin()
-        const poll = setInterval(async () => {
-            // LoginModal.doLogin 调用 setAuth() 后 authToken ref 同步更新
-            if (authToken.value) {
-                clearInterval(poll)
-                startTokenRefresh()
-                await loadUserTasks()
-            }
-        }, 1500)
+        // 未登录 → 路由守卫已跳转登录页，此处不处理
     }
 
-    // 每天自动校验 token，过期则清除认证状态并弹窗重新登录
+    // 每天自动校验 token，过期则清除认证状态
+    // apiCall 全局 401 拦截会自动跳转登录页
     let tokenTimer = null;
     // TOKEN_REFRESH_INTERVAL_MS token 有效性定时校验间隔（24h）
     const TOKEN_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -822,7 +810,6 @@ export function setupTodoApp() {
             const valid = await checkAuth()
             if (!valid) {
                 showToast('登录已过期，请重新登录', 'error');
-                showGlobalLogin();
             }
         }, TOKEN_REFRESH_INTERVAL_MS);
     }
@@ -1688,7 +1675,7 @@ export function setupTodoApp() {
         // Date range picker
         editingDateRange, onEditingDateRangeChange,
         editingTaskContent,
-        // User（登录弹窗复用 App.vue 全局 #loginModal）
+        // User
         currentUser,
         // Org members
         viewingMember, orgMembers,

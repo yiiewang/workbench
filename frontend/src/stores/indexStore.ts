@@ -50,11 +50,9 @@ export function storeTabCount(): number { return openTabs.size; }
 // ============================================================
 export let openTabFn: ((path: string, name: string, ext: string, size: number) => void) | null = null
 export let loadSharesFn: (() => Promise<void>) | null = null
-export let showLoginModalFn: (() => void) | null = null
 
 export function setOpenTabFn(fn: typeof openTabFn) { openTabFn = fn }
 export function setLoadSharesFn(fn: typeof loadSharesFn) { loadSharesFn = fn }
-export function setShowLoginModalFn(fn: typeof showLoginModalFn) { showLoginModalFn = fn }
 
 // ============================================================
 // Data source abstraction

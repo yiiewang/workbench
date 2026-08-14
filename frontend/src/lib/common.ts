@@ -67,9 +67,23 @@ export const API_CODE = {
  * 统一 JSON API 调用：自动带 token、解包 {code,msg,data} 信封。
  * 成功返回 data（裸载荷）；失败抛 Error（附带 code/msg/status/data 字段）。
  * 仅用于返回 JSON 信封的 API 端点；原始文件流（text/blob）仍用 authFetch。
+ *
+ * 401 全局拦截：token 过期/无效时自动清除认证并跳转登录页，
+ * 各调用方无需重复处理 401。
  */
 export async function apiCall(url: string, opts: any = {}) {
   const resp = await authFetch(url, opts);
+  // 401 全局拦截：跳转登录页（排除 /api/login 和 /api/me 自身，避免循环）
+  if (resp.status === 401 && !url.startsWith('/api/login') && !url.startsWith('/api/me')) {
+    clearAuthState();
+    const current = window.location.pathname + window.location.search;
+    if (!current.startsWith('/login')) {
+      window.location.href = '/login?redirect=' + encodeURIComponent(current);
+    }
+    const err: any = new Error('Unauthorized');
+    err.status = 401;
+    throw err;
+  }
   let body: any = {};
   try { body = await resp.json(); } catch (_) { /* 非 JSON 响应 */ }
   if (!resp.ok || body.code !== API_CODE.OK) {

@@ -25,6 +25,7 @@ auth:
 routes:
   "/todo": "__spa__"
   "/shares": "__spa__"
+  "/login": "__spa__"
   "/index": "__listdir__"
   "/todo.html": "Todo Board"
 

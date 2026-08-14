@@ -8,7 +8,7 @@ import { showSharePasswordModal } from '../lib/sharePasswordModal'
 import {
   authToken as storeAuthToken,
   dsMode, dsToken, dsPathPrefix, shareRootPath,
-  setOpenTabFn, loadSharesFn, showLoginModalFn,
+  setOpenTabFn, loadSharesFn,
   checkAuth,
 } from '../stores/indexStore'
 import { treeStore } from './useTreeStore'
@@ -127,13 +127,13 @@ export function setupIndexApp() {
         treeStore.activePath.value = null
       }
 
+      // 未登录 → 路由守卫已拦截，此处不再弹窗
       if (!storeAuthToken.value) {
-        showLoginModalFn?.()
         return
       }
       const authed = await checkAuth()
       if (!authed) {
-        showLoginModalFn?.()
+        // checkAuth 内部已处理 401 清除认证，apiCall 全局拦截会跳转登录页
         return
       }
 
@@ -176,13 +176,11 @@ export function setupIndexApp() {
       console.error('[workbench] initApp threw an error:', err)
     })
 
-    // Token refresh (hourly) — validate via auth.checkAuth, clear on failure
+    // Token refresh (hourly) — validate via auth.checkAuth.
+    // 失效时 checkAuth 内部清除认证，apiCall 全局 401 拦截自动跳转登录页。
     setInterval(async () => {
       if (!storeAuthToken.value) return
-      const valid = await checkAuth()
-      if (!valid) {
-        showLoginModalFn?.()
-      }
+      await checkAuth()
     }, 3600000)
   })
 }

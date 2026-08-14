@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { authToken, activeTabPath, showLoginModalFn } from '../../stores/indexStore'
+import { useRouter } from 'vue-router'
+import { authToken, activeTabPath } from '../../stores/indexStore'
 import { showToast, copyToClipboard } from '../../lib/common'
 import * as shareApi from '../../api/share'
 
@@ -65,10 +66,12 @@ function formatShareText(url: string, pwd: string, rem: string) {
   return text
 }
 
+const router = useRouter()
+
 // expose to window for context menu access (will be replaced by event bus)
 ;(window as any).openShareModal = (type: string) => {
   if (!authToken.value) {
-    showLoginModalFn?.()
+    router.push('/login?redirect=' + encodeURIComponent(window.location.pathname))
     return
   }
   if (!activeTabPath.value) { showToast('Select a file first'); return }

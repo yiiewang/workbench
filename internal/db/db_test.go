@@ -189,7 +189,7 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 		t.Fatalf("after replace got = %v, want [t3]", got)
 	}
 
-	data, err := d.GetTasksJSON(ctx())
+	data, err := d.GetTasksJSONByOwner(ctx(), "org1", "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestTasksJSON_EmptyVersionFallback(t *testing.T) {
 	_ = d.UpsertUser(ctx(), "org1", "bob", "h")
 	_ = d.UpsertTasks(ctx(), "org1", "bob", nil, "")
 
-	data, _ := d.GetTasksJSON(ctx())
+	data, _ := d.GetTasksJSONByOwner(ctx(), "org1", "bob")
 	user := data["orgs"].(map[string]map[string]interface{})["org1"]["bob"].(map[string]interface{})
 	ver := user["version"].(map[string]string)
 	if ver["md5"] != "init" {
@@ -334,7 +334,7 @@ func TestStats_LogAndQuery(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 
-	stats, err := d.GetStats(ctx())
+	stats, err := d.GetStatsByOrg(ctx(), "org1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,11 +342,11 @@ func TestStats_LogAndQuery(t *testing.T) {
 		t.Fatalf("empty stats = %+v", stats)
 	}
 
-	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", "ua", "/a", 200)
-	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", "ua", "/b", 200)
-	_ = d.LogVisit(ctx(), "v2", "2.2.2.2", "ua", "/a", 200)
+	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", "org1", "ua", "/a", 200)
+	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", "org1", "ua", "/b", 200)
+	_ = d.LogVisit(ctx(), "v2", "2.2.2.2", "org1", "ua", "/a", 200)
 
-	stats, _ = d.GetStats(ctx())
+	stats, _ = d.GetStatsByOrg(ctx(), "org1")
 	if stats.TotalVisitors != 2 {
 		t.Fatalf("visitors = %d, want 2", stats.TotalVisitors)
 	}

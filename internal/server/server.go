@@ -65,7 +65,7 @@ func (s *Server) App() *iris.Application {
 	// /api 统一分组
 	// ============================================================
 	api := app.Party("/api")
-	auth := AuthMiddleware(s.tokenSecret)
+	auth := AuthMiddleware(s.tokenSecret, s.db.FindUserOrg)
 
 	// 公开 API（无需鉴权）
 	api.Post("/login", s.handleLogin)
@@ -154,7 +154,8 @@ func (s *Server) handleRouteRedirect(ctx iris.Context) bool {
 
 func (s *Server) handleStats(ctx iris.Context) {
 	rctx := ctx.Request().Context()
-	stats, err := s.db.GetStats(rctx)
+	orgID := currentOrgID(ctx)
+	stats, err := s.db.GetStatsByOrg(rctx, orgID)
 	if err != nil {
 		serverError(ctx, "get stats failed", err)
 		return
@@ -182,9 +183,11 @@ func (s *Server) handleMap(ctx iris.Context) {
 
 func (s *Server) handleOrgMembers(ctx iris.Context) {
 	rctx := ctx.Request().Context()
-	orgID := ctx.URLParam("orgId")
+	// 强制使用当前登录用户的 orgId，忽略前端传入的 orgId 参数（防止越权查询其他组织）
+	orgID := currentOrgID(ctx)
 	if orgID == "" {
-		orgID = "org_default"
+		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
+		return
 	}
 	members, err := s.db.GetOrgMembers(rctx, orgID)
 	if err != nil {
@@ -202,13 +205,8 @@ func (s *Server) handleOrgMembers(ctx iris.Context) {
 // ============================================================
 
 func (s *Server) handleMe(ctx iris.Context) {
-	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
-	orgID, err := s.db.FindUserOrg(rctx, userID)
-	if err != nil {
-		serverError(ctx, "find user org failed", err, "user", userID)
-		return
-	}
+	orgID := currentOrgID(ctx)
 	writeOK(ctx, meData{UserID: userID, OrgID: orgID, Exp: time.Now().Unix() + int64(s.expiryDays())*secondsPerDay})
 }
 
@@ -258,7 +256,7 @@ func (s *Server) handleLogin(ctx iris.Context) {
 	}
 
 	s.clearLoginFailures(rctx, ip)
-	token := GenerateToken(req.UserID, s.tokenSecret, s.expiryDays())
+	token := GenerateToken(req.OrgID, req.UserID, s.tokenSecret, s.expiryDays())
 	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: req.UserID, OrgID: req.OrgID}})
 }
 
@@ -327,7 +325,7 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 		return
 	}
 
-	token := GenerateToken(req.UserID, s.tokenSecret, s.expiryDays())
+	token := GenerateToken(req.OrgID, req.UserID, s.tokenSecret, s.expiryDays())
 	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: req.UserID, OrgID: req.OrgID}})
 }
 
@@ -336,7 +334,9 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 // ============================================================
 
 func (s *Server) getTasksJSON(ctx iris.Context) {
-	data, err := s.db.GetTasksJSON(ctx.Request().Context())
+	userID := currentUserID(ctx)
+	orgID := currentOrgID(ctx)
+	data, err := s.db.GetTasksJSONByOwner(ctx.Request().Context(), orgID, userID)
 	if err != nil {
 		serverError(ctx, "get tasks json failed", err)
 		return
@@ -348,6 +348,7 @@ func (s *Server) getTasksJSON(ctx iris.Context) {
 func (s *Server) putTasksJSON(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
+	currentOrg := currentOrgID(ctx)
 
 	var req struct {
 		Orgs map[string]json.RawMessage `json:"orgs"`
@@ -358,6 +359,11 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 	}
 
 	for orgID, rawOrg := range req.Orgs {
+		// 只允许写入当前登录用户所属的 org
+		if orgID != currentOrg {
+			writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "Cannot write to other org's tasks")
+			return
+		}
 		var org map[string]struct {
 			Tasks   []db.TaskItem   `json:"tasks"`
 			Version json.RawMessage `json:"version"`
@@ -401,15 +407,10 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 func (s *Server) patchTask(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
+	orgID := currentOrgID(ctx)
 	taskID := ctx.Params().Get("id")
 	if taskID == "" {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
-		return
-	}
-
-	orgID, err := s.db.FindUserOrg(rctx, userID)
-	if err != nil {
-		serverError(ctx, "find user org failed", err, "user", userID)
 		return
 	}
 
@@ -445,15 +446,10 @@ func (s *Server) patchTask(ctx iris.Context) {
 func (s *Server) postTask(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
+	orgID := currentOrgID(ctx)
 	taskID := ctx.Params().Get("id")
 	if taskID == "" {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
-		return
-	}
-
-	orgID, err := s.db.FindUserOrg(rctx, userID)
-	if err != nil {
-		serverError(ctx, "find user org failed", err, "user", userID)
 		return
 	}
 
@@ -489,15 +485,10 @@ func (s *Server) postTask(ctx iris.Context) {
 func (s *Server) deleteTask(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
+	orgID := currentOrgID(ctx)
 	taskID := ctx.Params().Get("id")
 	if taskID == "" {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
-		return
-	}
-
-	orgID, err := s.db.FindUserOrg(rctx, userID)
-	if err != nil {
-		serverError(ctx, "find user org failed", err, "user", userID)
 		return
 	}
 
@@ -715,12 +706,19 @@ func (s *Server) handleStaticWithAuth(ctx iris.Context) {
 		writeFail(ctx, iris.StatusUnauthorized, CodeUnauthorized)
 		return
 	}
-	valid, userID := ValidateToken(token, s.tokenSecret)
+	valid, orgID, userID := ValidateToken(token, s.tokenSecret)
 	if !valid {
 		writeFail(ctx, iris.StatusUnauthorized, CodeInvalidToken)
 		return
 	}
+	// 旧格式 token 兼容：orgID 为空时查 DB 补全
+	if orgID == "" {
+		if oid, err := s.db.FindUserOrg(context.Background(), userID); err == nil && oid != "" {
+			orgID = oid
+		}
+	}
 	ctx.Values().Set("userID", userID)
+	ctx.Values().Set("orgID", orgID)
 	s.handleStatic(ctx)
 }
 
@@ -959,8 +957,9 @@ func (s *Server) loggingMiddleware() iris.Handler {
 		}
 		visitorID := fmt.Sprintf("%s|%s", ip, ua)
 		path := ctx.Path()
+		orgID := currentOrgID(ctx)
 		go func() {
-			if err := s.db.LogVisit(context.Background(), visitorID, ip, ua, path, statusCode); err != nil {
+			if err := s.db.LogVisit(context.Background(), visitorID, ip, orgID, ua, path, statusCode); err != nil {
 				slog.Error("log visit failed", "err", err)
 			}
 		}()

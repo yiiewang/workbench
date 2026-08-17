@@ -14,6 +14,7 @@ func (d *DB) migrate() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		visitor_id TEXT NOT NULL,
 		ip TEXT NOT NULL DEFAULT '',
+		org_id TEXT NOT NULL DEFAULT '',
 		user_agent TEXT NOT NULL DEFAULT '',
 		path TEXT NOT NULL,
 		status_code INTEGER DEFAULT 200,
@@ -21,6 +22,7 @@ func (d *DB) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_visit_visitor ON visit_logs(visitor_id);
 	CREATE INDEX IF NOT EXISTS idx_visit_path ON visit_logs(path);
+	CREATE INDEX IF NOT EXISTS idx_visit_org ON visit_logs(org_id);
 
 	CREATE TABLE IF NOT EXISTS orgs (
 		id TEXT PRIMARY KEY,
@@ -97,7 +99,42 @@ func (d *DB) migrate() error {
 	if err := d.migrateTasksColumns(ctx); err != nil {
 		return err
 	}
-	return d.migrateSharesColumns(ctx)
+	if err := d.migrateSharesColumns(ctx); err != nil {
+		return err
+	}
+	return d.migrateVisitLogsColumns(ctx)
+}
+
+// migrateVisitLogsColumns 检测 visit_logs 表列，自动补齐 org_id 列（兼容旧 schema）
+func (d *DB) migrateVisitLogsColumns(ctx context.Context) error {
+	rows, err := d.conn.QueryContext(ctx, `PRAGMA table_info(visit_logs)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defVal sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defVal, &pk); err != nil {
+			return err
+		}
+		existing[name] = true
+	}
+
+	if !existing["org_id"] {
+		if _, err := d.conn.ExecContext(ctx, `ALTER TABLE visit_logs ADD COLUMN org_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add column org_id to visit_logs: %w", err)
+		}
+		if _, err := d.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_visit_org ON visit_logs(org_id)`); err != nil {
+			return fmt.Errorf("create index idx_visit_org: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // migrateUsersColumns 检测 users 表列，自动补齐缺失列（兼容旧 schema）

@@ -7,20 +7,20 @@ import (
 )
 
 // LogVisit 记录一次访问
-func (d *DB) LogVisit(ctx context.Context, visitorID, ip, userAgent, path string, statusCode int) error {
-	const q = `INSERT INTO visit_logs (visitor_id, ip, user_agent, path, status_code) VALUES (?, ?, ?, ?, ?)`
-	_, err := d.conn.ExecContext(ctx, q, visitorID, ip, userAgent, path, statusCode)
+func (d *DB) LogVisit(ctx context.Context, visitorID, ip, orgID, userAgent, path string, statusCode int) error {
+	const q = `INSERT INTO visit_logs (visitor_id, ip, org_id, user_agent, path, status_code) VALUES (?, ?, ?, ?, ?, ?)`
+	_, err := d.conn.ExecContext(ctx, q, visitorID, ip, orgID, userAgent, path, statusCode)
 	return err
 }
 
-// GetStats 查询访问统计
-func (d *DB) GetStats(ctx context.Context) (*VisitStats, error) {
+// GetStatsByOrg 查询指定组织的访问统计
+func (d *DB) GetStatsByOrg(ctx context.Context, orgID string) (*VisitStats, error) {
 	stats := &VisitStats{
 		Visitors: make(map[string]VisitorStat),
 		TopPages: make(map[string]int),
 	}
 
-	row := d.conn.QueryRowContext(ctx, `SELECT COUNT(DISTINCT visitor_id), COUNT(*) FROM visit_logs`)
+	row := d.conn.QueryRowContext(ctx, `SELECT COUNT(DISTINCT visitor_id), COUNT(*) FROM visit_logs WHERE org_id = ?`, orgID)
 	if err := row.Scan(&stats.TotalVisitors, &stats.TotalPageViews); err != nil {
 		return nil, fmt.Errorf("count visitors: %w", err)
 	}
@@ -28,7 +28,7 @@ func (d *DB) GetStats(ctx context.Context) (*VisitStats, error) {
 	vr, err := d.conn.QueryContext(ctx, `
 		SELECT visitor_id, COUNT(*), COUNT(DISTINCT path),
 			MIN(created_at), MAX(created_at)
-		FROM visit_logs GROUP BY visitor_id ORDER BY MAX(created_at) DESC`)
+		FROM visit_logs WHERE org_id = ? GROUP BY visitor_id ORDER BY MAX(created_at) DESC`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("query visitors: %w", err)
 	}
@@ -45,7 +45,7 @@ func (d *DB) GetStats(ctx context.Context) (*VisitStats, error) {
 		stats.Visitors[v.VisitorID] = v
 	}
 
-	pr, err := d.conn.QueryContext(ctx, `SELECT path, COUNT(*) FROM visit_logs GROUP BY path ORDER BY COUNT(*) DESC LIMIT 10`)
+	pr, err := d.conn.QueryContext(ctx, `SELECT path, COUNT(*) FROM visit_logs WHERE org_id = ? GROUP BY path ORDER BY COUNT(*) DESC LIMIT 10`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("query top pages: %w", err)
 	}

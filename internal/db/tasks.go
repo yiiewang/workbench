@@ -200,10 +200,10 @@ func (d *DB) recomputeVersion(ctx context.Context, tx *sql.Tx, orgID, userID str
 
 	// 组装 version JSON
 	version := map[string]interface{}{
-		"md5":          md5sum,
-		"timestamp":    ts,
-		"deviceId":     deviceID,
-		"baseMd5":      baseMd5,
+		"md5":           md5sum,
+		"timestamp":     ts,
+		"deviceId":      deviceID,
+		"baseMd5":       baseMd5,
 		"baseTimestamp": baseTimestamp,
 	}
 	out, err := json.Marshal(version)
@@ -236,8 +236,9 @@ func (d *DB) GetTasks(ctx context.Context, orgID, userID string) ([]TaskItem, er
 	return tasks, nil
 }
 
-// GetTasksJSON 获取全量任务 JSON（供 /api/tasks GET 使用）
-func (d *DB) GetTasksJSON(ctx context.Context) (map[string]interface{}, error) {
+// GetTasksJSONByOwner 获取指定用户的任务 JSON（供 /api/tasks GET 使用）
+// 按 orgID + userID 过滤，防止跨用户数据泄露
+func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID string) (map[string]interface{}, error) {
 	result := map[string]interface{}{
 		"version":     "1.0",
 		"lastUpdated": time.Now().Format(time.RFC3339),
@@ -249,8 +250,9 @@ func (d *DB) GetTasksJSON(ctx context.Context) (map[string]interface{}, error) {
 		       t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due, t.progress, t.assignee, t.postponed_count, t.auto_postponed, t.sort_order
 		FROM users u
 		LEFT JOIN tasks t ON t.org_id = u.org_id AND t.user_id = u.id
+		WHERE u.org_id = ? AND u.id = ?
 		ORDER BY u.org_id, u.id, t.sort_order
-	`)
+	`, orgID, userID)
 	if err != nil {
 		return nil, err
 	}

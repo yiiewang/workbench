@@ -76,8 +76,8 @@ func (s *Server) clearSharePasswordFailures(ctx context.Context, key string) {
 func (s *Server) handleCreateShare(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
-	orgID, err := s.db.FindUserOrg(rctx, userID)
-	if err != nil || orgID == "" {
+	orgID := currentOrgID(ctx)
+	if orgID == "" {
 		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
 		return
 	}
@@ -207,8 +207,8 @@ func (s *Server) baseURL(ctx iris.Context) string {
 func (s *Server) handleListShares(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
-	orgID, err := s.db.FindUserOrg(rctx, userID)
-	if err != nil || orgID == "" {
+	orgID := currentOrgID(ctx)
+	if orgID == "" {
 		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
 		return
 	}
@@ -231,8 +231,8 @@ func (s *Server) handleListShares(ctx iris.Context) {
 func (s *Server) handleDeleteShare(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
-	orgID, err := s.db.FindUserOrg(rctx, userID)
-	if err != nil || orgID == "" {
+	orgID := currentOrgID(ctx)
+	if orgID == "" {
 		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
 		return
 	}

@@ -641,9 +641,49 @@
 #todo-app .form-field input:focus,
 #todo-app .form-field select:focus { border-color: var(--accent); }
 #todo-app .form-field input[type="text"]:disabled { background: var(--code-bg); color: var(--text-dim); }
-#todo-app .progress-inline { display: flex; align-items: center; gap: 12px; }
-#todo-app .progress-inline .el-slider { flex: 1; }
-#todo-app .progress-inline span { font-size: 12px; color: var(--text-dim); min-width: 36px; text-align: right; }
+/* 进度分段控件：5 档胶囊按钮 + 可视化 bar + 状态文字（替代 el-slider，解决 thumb 0% 溢出与基线不对齐） */
+#todo-app .progress-segmented { display: flex; flex-direction: column; gap: 8px; }
+#todo-app .segmented-btns {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 4px;
+}
+#todo-app .seg-btn {
+    padding: 6px 0;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-dim);
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all .15s;
+}
+#todo-app .seg-btn:hover { border-color: var(--accent); color: var(--accent); }
+#todo-app .seg-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+#todo-app .seg-bar {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+#todo-app .seg-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width .25s ease;
+}
+#todo-app .seg-status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+#todo-app .seg-status .seg-pct { font-weight: 600; color: var(--text); }
 #todo-app .form-field .el-date-editor { width: 100% !important; }
 /* daterange 内部两列等宽会挤压 range-separator 和日期输入框，
    给两个 input 显式 min-width: 0 + 适当宽度，强制 range-separator 占固定空间 */

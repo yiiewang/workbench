@@ -59,7 +59,7 @@ func createUser(t *testing.T, d *db.DB, secret []byte, orgID, userID, password s
 	if err := d.UpsertUser(context.Background(), orgID, userID, hash); err != nil {
 		t.Fatal(err)
 	}
-	return GenerateToken(userID, secret, 30)
+	return GenerateToken(orgID, userID, secret, 30)
 }
 
 func authHeader(token string) string { return "Bearer " + token }
@@ -140,7 +140,7 @@ func TestHandler_Me(t *testing.T) {
 	obj.Value("data").Object().Value("userId").Equal("alice")
 
 	// 过期 token → 401
-	expired := GenerateToken("alice", secret, -1)
+	expired := GenerateToken("org1", "alice", secret, -1)
 	e.GET("/api/me").WithHeader("Authorization", authHeader(expired)).
 		Expect().Status(http.StatusUnauthorized)
 }

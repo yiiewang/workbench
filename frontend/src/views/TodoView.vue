@@ -3,10 +3,23 @@ import { setupTodoApp } from '../composables/useTodoApp'
 import TaskItem from '../components/todo/TaskItem.vue'
 import MarkdownEditor from '../components/todo/MarkdownEditor.vue'
 
+// 进度档位：0/25/50/75/100 五档，对应业务状态
+const progressOptions = [
+  { value: 0 },
+  { value: 25 },
+  { value: 50 },
+  { value: 75 },
+  { value: 100 }
+]
+const progressLabelMap = { 0: '未开始', 25: '刚启动', 50: '进行中', 75: '接近完成', 100: '已完成' }
+function progressLabel(p) {
+  return progressLabelMap[p] || ''
+}
+
 export default {
   components: { TaskItem, MarkdownEditor },
   setup() {
-    return setupTodoApp()
+    return { ...setupTodoApp(), progressOptions, progressLabel }
   }
 }
 </script>
@@ -215,9 +228,23 @@ export default {
                             </div>
                             <div class="form-field">
                                 <label>进度</label>
-                                <div class="progress-inline">
-                                    <el-slider v-model="editingTask.progress" :min="0" :max="100" :show-tooltip="false" color="#2e7d32" />
-                                    <span class="progress-pct">{{ editingTask.progress || 0 }}%</span>
+                                <div class="progress-segmented">
+                                    <div class="segmented-btns">
+                                        <button v-for="opt in progressOptions" :key="opt.value" type="button"
+                                            class="seg-btn"
+                                            :class="{ active: (editingTask.progress || 0) === opt.value }"
+                                            @click="editingTask.progress = opt.value">
+                                            {{ opt.value }}
+                                        </button>
+                                    </div>
+                                    <div class="seg-bar">
+                                        <div class="seg-bar-fill"
+                                            :style="{ width: (editingTask.progress || 0) + '%' }"></div>
+                                    </div>
+                                    <div class="seg-status">
+                                        <span class="seg-label">{{ progressLabel(editingTask.progress || 0) }}</span>
+                                        <span class="seg-pct">{{ editingTask.progress || 0 }}%</span>
+                                    </div>
                                 </div>
                             </div>
                             <div class="form-field">

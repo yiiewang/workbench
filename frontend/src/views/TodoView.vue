@@ -182,11 +182,11 @@ export default {
             </div>
 
             <!-- Unified Task Modal (Create & Edit) -->
-            <div class="modal-mask" v-if="showModal" @click.self="showModal = false">
+            <div class="modal-mask" v-if="showModal" @click.self="closeModal">
                 <div class="modal-content">
                     <div class="modal-header">
                         <h3>{{ isCreating ? '创建任务' : '编辑任务' }}</h3>
-                        <button class="modal-close" @click="showModal = false">×</button>
+                        <button class="modal-close" @click="closeModal">×</button>
                     </div>
 
                     <!-- Main Body: left form sidebar + right markdown area -->
@@ -248,7 +248,7 @@ export default {
                     <div class="modal-actions">
                         <button v-if="!isCreating" class="btn btn-danger" @click="deleteTask(editingTask.id)">删除</button>
                         <div v-else></div>
-                        <button class="btn btn-secondary" @click="showModal = false">取消</button>
+                        <button class="btn btn-secondary" @click="closeModal">取消</button>
                         <button class="btn btn-primary" @click="isCreating ? confirmCreate() : saveEdit()">{{ isCreating ? '创建' : '保存' }}</button>
                     </div>
                 </div>
@@ -338,8 +338,8 @@ export default {
                                     <div class="diff-card-col"><div class="diff-card-empty">— 服务器无此任务 —</div></div>
                                     <div class="diff-card-actions">
                                         <el-radio-group v-model="conflictChoices[row.id]._mode" size="small">
-                                            <el-radio label="local">保留</el-radio>
-                                            <el-radio label="drop">丢弃</el-radio>
+                                            <el-radio value="local">保留</el-radio>
+                                            <el-radio value="drop">丢弃</el-radio>
                                         </el-radio-group>
                                     </div>
                                 </div>
@@ -355,8 +355,8 @@ export default {
                                     </div>
                                     <div class="diff-card-actions">
                                         <el-radio-group v-model="conflictChoices[row.id]._mode" size="small">
-                                            <el-radio label="server">保留</el-radio>
-                                            <el-radio label="drop">丢弃</el-radio>
+                                            <el-radio value="server">保留</el-radio>
+                                            <el-radio value="drop">丢弃</el-radio>
                                         </el-radio-group>
                                     </div>
                                 </div>
@@ -396,8 +396,8 @@ export default {
                                     </div>
                                     <div class="diff-card-actions">
                                         <el-radio-group v-model="conflictChoices[row.id]._mode" size="small">
-                                            <el-radio label="local">取本地</el-radio>
-                                            <el-radio label="server">取服务器</el-radio>
+                                            <el-radio value="local">取本地</el-radio>
+                                            <el-radio value="server">取服务器</el-radio>
                                         </el-radio-group>
                                     </div>
                                 </div>

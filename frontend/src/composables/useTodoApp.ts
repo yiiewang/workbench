@@ -317,7 +317,7 @@ export function setupTodoApp() {
             tasks.value = local.tasks;
             const wrapped = await wrapData(local.tasks, server ? server.version : null);
             localStorage.setItem(userKey, JSON.stringify(wrapped));
-            syncToServer(userId, orgId, wrapped.version);
+            syncToServer(userId, orgId);
         } else if (action === 'server') {
             // 保留服务器版本
             tasks.value = server.tasks;
@@ -329,7 +329,7 @@ export function setupTodoApp() {
             tasks.value = local.tasks;
             const wrapped = await wrapData(local.tasks, server ? server.version : null);
             localStorage.setItem(userKey, JSON.stringify(wrapped));
-            syncToServer(userId, orgId, wrapped.version);
+            syncToServer(userId, orgId);
         }
 
         showConflictModal.value = false;
@@ -614,7 +614,27 @@ export function setupTodoApp() {
         tasks.value = merged;
         const wrapped = await wrapData(merged, server ? server.version : null);
         localStorage.setItem(userKey, JSON.stringify(wrapped));
-        syncToServer(userId, orgId, wrapped.version);
+
+        // 直接上传，绕过 syncToServer 的二次冲突检测。
+        // executeMerge 已是用户决策的最终结果（手动合并完成），无需再做冲突检测；
+        // syncToServer 内部会再次 fetch 服务端并 checkConflict，
+        // 但此时服务端可能因其他客户端写入导致 serverVersion 与 wrapped.version.baseMd5 不匹配，
+        // 触发误报冲突 → return → 不发 PUT。改为直接 PUT 与 localStorage 同步。
+        try {
+            const all = (await fetchTasksJSON()) || { orgs: {}, lastUpdated: '' };
+            if (!all.orgs) all.orgs = {};
+            if (!all.orgs[orgId]) all.orgs[orgId] = {};
+            all.orgs[orgId][userId] = wrapped;
+            all.lastUpdated = new Date().toISOString();
+            await taskApi.putTasks(all);
+            invalidateTasksJsonCache();
+            localStorage.setItem(userKey, JSON.stringify({ version: wrapped.version, tasks: tasks.value }));
+            syncStatus.value = 'idle';
+        } catch (err) {
+            syncStatus.value = 'error';
+            lastSyncError.value = err.message || '未知错误';
+            showToast('合并结果上传失败', 'error');
+        }
 
         showConfirmSummary.value = false;
         showManualResolve.value = false;
@@ -676,7 +696,9 @@ export function setupTodoApp() {
         await syncToServer(userId, orgId);
     }
 
-    // saveLocal 只保存到 localStorage（不发请求），供增量同步后更新本地缓存
+    // saveLocal 只保存到 localStorage（不发请求），供增量同步后更新本地缓存。
+    // 保留 wrapData 重算 MD5 以检测本地修改（localModified = md5 !== baseMd5）。
+    // syncTaskToServer 完成后会用服务端返回的 version 覆盖此处的客户端 version。
     async function saveLocal() {
         if (!currentUser.value) return;
         const userId = currentUser.value.userId;
@@ -707,7 +729,8 @@ export function setupTodoApp() {
             }
             // 更新本地 version（服务端重新计算的）
             if (data && data.data && data.data.version) {
-                const userKey = STORAGE_KEY_USER + '_' + currentUser.value;
+                const userId = currentUser.value.userId;
+                const userKey = STORAGE_KEY_USER + '_' + userId;
                 const saved = localStorage.getItem(userKey);
                 if (saved) {
                     try {
@@ -773,9 +796,11 @@ export function setupTodoApp() {
 
             await taskApi.putTasks(data);
             invalidateTasksJsonCache();
-            // 上传成功后更新 localStorage version，使 baseMd5 = md5（客户端与服务器已同步）
-            const syncedVersion = await buildVersion(tasks.value, null);
-            localStorage.setItem(STORAGE_KEY_USER + '_' + userId, JSON.stringify({ version: syncedVersion, tasks: tasks.value }));
+            // 上传成功后更新 localStorage version。
+            // 直接用刚才上传的 wrapped.version（服务端 PUT 不重算 MD5，原样存储），而不是
+            // buildVersion 客户端重算 — 客户端 JSON.stringify 的 key 顺序与服务端
+            // json.Marshal 不同，重算会导致下次刷新时 localStorage md5 与服务端 md5 不匹配。
+            localStorage.setItem(STORAGE_KEY_USER + '_' + userId, JSON.stringify({ version: wrapped.version, tasks: tasks.value }));
             syncStatus.value = 'idle';
         } catch (err) {
             syncStatus.value = 'error';
@@ -1653,12 +1678,19 @@ export function setupTodoApp() {
         }
     })
 
+    // 关闭任务编辑弹窗：清除 showModal + 清除 activeTaskId
+    // 必须清除 activeTaskId，否则再次点击同一任务时 watch 不触发（值未变化）
+    function closeModal() {
+        showModal.value = false
+        activeTaskId.value = null
+    }
+
     // ========== Expose to Template ==========
     return {
         columns, tasks, activeTab, draggingTaskId, calendarDragOverDate,
         listNewTitle, listViewMode, collapsedGroups, listGroupedTasks, quadrantTasks,
         toggleTaskDone, listAddTask, toggleListGroup, toggleListView,
-        showModal, isCreating, editingTask, editingMaxDate,
+        showModal, isCreating, editingTask, editingMaxDate, closeModal,
 
         newTaskTitle, newTaskForDate, hasConflict, calTitle, weekDays, donePercent,
         todayStr, overdueCount, conflictDates,

@@ -22,7 +22,6 @@ func (d *DB) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_visit_visitor ON visit_logs(visitor_id);
 	CREATE INDEX IF NOT EXISTS idx_visit_path ON visit_logs(path);
-	CREATE INDEX IF NOT EXISTS idx_visit_org ON visit_logs(org_id);
 
 	CREATE TABLE IF NOT EXISTS orgs (
 		id TEXT PRIMARY KEY,
@@ -131,9 +130,11 @@ func (d *DB) migrateVisitLogsColumns(ctx context.Context) error {
 		if _, err := d.conn.ExecContext(ctx, `ALTER TABLE visit_logs ADD COLUMN org_id TEXT NOT NULL DEFAULT ''`); err != nil {
 			return fmt.Errorf("add column org_id to visit_logs: %w", err)
 		}
-		if _, err := d.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_visit_org ON visit_logs(org_id)`); err != nil {
-			return fmt.Errorf("create index idx_visit_org: %w", err)
-		}
+	}
+
+	// 无论列是新补的还是建表时就存在，都确保索引存在（fresh install 与旧库升级均覆盖）
+	if _, err := d.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_visit_org ON visit_logs(org_id)`); err != nil {
+		return fmt.Errorf("create index idx_visit_org: %w", err)
 	}
 
 	return nil

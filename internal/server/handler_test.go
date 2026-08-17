@@ -64,6 +64,11 @@ func createUser(t *testing.T, d *db.DB, secret []byte, orgID, userID, password s
 
 func authHeader(token string) string { return "Bearer " + token }
 
+// userTestRoot 返回测试中用户的文件根目录: staticDir/{orgId}/{userId}/
+func userTestRoot(staticDir, orgID, userID string) string {
+	return filepath.Join(staticDir, orgID, userID)
+}
+
 // ============================================================
 // 登录 / 设置密码
 // ============================================================
@@ -193,8 +198,11 @@ func TestHandler_Tree(t *testing.T) {
 	e, d, secret, staticDir := setupTestServer(t)
 	tok := createUser(t, d, secret, "org1", "alice", "p")
 
-	_ = os.WriteFile(filepath.Join(staticDir, "a.txt"), []byte("hello"), 0644)
-	_ = os.MkdirAll(filepath.Join(staticDir, "sub"), 0755)
+	// 文件必须创建在用户根目录 staticDir/{orgId}/{userId}/ 下
+	userRoot := userTestRoot(staticDir, "org1", "alice")
+	_ = os.MkdirAll(userRoot, 0755)
+	_ = os.WriteFile(filepath.Join(userRoot, "a.txt"), []byte("hello"), 0644)
+	_ = os.MkdirAll(filepath.Join(userRoot, "sub"), 0755)
 
 	obj := e.GET("/api/tree").WithHeader("Authorization", authHeader(tok)).
 		Expect().Status(http.StatusOK).JSON().Object()
@@ -210,7 +218,9 @@ func TestHandler_Tree(t *testing.T) {
 func TestHandler_ShareCreateAccessDelete(t *testing.T) {
 	e, d, secret, staticDir := setupTestServer(t)
 	tok := createUser(t, d, secret, "org1", "alice", "p")
-	_ = os.WriteFile(filepath.Join(staticDir, "doc.md"), []byte("# hi"), 0644)
+	userRoot := userTestRoot(staticDir, "org1", "alice")
+	_ = os.MkdirAll(userRoot, 0755)
+	_ = os.WriteFile(filepath.Join(userRoot, "doc.md"), []byte("# hi"), 0644)
 
 	// 无 token → 401
 	e.POST("/api/share").WithJSON(map[string]string{"resourcePath": "/doc.md"}).
@@ -240,7 +250,9 @@ func TestHandler_ShareCreateAccessDelete(t *testing.T) {
 func TestHandler_ShareWithPassword(t *testing.T) {
 	e, d, secret, staticDir := setupTestServer(t)
 	tok := createUser(t, d, secret, "org1", "alice", "p")
-	_ = os.WriteFile(filepath.Join(staticDir, "secret.md"), []byte("top"), 0644)
+	userRoot := userTestRoot(staticDir, "org1", "alice")
+	_ = os.MkdirAll(userRoot, 0755)
+	_ = os.WriteFile(filepath.Join(userRoot, "secret.md"), []byte("top"), 0644)
 
 	shareToken := e.POST("/api/share").WithHeader("Authorization", authHeader(tok)).
 		WithJSON(map[string]string{"resourcePath": "/secret.md", "password": "pw"}).
@@ -262,7 +274,9 @@ func TestHandler_ShareWithPassword(t *testing.T) {
 func TestHandler_ShareExpired(t *testing.T) {
 	e, d, secret, staticDir := setupTestServer(t)
 	tok := createUser(t, d, secret, "org1", "alice", "p")
-	_ = os.WriteFile(filepath.Join(staticDir, "f.md"), []byte("x"), 0644)
+	userRoot := userTestRoot(staticDir, "org1", "alice")
+	_ = os.MkdirAll(userRoot, 0755)
+	_ = os.WriteFile(filepath.Join(userRoot, "f.md"), []byte("x"), 0644)
 
 	shareToken := e.POST("/api/share").WithHeader("Authorization", authHeader(tok)).
 		WithJSON(map[string]string{"resourcePath": "/f.md", "expiresAt": "2000-01-01T00:00:00Z"}).
@@ -275,7 +289,9 @@ func TestHandler_ShareExpired(t *testing.T) {
 func TestHandler_ShareNotYetEffective(t *testing.T) {
 	e, d, secret, staticDir := setupTestServer(t)
 	tok := createUser(t, d, secret, "org1", "alice", "p")
-	_ = os.WriteFile(filepath.Join(staticDir, "f.md"), []byte("x"), 0644)
+	userRoot := userTestRoot(staticDir, "org1", "alice")
+	_ = os.MkdirAll(userRoot, 0755)
+	_ = os.WriteFile(filepath.Join(userRoot, "f.md"), []byte("x"), 0644)
 
 	shareToken := e.POST("/api/share").WithHeader("Authorization", authHeader(tok)).
 		WithJSON(map[string]string{"resourcePath": "/f.md", "effectiveAt": "2999-01-01T00:00:00Z"}).

@@ -105,7 +105,7 @@ func (s *Server) handleCreateShare(ctx iris.Context) {
 		return
 	}
 
-	fsPath, ok := s.resolveStaticPath(resourcePath)
+	fsPath, ok := s.resolveUserPath(ctx, resourcePath)
 	if !ok {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return
@@ -367,7 +367,7 @@ func (s *Server) handleShareData(ctx iris.Context) {
 
 	subPath := ctx.URLParam("path")
 	resourcePath := share.ResourcePath
-	fsPath, ok := s.resolveStaticPath(resourcePath)
+	fsPath, ok := s.resolveUserPathByOwner(share.OwnerOrgID, share.OwnerUserID, resourcePath)
 	if !ok {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return
@@ -380,7 +380,7 @@ func (s *Server) handleShareData(ctx iris.Context) {
 			cleaned = strings.TrimPrefix(cleaned, sharePathPrefix)
 		}
 		fsPath = filepath.Join(fsPath, cleaned)
-		shareRoot, _ := s.resolveStaticPath(share.ResourcePath)
+		shareRoot, _ := s.resolveUserPathByOwner(share.OwnerOrgID, share.OwnerUserID, share.ResourcePath)
 		absBase, _ := filepath.Abs(shareRoot)
 		absFull, _ := filepath.Abs(fsPath)
 		if !strings.HasPrefix(absFull, absBase+string(filepath.Separator)) && absFull != absBase {
@@ -445,7 +445,7 @@ func (s *Server) handleShareData(ctx iris.Context) {
 		resp.IsDir = true
 		resp.CurrentPath = resourcePath
 		relPath := ""
-		if shareRoot, _ := s.resolveStaticPath(share.ResourcePath); shareRoot != "" {
+		if shareRoot, _ := s.resolveUserPathByOwner(share.OwnerOrgID, share.OwnerUserID, share.ResourcePath); shareRoot != "" {
 			if rel, err := filepath.Rel(shareRoot, fsPath); err == nil && rel != "." {
 				relPath = filepath.ToSlash(rel)
 			}

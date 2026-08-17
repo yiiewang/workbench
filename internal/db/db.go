@@ -103,7 +103,7 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("create db directory %s: %w", dir, err)
 	}
 
-	conn, err := sql.Open("sqlite", fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=%d", dbPath, sqliteBusyTimeoutMs))
+	conn, err := sql.Open("sqlite", fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=%d&_foreign_keys=on", dbPath, sqliteBusyTimeoutMs))
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

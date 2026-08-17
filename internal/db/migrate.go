@@ -36,7 +36,8 @@ func (d *DB) migrate() error {
 		version_json TEXT DEFAULT '',
 		created_at TEXT DEFAULT (datetime('now')),
 		updated_at TEXT DEFAULT (datetime('now')),
-		PRIMARY KEY (org_id, id)
+		PRIMARY KEY (org_id, id),
+		FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE
 	);
 
 	CREATE TABLE IF NOT EXISTS tasks (
@@ -56,7 +57,8 @@ func (d *DB) migrate() error {
 		sort_order INTEGER DEFAULT 0,
 		created_at TEXT DEFAULT (datetime('now')),
 		updated_at TEXT DEFAULT (datetime('now')),
-		PRIMARY KEY (id, user_id, org_id)
+		PRIMARY KEY (id, user_id, org_id),
+		FOREIGN KEY (org_id, user_id) REFERENCES users(org_id, id) ON DELETE CASCADE
 	);
 
 	CREATE TABLE IF NOT EXISTS app_secrets (

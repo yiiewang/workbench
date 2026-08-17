@@ -28,6 +28,7 @@ type Server struct {
 	db          *db.DB
 	cfg         *config.Config
 	serDirAbs   string
+	adminRoot   string // 管理员全局目录（serDirAbs/_admin），/index 路由用
 	tokenSecret []byte
 	logFile     string
 	app         *iris.Application
@@ -42,14 +43,60 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 	if err := os.MkdirAll(absDir, 0755); err != nil {
 		return nil, fmt.Errorf("create static dir %s: %w", absDir, err)
 	}
+	adminRoot := filepath.Join(absDir, "_admin")
+	if err := os.MkdirAll(adminRoot, 0755); err != nil {
+		return nil, fmt.Errorf("create admin dir: %w", err)
+	}
+
+	// 一次性迁移：将 static_dir 顶层散落的旧文件移到 _legacy/（仅首次启动执行）
+	migrateLegacyFiles(absDir)
 
 	return &Server{
 		db:          database,
 		cfg:         cfg,
 		serDirAbs:   absDir,
+		adminRoot:   adminRoot,
 		tokenSecret: tokenSecret,
 		logFile:     logFile,
 	}, nil
+}
+
+// migrateLegacyFiles 将 static_dir 顶层散落的旧文件（非 _admin、非 {orgId} 目录）
+// 移动到 _legacy/ 目录，保留管理员可访问。已存在 _legacy/ 时不重复迁移。
+// 新文件按 {orgId}/{userId}/ 结构存放，由 userRoot() 按需创建。
+func migrateLegacyFiles(staticDir string) {
+	legacyDir := filepath.Join(staticDir, "_legacy")
+	entries, err := os.ReadDir(staticDir)
+	if err != nil {
+		return
+	}
+	// 检查是否已有用户目录（以非 _ 开头的目录），有则说明已迁移过
+	hasUserDir := false
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), "_") {
+			hasUserDir = true
+			break
+		}
+	}
+	// 只在没有任何用户目录时执行迁移
+	if hasUserDir {
+		return
+	}
+	// 确保 _legacy 目录存在
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		// 跳过 _admin、_legacy 和所有以 _ 开头的目录
+		if strings.HasPrefix(name, "_") {
+			continue
+		}
+		src := filepath.Join(staticDir, name)
+		dst := filepath.Join(legacyDir, name)
+		// 尝试重命名，失败则忽略（可能有文件被占用）
+		_ = os.Rename(src, dst)
+	}
 }
 
 // App 构建 iris.Application 并注册所有路由
@@ -134,7 +181,7 @@ func (s *Server) handleRouteRedirect(ctx iris.Context) bool {
 		return false
 	}
 	if target == "__listdir__" {
-		s.listDirectory(ctx, s.serDirAbs)
+		s.listDirectory(ctx, s.adminRoot)
 		return true
 	}
 	if target == "__spa__" {
@@ -294,7 +341,8 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 		return
 	}
 	// 不存在用户：仅当系统无任何用户时允许创建（首次初始化），之后禁止开放注册
-	if !exists {
+	switch {
+	case !exists:
 		hasUsers, err := s.db.HasAnyUser(rctx)
 		if err != nil {
 			serverError(ctx, "check has any user failed", err)
@@ -304,13 +352,25 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 			writeFailMsg(ctx, iris.StatusForbidden, CodeUserNotFound, "User does not exist. Contact admin to create account.")
 			return
 		}
-	} else if pwdHash != "" {
+	case pwdHash != "":
+		// 已存在用户且有密码：必须验证旧密码
 		if req.OldPassword == "" {
 			writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "oldPassword is required to change password")
 			return
 		}
 		if !VerifyPassword(pwdHash, req.OldPassword) {
 			writeFail(ctx, iris.StatusUnauthorized, CodeInvalidOldPassword)
+			return
+		}
+	default:
+		// 已存在用户但密码为空：仅首次初始化时允许设置，否则需要管理员重置
+		hasUsers, err := s.db.HasAnyUser(rctx)
+		if err != nil {
+			serverError(ctx, "check has any user failed", err)
+			return
+		}
+		if hasUsers {
+			writeFailMsg(ctx, iris.StatusForbidden, CodePasswordNotSet, "Password not set. Contact admin to reset.")
 			return
 		}
 	}
@@ -527,8 +587,8 @@ func (s *Server) handleTree(ctx iris.Context) {
 		relPath = "/"
 	}
 
-	// 安全检查：防止目录穿越，校验最终路径必须落在 serDirAbs 内
-	fsPath, cleanPath, ok := safeJoin(s.serDirAbs, relPath)
+	// 安全检查：路径解析限定在当前用户根目录内
+	fsPath, cleanPath, ok := s.resolveUserPathSafe(ctx, relPath)
 	if !ok {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidPath)
 		return
@@ -591,22 +651,46 @@ func (s *Server) isHidden(name string) bool {
 // 静态文件 + 目录列表
 // ============================================================
 
-// resolveStaticPath 安全解析静态文件路径，防止目录穿越和符号链接越界
-// 当 allow_symlink=false 时，解析符号链接后校验实际路径仍在 static_dir 下
-func (s *Server) resolveStaticPath(relPath string) (string, bool) {
-	fsPath, _, ok := safeJoin(s.serDirAbs, relPath)
+// userRoot 返回当前登录用户的私有文件根目录: serDirAbs/{orgId}/{userId}/
+// 若目录不存在则自动创建。orgID 或 userID 为空时返回空串表示无效。
+func (s *Server) userRoot(ctx iris.Context) string {
+	orgID := currentOrgID(ctx)
+	userID := currentUserID(ctx)
+	if orgID == "" || userID == "" {
+		return ""
+	}
+	root := filepath.Join(s.serDirAbs, orgID, userID)
+	_ = os.MkdirAll(root, 0755)
+	return root
+}
+
+// userRootByOwner 通过 share 的 owner 信息定位用户根目录（分享访问场景）
+func (s *Server) userRootByOwner(orgID, userID string) string {
+	if orgID == "" || userID == "" {
+		return ""
+	}
+	return filepath.Join(s.serDirAbs, orgID, userID)
+}
+
+// resolveUserPath 以当前用户根为基准解析相对路径，防止跨用户/跨组织目录穿越
+// 返回解析后的绝对路径和是否成功
+func (s *Server) resolveUserPath(ctx iris.Context, relPath string) (string, bool) {
+	root := s.userRoot(ctx)
+	if root == "" {
+		return "", false
+	}
+	fsPath, _, ok := safeJoin(root, relPath)
 	if !ok {
 		return "", false
 	}
 	if s.cfg.Server.AllowSymlink {
 		return fsPath, true
 	}
-	// 严格模式：解析符号链接后校验路径仍在 static_dir 下
 	realPath, err := filepath.EvalSymlinks(fsPath)
 	if err != nil {
 		return "", false
 	}
-	realBase, err := filepath.EvalSymlinks(s.serDirAbs)
+	realBase, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", false
 	}
@@ -614,6 +698,61 @@ func (s *Server) resolveStaticPath(relPath string) (string, bool) {
 		return "", false
 	}
 	return realPath, true
+}
+
+// resolveUserPathByOwner 以指定 owner 的用户根为基准解析路径（分享访问场景）
+func (s *Server) resolveUserPathByOwner(orgID, userID, relPath string) (string, bool) {
+	root := s.userRootByOwner(orgID, userID)
+	if root == "" {
+		return "", false
+	}
+	fsPath, _, ok := safeJoin(root, relPath)
+	if !ok {
+		return "", false
+	}
+	if s.cfg.Server.AllowSymlink {
+		return fsPath, true
+	}
+	realPath, err := filepath.EvalSymlinks(fsPath)
+	if err != nil {
+		return "", false
+	}
+	realBase, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false
+	}
+	if realPath != realBase && !strings.HasPrefix(realPath, realBase+string(filepath.Separator)) {
+		return "", false
+	}
+	return realPath, true
+}
+
+// resolveUserPathSafe 以当前用户根为基准解析路径，返回 (fsPath, cleanRel, ok)
+// cleanRel 是相对于用户根的规范化路径（以 / 开头），供前端展示用
+func (s *Server) resolveUserPathSafe(ctx iris.Context, relPath string) (string, string, bool) {
+	root := s.userRoot(ctx)
+	if root == "" {
+		return "", "", false
+	}
+	fsPath, cleanRel, ok := safeJoin(root, relPath)
+	if !ok {
+		return "", "", false
+	}
+	if s.cfg.Server.AllowSymlink {
+		return fsPath, cleanRel, true
+	}
+	realPath, err := filepath.EvalSymlinks(fsPath)
+	if err != nil {
+		return "", "", false
+	}
+	realBase, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", false
+	}
+	if realPath != realBase && !strings.HasPrefix(realPath, realBase+string(filepath.Separator)) {
+		return "", "", false
+	}
+	return realPath, cleanRel, true
 }
 
 // serveUIAsset 从 embed FS 服务内置 UI 资源（index.html/todo.html/css/js）
@@ -741,12 +880,12 @@ func (s *Server) handleStatic(ctx iris.Context) {
 		}
 	}
 
-	// UI 资源走 embed（内置模板，不可变），未命中再走磁盘 static_dir
+	// UI 资源走 embed（内置模板，不可变），未命中再走磁盘用户根
 	if s.serveUIAsset(ctx, reqPath) {
 		return
 	}
 
-	fsPath, ok := s.resolveStaticPath(reqPath)
+	fsPath, ok := s.resolveUserPath(ctx, reqPath)
 	if !ok {
 		ctx.NotFound()
 		return
@@ -801,7 +940,7 @@ func (s *Server) handleServeFile(ctx iris.Context) {
 	if !strings.HasPrefix(relPath, "/") {
 		relPath = "/" + relPath
 	}
-	fsPath, ok := s.resolveStaticPath(relPath)
+	fsPath, ok := s.resolveUserPath(ctx, relPath)
 	if !ok {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return

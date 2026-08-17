@@ -30,3 +30,6 @@ vendor/
 # frontend/dist 由 make frontend/all 生成，fresh clone 需先 make all 才能 go build/check
 /frontend/node_modules/
 /frontend/dist/
+
+# Vite 临时文件（配置文件变更时偶发生成，进程异常退出会残留）
+*.timestamp-*.mjs

@@ -233,7 +233,7 @@ export default {
                                         <button v-for="opt in progressOptions" :key="opt.value" type="button"
                                             class="seg-btn"
                                             :class="{ active: (editingTask.progress || 0) === opt.value }"
-                                            @click="editingTask.progress = opt.value">
+                                            @click="setEditingProgress(opt.value)">
                                             {{ opt.value }}
                                         </button>
                                     </div>

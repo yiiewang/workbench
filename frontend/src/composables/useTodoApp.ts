@@ -1323,6 +1323,14 @@ export function setupTodoApp() {
         }
     }
 
+    // 进度变更联动：进度从 100 调低时，若状态为"已完成"则自动回退为"进行中"
+    function setEditingProgress(p) {
+        editingTask.value.progress = p;
+        if (editingTask.value.status === 'done' && p < 100) {
+            editingTask.value.status = 'progress';
+        }
+    }
+
     function listAddTask() {
         if (viewingMember.value) return;
         if (!currentUser.value) {
@@ -1698,7 +1706,7 @@ export function setupTodoApp() {
         getTasksByStatus, countByStatus, getTasksForDate,
         isOverdue, overdueDays, dayOffset, ganttTasks, ganttTracks, ganttTaskCount, ganttBarStyleV2, formatDateShort, switchTab,
         onDragStart, onBoardDrop,
-        onStatusChange,
+        onStatusChange, setEditingProgress,
         onCalendarDragOver, onCalendarDragLeave, onCalendarDrop,
         confirmTask, addTaskToCalendar,
         changeWeek, goToThisWeek,

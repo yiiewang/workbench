@@ -180,6 +180,13 @@ export function setupTodoApp() {
         return { version: null, tasks: [] };
     }
 
+    // 归一化任务列表的 assignee：历史脏数据可能残留 number（主键改造中间态），
+    // 统一转字符串化 id。否则前端 JSON.stringify(number) 与后端 json.Marshal(string)
+    // 的 md5 永远不一致，导致持续误报冲突。
+    function normalizeAssignees(list) {
+        return (list || []).map(t => t.assignee == null ? t : { ...t, assignee: String(t.assignee) });
+    }
+
     // ========== /tasks.json 请求缓存层 ==========
     // 多个函数都需要拉取 /tasks.json，缓存 3 秒避免重复请求
     let _tasksJsonCache = null;
@@ -243,7 +250,7 @@ export function setupTodoApp() {
                 const parsed = JSON.parse(saved);
                 const unwrapped = unwrapData(parsed);
                 localVersion = unwrapped.version;
-                localTasks = unwrapped.tasks;
+                localTasks = normalizeAssignees(unwrapped.tasks);
             } catch (e) {
                 localTasks = [];
             }
@@ -259,7 +266,7 @@ export function setupTodoApp() {
                 if (org && org[userId]) {
                     const unwrapped = unwrapData(org[userId]);
                     serverVersion = unwrapped.version;
-                    serverTasks = unwrapped.tasks;
+                    serverTasks = normalizeAssignees(unwrapped.tasks);
                 }
             }
         } catch (e) { /* 离线模式，使用本地缓存 */ }
@@ -644,19 +651,24 @@ export function setupTodoApp() {
     }
 
     // --- Load org members ---
+    // 数据源改为 GET /api/org-members（返回 [{id, name}]），不再从 tasks JSON 的 key 推导。
+    // key 已从业务 name 改为字符串化整数 id，且 name 无法从 key 还原，必须走独立接口。
     async function loadOrgMembers() {
         if (!currentUser.value) return;
-        const { orgId } = currentUser.value;
         try {
-            const data = await fetchTasksJSON();
-            if (data) {
-                const org = (data.orgs || {})[orgId];
-                // 新格式：{version, tasks}
-                orgMembers.value = org ? Object.keys(org).filter(k => org[k] && Array.isArray(org[k].tasks)) : [];
-            }
+            const data = await taskApi.getOrgMembers();
+            orgMembers.value = (data && data.members) ? data.members : [];
         } catch (e) {
             orgMembers.value = [];
         }
+    }
+
+    // id → name 反查：viewingMember/assignee 存字符串化 id，展示时还原业务 name
+    function memberName(id) {
+        if (id == null) return '';
+        const key = String(id);
+        const m = orgMembers.value.find(m => String(m.id) === key);
+        return m ? m.name : key;
     }
 
     // ========== Sync & Auth ==========
@@ -1281,7 +1293,7 @@ export function setupTodoApp() {
             status: 'progress',
             priority: 'medium',
             progress: 0,
-            assignee: currentUser.value.userId,
+            assignee: String(currentUser.value.userId),
             due: dateStr,
             scheduled: dateStr,
             createdAt: formatDate(new Date()),
@@ -1323,10 +1335,12 @@ export function setupTodoApp() {
         }
     }
 
-    // 进度变更联动：进度从 100 调低时，若状态为"已完成"则自动回退为"进行中"
+    // 进度变更联动：进度改为 100 时状态自动置为"已完成"；从 100 调低时若状态为"已完成"则回退为"进行中"
     function setEditingProgress(p) {
         editingTask.value.progress = p;
-        if (editingTask.value.status === 'done' && p < 100) {
+        if (p === 100) {
+            editingTask.value.status = 'done';
+        } else if (editingTask.value.status === 'done') {
             editingTask.value.status = 'progress';
         }
     }
@@ -1351,7 +1365,7 @@ export function setupTodoApp() {
             scheduled: todayStr,
             due: todayStr,
             progress: 0,
-            assignee: currentUser.value.userId,
+            assignee: String(currentUser.value.userId),
             postponedCount: 0,
             autoPostponed: true,
         };
@@ -1430,7 +1444,7 @@ export function setupTodoApp() {
             progress: 0,
             scheduled: todayStr,
             due: todayStr,
-            assignee: currentUser.value.userId,
+            assignee: String(currentUser.value.userId),
             postponedCount: 0,
             autoPostponed: false,
         };
@@ -1475,7 +1489,7 @@ export function setupTodoApp() {
             status: editingTask.value.status,
             priority: editingTask.value.priority || 'medium',
             progress: editingTask.value.progress || 0,
-            assignee: editingTask.value.assignee || currentUser.value.userId,
+            assignee: editingTask.value.assignee || String(currentUser.value.userId),
             due: editingTask.value.due,
             scheduled: editingTask.value.scheduled,
             createdAt: formatDate(new Date()),
@@ -1624,16 +1638,18 @@ export function setupTodoApp() {
             showGlobalLogin();
             return;
         }
-        const userId = currentUser.value.userId;
-        const userTasks = tasks.value.filter(t => t.assignee === userId);
+        // assignee 存字符串化 id，比较与显示统一用 String(userId) + userName
+        const userKey = String(currentUser.value.userId);
+        const userName = currentUser.value.userName || userKey;
+        const userTasks = tasks.value.filter(t => t.assignee === userKey);
         if (userTasks.length === 0) {
             showToast('你当前没有任务可清空', 'info');
             return;
         }
-        if (!confirm(`确定要清空「${userId}」的所有任务（共 ${userTasks.length} 项）吗？此操作不可撤销！`)) return;
-        tasks.value = tasks.value.filter(t => t.assignee !== userId);
+        if (!confirm(`确定要清空「${userName}」的所有任务（共 ${userTasks.length} 项）吗？此操作不可撤销！`)) return;
+        tasks.value = tasks.value.filter(t => t.assignee !== userKey);
         save();
-        showToast(`已清空「${userId}」的 ${userTasks.length} 项任务`, 'warning');
+        showToast(`已清空「${userName}」的 ${userTasks.length} 项任务`, 'warning');
     }
 
     // --- Toast ---
@@ -1659,16 +1675,17 @@ export function setupTodoApp() {
         }
         // 加载其他成员的日程（只读）
         const { orgId } = currentUser.value;
+        const memberNameText = memberName(newMemberId);
         try {
             const data = await fetchTasksJSON();
             if (data) {
                 const org = (data.orgs || {})[orgId];
                 if (org && org[newMemberId] && Array.isArray(org[newMemberId].tasks)) {
                     tasks.value = org[newMemberId].tasks;
-                    showToast(`正在查看 ${newMemberId} 的日程（只读）`, 'success');
+                    showToast(`正在查看 ${memberNameText} 的日程（只读）`, 'success');
                 } else {
                     tasks.value = [];
-                    showToast(`${newMemberId} 暂无任务`, 'warning');
+                    showToast(`${memberNameText} 暂无任务`, 'warning');
                 }
             }
         } catch (e) {
@@ -1718,7 +1735,7 @@ export function setupTodoApp() {
         // User
         currentUser,
         // Org members
-        viewingMember, orgMembers,
+        viewingMember, orgMembers, memberName,
         // Sync status
         syncStatus, lastSyncError,
         // Conflict resolution

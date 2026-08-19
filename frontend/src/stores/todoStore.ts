@@ -1,6 +1,7 @@
 // Shared reactive state for TodoApp — allows TodoSidebar and TodoView to share a single data source.
 // useTodoApp imports from here instead of declaring local refs; TodoSidebar imports directly.
 import { ref, reactive } from 'vue'
+import type { Member } from '../api/tasks'
 
 // ============================================================
 // Auth — re-export from stores/auth.ts (Single Source of Truth)
@@ -20,7 +21,7 @@ export const activeTaskId = ref<string | null>(null)
 // Member Switching
 // ============================================================
 export const viewingMember = ref<string | null>(null)
-export const orgMembers = ref<string[]>([])
+export const orgMembers = ref<Member[]>([])
 
 // ============================================================
 // Sync Status

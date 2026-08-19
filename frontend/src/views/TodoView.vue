@@ -33,12 +33,12 @@ export default {
                 <div class="header-actions">
                     <div class="user-info-group">
                         <template v-if="currentUser">
-                            <span class="user-badge">👤 {{ currentUser.userId }} ({{ currentUser.orgId }})</span>
+                            <span class="user-badge">👤 {{ currentUser.userName }} ({{ currentUser.orgName }})</span>
                             <!-- 成员切换器 -->
                             <select v-if="orgMembers.length > 1" v-model="viewingMember" class="member-select">
                                 <option :value="null">📋 我的日程</option>
-                                <option v-for="m in orgMembers" :key="m" :value="m">{{ m === currentUser.userId ? '👤' :
-                                    '👥' }} {{ m }}</option>
+                                <option v-for="m in orgMembers" :key="m.id" :value="String(m.id)">{{ m.id === currentUser.userId ? '👤' :
+                                    '👥' }} {{ m.name }}</option>
                             </select>
                             <span v-if="syncStatus === 'syncing'" class="user-badge status-syncing">⏳ 同步中...</span>
                             <span v-if="syncStatus === 'error'" class="user-badge status-error"
@@ -57,7 +57,7 @@ export default {
             <!-- 只读模式提示条 -->
             <div class="readonly-banner" v-if="viewingMember">
                 <span class="lock-icon">🔒</span>
-                <span>正在查看 <strong>{{ viewingMember }}</strong> 的日程</span>
+                <span>正在查看 <strong>{{ memberName(viewingMember) }}</strong> 的日程</span>
                 <span class="readonly-tag">只读</span>
                 <button class="btn-return" @click="viewingMember = null">✕ 返回</button>
             </div>
@@ -256,12 +256,15 @@ export default {
                             </div>
                             <div class="form-field" v-if="!isCreating">
                                 <label>责任人</label>
-                                <input type="text" v-model="editingTask.assignee" placeholder="责任人">
+                                <select v-model="editingTask.assignee">
+                                    <option value="" disabled>未分配</option>
+                                    <option v-for="m in orgMembers" :key="m.id" :value="String(m.id)">{{ m.name }}</option>
+                                </select>
                             </div>
                             <!-- Postponed Info -->
                             <div class="postponed-info" v-if="!isCreating && editingTask.postponedCount > 0 && isOverdue(editingTask)"
                                 style="margin-top:12px;padding:10px;border-radius:6px;font-size:12px;">
-                                已延期 {{ editingTask.postponedCount }} 次<template v-if="editingTask.postponedFrom">，原计划: {{ editingTask.postponedFrom }}</template>
+                                已延期 {{ editingTask.postponedCount }} 天<template v-if="editingTask.postponedFrom">，原计划: {{ editingTask.postponedFrom }}</template>
                             </div>
                         </div>
 

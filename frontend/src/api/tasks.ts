@@ -65,3 +65,15 @@ export async function deleteTask(taskId: string) {
     return r.json()
   })
 }
+
+// 组织成员（对应后端 db.Member：整数 id + 业务 name）
+export interface Member {
+  id: number
+  name: string
+}
+
+// 获取当前组织的成员列表（GET /api/org-members）
+// 后端强制使用登录用户的 orgId，返回 { members: [{ id, name }] }
+export async function getOrgMembers(): Promise<{ members: Member[] }> {
+  return apiCall('/api/org-members')
+}

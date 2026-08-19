@@ -25,7 +25,12 @@ async function doLogin() {
   loading.value = true
   try {
     const data = await authApi.login(userId.value.trim(), password.value, orgId.value.trim())
-    setAuth(data.token, { userId: data.userId, orgId: data.orgId })
+    setAuth(data.token, {
+      userId: data.user.userId,
+      orgId: data.user.orgId,
+      userName: data.user.userName,
+      orgName: data.user.orgName,
+    })
     const redirect = (route.query.redirect as string) || '/'
     router.replace(redirect)
   } catch (err: any) {

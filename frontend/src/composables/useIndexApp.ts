@@ -8,10 +8,32 @@ import { showSharePasswordModal } from '../lib/sharePasswordModal'
 import {
   authToken as storeAuthToken,
   dsMode, dsToken, dsPathPrefix, shareRootPath,
+  openTabs, activeTabPath,
   setOpenTabFn, loadSharesFn,
   checkAuth,
 } from '../stores/indexStore'
 import { treeStore } from './useTreeStore'
+
+/**
+ * 退出分享模式：清空分享残留状态并恢复浏览器模式。
+ * 供 initApp（首次挂载）与 IndexView 的路由 watch（从 /s/:token 切回浏览器路由）复用。
+ */
+export function exitShareMode() {
+  if (dsMode.value !== 'share') return
+  dsMode.value = 'browser'
+  shareRootPath.value = ''
+  dsToken.value = ''
+  dsPathPrefix.value = ''
+  dataSource.mode = 'browser'
+  dataSource.shareToken = ''
+  dataSource.sharePassword = ''
+  sessionStorage.removeItem('workbench-share-pwd')
+  treeStore.dirCache.clear()
+  treeStore.expanded.clear()
+  treeStore.activePath.value = null
+  openTabs.clear()
+  activeTabPath.value = ''
+}
 
 export function setupIndexApp() {
   onMounted(() => {
@@ -115,17 +137,7 @@ export function setupIndexApp() {
       }
 
       // 浏览器模式：重置分享模式残留状态（从 /s/{token} 导航回主界面时）
-      if (dsMode.value === 'share') {
-        dsMode.value = 'browser'
-        shareRootPath.value = ''
-        dataSource.mode = 'browser'
-        dataSource.shareToken = ''
-        dsToken.value = ''
-        dsPathPrefix.value = ''
-        treeStore.dirCache.clear()
-        treeStore.expanded.clear()
-        treeStore.activePath.value = null
-      }
+      exitShareMode()
 
       // 未登录 → 路由守卫已拦截，此处不再弹窗
       if (!storeAuthToken.value) {

@@ -25,9 +25,17 @@ import {
 /** 当前 Bearer token（从 localStorage 恢复，无则空串） */
 export const authToken = ref<string>(getAuthToken() || '')
 
-/** 当前登录用户 { userId, orgId }（从 localStorage 恢复，无则 null） */
-export const currentUser = ref<{ userId: string; orgId: string } | null>(
-  restoreUser() as { userId: string; orgId: string } | null,
+/** 认证用户信息：整数 id + 业务 name（双轨架构） */
+export interface AuthUser {
+  userId: number
+  orgId: number
+  userName: string
+  orgName: string
+}
+
+/** 当前登录用户（从 localStorage 恢复，无则 null） */
+export const currentUser = ref<AuthUser | null>(
+  restoreUser() as AuthUser | null,
 )
 
 /** 是否已登录（token + user 均存在） */
@@ -43,7 +51,7 @@ export const loggedIn = computed(() => !!authToken.value && !!currentUser.value)
  */
 export function restoreAuth(): void {
   authToken.value = getAuthToken() || ''
-  currentUser.value = restoreUser() as { userId: string; orgId: string } | null
+  currentUser.value = restoreUser() as AuthUser | null
 }
 
 /**
@@ -51,9 +59,9 @@ export function restoreAuth(): void {
  * 同时写入 localStorage（持久化）和响应式 ref（驱动 UI）。
  *
  * @param token - 后端返回的 Bearer token
- * @param user  - 用户信息 { userId, orgId }
+ * @param user  - 用户信息 { userId, orgId, userName, orgName }
  */
-export function setAuth(token: string, user: { userId: string; orgId: string }): void {
+export function setAuth(token: string, user: AuthUser): void {
   saveAuthState(token, user)
   authToken.value = token
   currentUser.value = user
@@ -93,8 +101,13 @@ export async function checkAuth(): Promise<boolean> {
     if (resp.ok) {
       const body = await resp.json()
       if (body.data && body.data.userId) {
-        // 刷新 user 信息（后端可能更新了 orgId 等）
-        const user = { userId: body.data.userId, orgId: body.data.orgId }
+        // 刷新 user 信息（后端返回整数 id 与 name）
+        const user: AuthUser = {
+          userId: body.data.userId,
+          orgId: body.data.orgId,
+          userName: body.data.userName,
+          orgName: body.data.orgName,
+        }
         saveAuthState(token, user)
         currentUser.value = user
         return true

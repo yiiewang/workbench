@@ -47,16 +47,19 @@ func setupTestServer(t *testing.T) (*httptest.Expect, *db.DB, []byte, string) {
 }
 
 // createUser 创建一个带 bcrypt 哈希的用户，返回可直接用的 token。
-func createUser(t *testing.T, d *db.DB, secret []byte, orgID, userID, password string) string {
+// orgName/userName 是目录层的业务名；内部换算成整数 id 生成 token。
+func createUser(t *testing.T, d *db.DB, secret []byte, orgName, userName, password string) string {
 	t.Helper()
 	hash, err := HashPassword(password)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.EnsureOrg(context.Background(), orgID); err != nil {
+	orgID, err := d.EnsureOrg(context.Background(), orgName)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.UpsertUser(context.Background(), orgID, userID, hash); err != nil {
+	userID, err := d.UpsertUser(context.Background(), orgID, userName, hash)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return GenerateToken(orgID, userID, secret, 30)
@@ -83,7 +86,7 @@ func TestHandler_Login(t *testing.T) {
 	}).Expect().Status(http.StatusOK).JSON().Object()
 	obj.Value("code").Equal(0)
 	obj.Value("data").Object().Value("token").String().NotEqual("")
-	obj.Value("data").Object().Value("user").Object().Value("userId").Equal("alice")
+	obj.Value("data").Object().Value("user").Object().Value("userId").Equal(1)
 
 	// 错误密码 → 401
 	e.POST("/api/login").WithJSON(map[string]string{
@@ -103,8 +106,8 @@ func TestHandler_Login(t *testing.T) {
 
 func TestHandler_LoginUserWithoutPassword(t *testing.T) {
 	e, d, _, _ := setupTestServer(t)
-	_ = d.EnsureOrg(context.Background(), "org1")
-	_ = d.UpsertUser(context.Background(), "org1", "bob", "")
+	orgID, _ := d.EnsureOrg(context.Background(), "org1")
+	_, _ = d.UpsertUser(context.Background(), orgID, "bob", "")
 
 	e.POST("/api/login").WithJSON(map[string]string{
 		"orgId": "org1", "userId": "bob", "password": "anything",
@@ -142,10 +145,10 @@ func TestHandler_Me(t *testing.T) {
 	obj := e.GET("/api/me").WithHeader("Authorization", authHeader(tok)).
 		Expect().Status(http.StatusOK).JSON().Object()
 	obj.Value("code").Equal(0)
-	obj.Value("data").Object().Value("userId").Equal("alice")
+	obj.Value("data").Object().Value("userId").Equal(1)
 
 	// 过期 token → 401
-	expired := GenerateToken("org1", "alice", secret, -1)
+	expired := GenerateToken(1, 1, secret, -1)
 	e.GET("/api/me").WithHeader("Authorization", authHeader(expired)).
 		Expect().Status(http.StatusUnauthorized)
 }
@@ -171,8 +174,8 @@ func TestHandler_TasksJSON(t *testing.T) {
 
 	body := map[string]any{
 		"orgs": map[string]any{
-			"org1": map[string]any{
-				"alice": map[string]any{
+			"1": map[string]any{
+				"1": map[string]any{
 					"tasks": []map[string]any{
 						{"id": "t1", "title": "first", "status": "todo", "sortOrder": 1},
 					},
@@ -309,7 +312,7 @@ func TestHandler_OrgMembers(t *testing.T) {
 	e, d, secret, _ := setupTestServer(t)
 	tok := createUser(t, d, secret, "org1", "alice", "p")
 
-	e.GET("/api/org-members").WithQuery("orgId", "org1").
+	e.GET("/api/org-members").
 		WithHeader("Authorization", authHeader(tok)).
 		Expect().Status(http.StatusOK).
 		JSON().Object().Value("data").Object().Value("members").Array().NotEmpty()

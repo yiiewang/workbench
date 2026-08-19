@@ -45,8 +45,10 @@ func serverError(ctx iris.Context, msg string, err error, args ...any) {
 
 // userBrief 用户简要信息（登录/设置密码响应内嵌）
 type userBrief struct {
-	UserID string `json:"userId"`
-	OrgID  string `json:"orgId"`
+	UserID   int64  `json:"userId"`
+	OrgID    int64  `json:"orgId"`
+	UserName string `json:"userName"`
+	OrgName  string `json:"orgName"`
 }
 
 // loginData 登录/设置密码成功载荷
@@ -57,14 +59,16 @@ type loginData struct {
 
 // meData /api/me 载荷
 type meData struct {
-	UserID string `json:"userId"`
-	OrgID  string `json:"orgId"`
-	Exp    int64  `json:"exp"`
+	UserID   int64  `json:"userId"`
+	OrgID    int64  `json:"orgId"`
+	UserName string `json:"userName"`
+	OrgName  string `json:"orgName"`
+	Exp      int64  `json:"exp"`
 }
 
 // membersData /api/org-members 载荷
 type membersData struct {
-	Members []string `json:"members"`
+	Members []db.Member `json:"members"`
 }
 
 // treeData /api/tree 载荷（与分享目录视图共用）

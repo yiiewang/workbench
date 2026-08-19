@@ -11,6 +11,9 @@ __pycache__/
 *.swp
 *.swo
 
+# CodeBuddy 项目数据（IDE 本地数据，不入库；符号链接指向 ~/.codebuddy）
+.codebuddy
+
 # 运行时产物
 nohup.out
 *.log

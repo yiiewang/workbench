@@ -77,7 +77,7 @@ func (s *Server) handleCreateShare(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
 	orgID := currentOrgID(ctx)
-	if orgID == "" {
+	if orgID == 0 {
 		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
 		return
 	}
@@ -208,7 +208,7 @@ func (s *Server) handleListShares(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
 	orgID := currentOrgID(ctx)
-	if orgID == "" {
+	if orgID == 0 {
 		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
 		return
 	}
@@ -232,7 +232,7 @@ func (s *Server) handleDeleteShare(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
 	orgID := currentOrgID(ctx)
-	if orgID == "" {
+	if orgID == 0 {
 		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
 		return
 	}
@@ -367,7 +367,7 @@ func (s *Server) handleShareData(ctx iris.Context) {
 
 	subPath := ctx.URLParam("path")
 	resourcePath := share.ResourcePath
-	fsPath, ok := s.resolveUserPathByOwner(share.OwnerOrgID, share.OwnerUserID, resourcePath)
+	fsPath, ok := s.resolveUserPathByOwner(rctx, share.OwnerOrgID, share.OwnerUserID, resourcePath)
 	if !ok {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return
@@ -380,7 +380,7 @@ func (s *Server) handleShareData(ctx iris.Context) {
 			cleaned = strings.TrimPrefix(cleaned, sharePathPrefix)
 		}
 		fsPath = filepath.Join(fsPath, cleaned)
-		shareRoot, _ := s.resolveUserPathByOwner(share.OwnerOrgID, share.OwnerUserID, share.ResourcePath)
+		shareRoot, _ := s.resolveUserPathByOwner(rctx, share.OwnerOrgID, share.OwnerUserID, share.ResourcePath)
 		absBase, _ := filepath.Abs(shareRoot)
 		absFull, _ := filepath.Abs(fsPath)
 		if !strings.HasPrefix(absFull, absBase+string(filepath.Separator)) && absFull != absBase {
@@ -445,7 +445,7 @@ func (s *Server) handleShareData(ctx iris.Context) {
 		resp.IsDir = true
 		resp.CurrentPath = resourcePath
 		relPath := ""
-		if shareRoot, _ := s.resolveUserPathByOwner(share.OwnerOrgID, share.OwnerUserID, share.ResourcePath); shareRoot != "" {
+		if shareRoot, _ := s.resolveUserPathByOwner(rctx, share.OwnerOrgID, share.OwnerUserID, share.ResourcePath); shareRoot != "" {
 			if rel, err := filepath.Rel(shareRoot, fsPath); err == nil && rel != "." {
 				relPath = filepath.ToSlash(rel)
 			}

@@ -54,6 +54,7 @@ func (f FlexString) String() string {
 // DB 封装 SQLite 操作
 type DB struct {
 	conn *sql.DB
+	path string
 }
 
 // TaskItem 任务条目
@@ -66,7 +67,7 @@ type TaskItem struct {
 	Scheduled      string     `json:"scheduled"`
 	Due            string     `json:"due"`
 	Progress       int        `json:"progress"`
-	Assignee       string     `json:"assignee"`
+	Assignee       FlexString `json:"assignee"`
 	PostponedCount int        `json:"postponedCount"`
 	AutoPostponed  bool       `json:"autoPostponed"`
 	SortOrder      int        `json:"sort_order,omitempty"`
@@ -109,7 +110,7 @@ func Open(dbPath string) (*DB, error) {
 	}
 	conn.SetMaxOpenConns(1)
 
-	d := &DB{conn: conn}
+	d := &DB{conn: conn, path: dbPath}
 	if err := d.migrate(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("migrate: %w", err)

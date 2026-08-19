@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,9 +49,6 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 		return nil, fmt.Errorf("create admin dir: %w", err)
 	}
 
-	// 一次性迁移：将 static_dir 顶层散落的旧文件移到 _legacy/（仅首次启动执行）
-	migrateLegacyFiles(absDir)
-
 	return &Server{
 		db:          database,
 		cfg:         cfg,
@@ -59,44 +57,6 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 		tokenSecret: tokenSecret,
 		logFile:     logFile,
 	}, nil
-}
-
-// migrateLegacyFiles 将 static_dir 顶层散落的旧文件（非 _admin、非 {orgId} 目录）
-// 移动到 _legacy/ 目录，保留管理员可访问。已存在 _legacy/ 时不重复迁移。
-// 新文件按 {orgId}/{userId}/ 结构存放，由 userRoot() 按需创建。
-func migrateLegacyFiles(staticDir string) {
-	legacyDir := filepath.Join(staticDir, "_legacy")
-	entries, err := os.ReadDir(staticDir)
-	if err != nil {
-		return
-	}
-	// 检查是否已有用户目录（以非 _ 开头的目录），有则说明已迁移过
-	hasUserDir := false
-	for _, e := range entries {
-		if e.IsDir() && !strings.HasPrefix(e.Name(), "_") {
-			hasUserDir = true
-			break
-		}
-	}
-	// 只在没有任何用户目录时执行迁移
-	if hasUserDir {
-		return
-	}
-	// 确保 _legacy 目录存在
-	if err := os.MkdirAll(legacyDir, 0755); err != nil {
-		return
-	}
-	for _, e := range entries {
-		name := e.Name()
-		// 跳过 _admin、_legacy 和所有以 _ 开头的目录
-		if strings.HasPrefix(name, "_") {
-			continue
-		}
-		src := filepath.Join(staticDir, name)
-		dst := filepath.Join(legacyDir, name)
-		// 尝试重命名，失败则忽略（可能有文件被占用）
-		_ = os.Rename(src, dst)
-	}
 }
 
 // App 构建 iris.Application 并注册所有路由
@@ -112,7 +72,7 @@ func (s *Server) App() *iris.Application {
 	// /api 统一分组
 	// ============================================================
 	api := app.Party("/api")
-	auth := AuthMiddleware(s.tokenSecret, s.db.FindUserOrg)
+	auth := AuthMiddleware(s.tokenSecret, s.db.GetUserNames)
 
 	// 公开 API（无需鉴权）
 	api.Post("/login", s.handleLogin)
@@ -232,7 +192,7 @@ func (s *Server) handleOrgMembers(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	// 强制使用当前登录用户的 orgId，忽略前端传入的 orgId 参数（防止越权查询其他组织）
 	orgID := currentOrgID(ctx)
-	if orgID == "" {
+	if orgID == 0 {
 		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
 		return
 	}
@@ -242,7 +202,7 @@ func (s *Server) handleOrgMembers(ctx iris.Context) {
 		return
 	}
 	if members == nil {
-		members = []string{}
+		members = []db.Member{}
 	}
 	writeOK(ctx, membersData{Members: members})
 }
@@ -254,7 +214,13 @@ func (s *Server) handleOrgMembers(ctx iris.Context) {
 func (s *Server) handleMe(ctx iris.Context) {
 	userID := currentUserID(ctx)
 	orgID := currentOrgID(ctx)
-	writeOK(ctx, meData{UserID: userID, OrgID: orgID, Exp: time.Now().Unix() + int64(s.expiryDays())*secondsPerDay})
+	writeOK(ctx, meData{
+		UserID:   userID,
+		OrgID:    orgID,
+		UserName: currentUserName(ctx),
+		OrgName:  currentOrgName(ctx),
+		Exp:      time.Now().Unix() + int64(s.expiryDays())*secondsPerDay,
+	})
 }
 
 // ============================================================
@@ -286,7 +252,7 @@ func (s *Server) handleLogin(ctx iris.Context) {
 		return
 	}
 
-	pwdHash, exists, err := s.db.FindUser(rctx, req.OrgID, req.UserID)
+	orgID, userID, pwdHash, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
 	if err != nil {
 		serverError(ctx, "find user failed", err, "org", req.OrgID, "user", req.UserID)
 		return
@@ -303,8 +269,8 @@ func (s *Server) handleLogin(ctx iris.Context) {
 	}
 
 	s.clearLoginFailures(rctx, ip)
-	token := GenerateToken(req.OrgID, req.UserID, s.tokenSecret, s.expiryDays())
-	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: req.UserID, OrgID: req.OrgID}})
+	token := GenerateToken(orgID, userID, s.tokenSecret, s.expiryDays())
+	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: req.OrgID}})
 }
 
 // ============================================================
@@ -330,12 +296,13 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 		return
 	}
 
-	if err := s.db.EnsureOrg(rctx, req.OrgID); err != nil {
+	orgID, err := s.db.EnsureOrg(rctx, req.OrgID)
+	if err != nil {
 		serverError(ctx, "ensure org failed", err, "org", req.OrgID)
 		return
 	}
 
-	pwdHash, exists, err := s.db.FindUser(rctx, req.OrgID, req.UserID)
+	_, _, pwdHash, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
 	if err != nil {
 		serverError(ctx, "find user failed", err, "org", req.OrgID, "user", req.UserID)
 		return
@@ -380,13 +347,14 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 		serverError(ctx, "hash password failed", err)
 		return
 	}
-	if err := s.db.UpsertUser(rctx, req.OrgID, req.UserID, newHash); err != nil {
+	userID, err := s.db.UpsertUser(rctx, orgID, req.UserID, newHash)
+	if err != nil {
 		serverError(ctx, "upsert user failed", err, "org", req.OrgID, "user", req.UserID)
 		return
 	}
 
-	token := GenerateToken(req.OrgID, req.UserID, s.tokenSecret, s.expiryDays())
-	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: req.UserID, OrgID: req.OrgID}})
+	token := GenerateToken(orgID, userID, s.tokenSecret, s.expiryDays())
+	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: req.OrgID}})
 }
 
 // ============================================================
@@ -418,8 +386,13 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 		return
 	}
 
-	for orgID, rawOrg := range req.Orgs {
-		// 只允许写入当前登录用户所属的 org
+	for orgKey, rawOrg := range req.Orgs {
+		// org map key 是字符串化的整数 id，解析后与当前登录 org 比较（防跨 org 写入）
+		orgID, err := strconv.ParseInt(orgKey, 10, 64)
+		if err != nil {
+			writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidTasksJSON, "invalid org id")
+			return
+		}
 		if orgID != currentOrg {
 			writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "Cannot write to other org's tasks")
 			return
@@ -433,13 +406,13 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 			writeFail(ctx, iris.StatusBadRequest, CodeInvalidTasksJSON)
 			return
 		}
-		for memberID, member := range org {
-			if memberID != userID {
+		for memberKey, member := range org {
+			memberID, err := strconv.ParseInt(memberKey, 10, 64)
+			if err != nil {
 				continue
 			}
-			if err := s.db.EnsureOrg(rctx, orgID); err != nil {
-				serverError(ctx, "ensure org failed", err, "org", orgID)
-				return
+			if memberID != userID {
+				continue
 			}
 			// 存储客户端发来的 version JSON，GET 时原样回传，确保哈希一致
 			versionJSON := ""
@@ -483,11 +456,6 @@ func (s *Server) patchTask(ctx iris.Context) {
 	}
 	req.Task.ID = db.FlexString(taskID)
 
-	if err := s.db.EnsureOrg(rctx, orgID); err != nil {
-		serverError(ctx, "ensure org failed", err, "org", orgID)
-		return
-	}
-
 	versionJSON, err := s.db.UpdateTask(rctx, orgID, userID, req.Task)
 	if err != nil {
 		serverError(ctx, "update task failed", err, "task", taskID)
@@ -522,11 +490,6 @@ func (s *Server) postTask(ctx iris.Context) {
 	}
 	req.Task.ID = db.FlexString(taskID)
 
-	if err := s.db.EnsureOrg(rctx, orgID); err != nil {
-		serverError(ctx, "ensure org failed", err, "org", orgID)
-		return
-	}
-
 	versionJSON, err := s.db.AddTask(rctx, orgID, userID, req.Task)
 	if err != nil {
 		serverError(ctx, "add task failed", err, "task", taskID)
@@ -549,11 +512,6 @@ func (s *Server) deleteTask(ctx iris.Context) {
 	taskID := ctx.Params().Get("id")
 	if taskID == "" {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
-		return
-	}
-
-	if err := s.db.EnsureOrg(rctx, orgID); err != nil {
-		serverError(ctx, "ensure org failed", err, "org", orgID)
 		return
 	}
 
@@ -651,25 +609,30 @@ func (s *Server) isHidden(name string) bool {
 // 静态文件 + 目录列表
 // ============================================================
 
-// userRoot 返回当前登录用户的私有文件根目录: serDirAbs/{orgId}/{userId}/
-// 若目录不存在则自动创建。orgID 或 userID 为空时返回空串表示无效。
+// userRoot 返回当前登录用户的私有文件根目录: serDirAbs/{orgName}/{userName}/
+// 目录层使用 name 拼路径（双轨架构：存储层用整数 id，目录层用 name）。
+// 若目录不存在则自动创建。orgName 或 userName 为空时返回空串表示无效。
 func (s *Server) userRoot(ctx iris.Context) string {
-	orgID := currentOrgID(ctx)
-	userID := currentUserID(ctx)
-	if orgID == "" || userID == "" {
+	orgName := currentOrgName(ctx)
+	userName := currentUserName(ctx)
+	if orgName == "" || userName == "" {
 		return ""
 	}
-	root := filepath.Join(s.serDirAbs, orgID, userID)
+	root := filepath.Join(s.serDirAbs, orgName, userName)
 	_ = os.MkdirAll(root, 0755)
 	return root
 }
 
-// userRootByOwner 通过 share 的 owner 信息定位用户根目录（分享访问场景）
-func (s *Server) userRootByOwner(orgID, userID string) string {
-	if orgID == "" || userID == "" {
+// userRootByOwner 通过 share 的 owner 整数 id 反查 name 定位用户根目录（分享访问场景）
+func (s *Server) userRootByOwner(ctx context.Context, orgID, userID int64) string {
+	if orgID == 0 || userID == 0 {
 		return ""
 	}
-	return filepath.Join(s.serDirAbs, orgID, userID)
+	orgName, userName, err := s.db.GetUserNames(ctx, orgID, userID)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(s.serDirAbs, orgName, userName)
 }
 
 // resolveUserPath 以当前用户根为基准解析相对路径，防止跨用户/跨组织目录穿越
@@ -701,8 +664,8 @@ func (s *Server) resolveUserPath(ctx iris.Context, relPath string) (string, bool
 }
 
 // resolveUserPathByOwner 以指定 owner 的用户根为基准解析路径（分享访问场景）
-func (s *Server) resolveUserPathByOwner(orgID, userID, relPath string) (string, bool) {
-	root := s.userRootByOwner(orgID, userID)
+func (s *Server) resolveUserPathByOwner(ctx context.Context, orgID, userID int64, relPath string) (string, bool) {
+	root := s.userRootByOwner(ctx, orgID, userID)
 	if root == "" {
 		return "", false
 	}
@@ -850,14 +813,15 @@ func (s *Server) handleStaticWithAuth(ctx iris.Context) {
 		writeFail(ctx, iris.StatusUnauthorized, CodeInvalidToken)
 		return
 	}
-	// 旧格式 token 兼容：orgID 为空时查 DB 补全
-	if orgID == "" {
-		if oid, err := s.db.FindUserOrg(context.Background(), userID); err == nil && oid != "" {
-			orgID = oid
-		}
+	// 反查 name 写入 ctx（静态文件服务 userRoot 按 name 拼目录）
+	orgName, userName := "", ""
+	if on, un, err := s.db.GetUserNames(context.Background(), orgID, userID); err == nil {
+		orgName, userName = on, un
 	}
 	ctx.Values().Set("userID", userID)
 	ctx.Values().Set("orgID", orgID)
+	ctx.Values().Set("userName", userName)
+	ctx.Values().Set("orgName", orgName)
 	s.handleStatic(ctx)
 }
 

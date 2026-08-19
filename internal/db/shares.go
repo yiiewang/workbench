@@ -10,8 +10,8 @@ import (
 type Share struct {
 	ID             string `json:"id"`
 	Token          string `json:"token"`
-	OwnerUserID    string `json:"ownerUserId"`
-	OwnerOrgID     string `json:"ownerOrgId"`
+	OwnerUserID    int64  `json:"ownerUserId"`
+	OwnerOrgID     int64  `json:"ownerOrgId"`
 	ResourcePath   string `json:"resourcePath"`
 	ResourceType   string `json:"resourceType"` // "file" | "dir"
 	MaxAccessCount int    `json:"maxAccessCount"`
@@ -34,7 +34,7 @@ func (d *DB) CreateShare(ctx context.Context, s *Share) error {
 }
 
 // ListSharesByOwner 查询用户的所有分享
-func (d *DB) ListSharesByOwner(ctx context.Context, orgID, userID string) ([]Share, error) {
+func (d *DB) ListSharesByOwner(ctx context.Context, orgID, userID int64) ([]Share, error) {
 	rows, err := d.conn.QueryContext(ctx, `SELECT id, token, owner_user_id, owner_org_id, resource_path, resource_type,
 		max_access_count, access_count, password_hash, remark, effective_at, expires_at, created_at
 		FROM shares WHERE owner_org_id = ? AND owner_user_id = ? ORDER BY created_at DESC`, orgID, userID)
@@ -75,7 +75,7 @@ func (d *DB) GetShareByToken(ctx context.Context, token string) (*Share, error) 
 }
 
 // DeleteShare 删除分享（仅 owner 可删）
-func (d *DB) DeleteShare(ctx context.Context, orgID, userID, shareID string) error {
+func (d *DB) DeleteShare(ctx context.Context, orgID, userID int64, shareID string) error {
 	const q = `DELETE FROM shares WHERE id = ? AND owner_org_id = ? AND owner_user_id = ?`
 	res, err := d.conn.ExecContext(ctx, q, shareID, orgID, userID)
 	if err != nil {

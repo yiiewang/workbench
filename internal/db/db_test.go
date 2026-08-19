@@ -3,8 +3,10 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -166,30 +168,35 @@ func TestUsers_CRUD(t *testing.T) {
 		t.Fatalf("HasAnyUser initial = %v, err=%v, want false", has, err)
 	}
 
-	hash, exists, err := d.FindUser(ctx(), "org1", "alice")
+	_, _, hash, exists, err := d.FindUserByName(ctx(), "org1", "alice")
 	if err != nil || exists || hash != "" {
-		t.Fatalf("FindUser missing = (%q,%v,%v), want empty/false/nil", hash, exists, err)
+		t.Fatalf("FindUserByName missing = (%q,%v,%v), want empty/false/nil", hash, exists, err)
 	}
 
-	if err := d.EnsureOrg(ctx(), "org1"); err != nil {
+	orgID, err := d.EnsureOrg(ctx(), "org1")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.EnsureOrg(ctx(), "org1"); err != nil {
-		t.Fatalf("EnsureOrg idempotent: %v", err)
+	if orgID == 0 {
+		t.Fatal("EnsureOrg should return non-zero id")
+	}
+	if id, err := d.EnsureOrg(ctx(), "org1"); err != nil || id != orgID {
+		t.Fatalf("EnsureOrg idempotent = (%d,%v), want (%d,nil)", id, err, orgID)
 	}
 
-	if err := d.UpsertUser(ctx(), "org1", "alice", "hash-v1"); err != nil {
+	userID, err := d.UpsertUser(ctx(), orgID, "alice", "hash-v1")
+	if err != nil {
 		t.Fatal(err)
 	}
-	hash, exists, err = d.FindUser(ctx(), "org1", "alice")
+	_, _, hash, exists, err = d.FindUserByName(ctx(), "org1", "alice")
 	if err != nil || !exists || hash != "hash-v1" {
-		t.Fatalf("FindUser after create = (%q,%v,%v), want hash-v1/true", hash, exists, err)
+		t.Fatalf("FindUserByName after create = (%q,%v,%v), want hash-v1/true", hash, exists, err)
 	}
 
-	if err := d.UpsertUser(ctx(), "org1", "alice", "hash-v2"); err != nil {
+	if _, err := d.UpsertUser(ctx(), orgID, "alice", "hash-v2"); err != nil {
 		t.Fatal(err)
 	}
-	hash, _, _ = d.FindUser(ctx(), "org1", "alice")
+	_, _, hash, _, _ = d.FindUserByName(ctx(), "org1", "alice")
 	if hash != "hash-v2" {
 		t.Fatalf("password not updated, got %q", hash)
 	}
@@ -198,21 +205,19 @@ func TestUsers_CRUD(t *testing.T) {
 		t.Fatal("HasAnyUser should be true after creating user")
 	}
 
-	members, err := d.GetOrgMembers(ctx(), "org1")
+	members, err := d.GetOrgMembers(ctx(), orgID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(members) != 1 || members[0] != "alice" {
+	if len(members) != 1 || members[0].Name != "alice" || members[0].ID != userID {
 		t.Fatalf("members = %v, want [alice]", members)
 	}
 
-	org, err := d.FindUserOrg(ctx(), "alice")
-	if err != nil || org != "org1" {
-		t.Fatalf("FindUserOrg = %q, err=%v, want org1", org, err)
+	if id, err := d.FindOrgID(ctx(), "org1"); err != nil || id != orgID {
+		t.Fatalf("FindOrgID = %d, err=%v, want %d", id, err, orgID)
 	}
-	org, _ = d.FindUserOrg(ctx(), "nobody")
-	if org != "" {
-		t.Fatalf("FindUserOrg unknown = %q, want empty", org)
+	if id, _ := d.FindOrgID(ctx(), "nobody"); id != 0 {
+		t.Fatalf("FindOrgID unknown = %d, want 0", id)
 	}
 }
 
@@ -223,18 +228,18 @@ func TestUsers_CRUD(t *testing.T) {
 func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
-	_ = d.EnsureOrg(ctx(), "org1")
-	_ = d.UpsertUser(ctx(), "org1", "alice", "h")
+	orgID, _ := d.EnsureOrg(ctx(), "org1")
+	userID, _ := d.UpsertUser(ctx(), orgID, "alice", "h")
 
 	tasks := []TaskItem{
 		{ID: "t1", Title: "first", Status: "todo", SortOrder: 1},
 		{ID: "t2", Title: "second", Status: "done", SortOrder: 2},
 	}
-	if err := d.UpsertTasks(ctx(), "org1", "alice", tasks, `{"md5":"abc"}`); err != nil {
+	if err := d.UpsertTasks(ctx(), orgID, userID, tasks, `{"md5":"abc"}`); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := d.GetTasks(ctx(), "org1", "alice")
+	got, err := d.GetTasks(ctx(), orgID, userID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,15 +250,15 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 		t.Fatalf("tasks order = %v,%v", got[0].Title, got[1].Title)
 	}
 
-	if err := d.UpsertTasks(ctx(), "org1", "alice", []TaskItem{{ID: "t3", Title: "only", SortOrder: 1}}, `{"md5":"def"}`); err != nil {
+	if err := d.UpsertTasks(ctx(), orgID, userID, []TaskItem{{ID: "t3", Title: "only", SortOrder: 1}}, `{"md5":"def"}`); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = d.GetTasks(ctx(), "org1", "alice")
+	got, _ = d.GetTasks(ctx(), orgID, userID)
 	if len(got) != 1 || got[0].ID != "t3" {
 		t.Fatalf("after replace got = %v, want [t3]", got)
 	}
 
-	data, err := d.GetTasksJSONByOwner(ctx(), "org1", "alice")
+	data, err := d.GetTasksJSONByOwner(ctx(), orgID, userID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,11 +266,13 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 	if !ok {
 		t.Fatalf("orgs missing in tasks json: %T", data["orgs"])
 	}
-	org1, ok := orgs["org1"]
+	orgKey := strconv.FormatInt(orgID, 10)
+	userKey := strconv.FormatInt(userID, 10)
+	org1, ok := orgs[orgKey]
 	if !ok {
-		t.Fatal("org1 missing")
+		t.Fatalf("org %s missing", orgKey)
 	}
-	user := org1["alice"].(map[string]interface{})
+	user := org1[userKey].(map[string]interface{})
 	ver := user["version"].(map[string]interface{})
 	if ver["md5"] != "def" {
 		t.Fatalf("version = %v, want def", ver["md5"])
@@ -278,12 +285,12 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 func TestTasksJSON_EmptyVersionFallback(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
-	_ = d.EnsureOrg(ctx(), "org1")
-	_ = d.UpsertUser(ctx(), "org1", "bob", "h")
-	_ = d.UpsertTasks(ctx(), "org1", "bob", nil, "")
+	orgID, _ := d.EnsureOrg(ctx(), "org1")
+	userID, _ := d.UpsertUser(ctx(), orgID, "bob", "h")
+	_ = d.UpsertTasks(ctx(), orgID, userID, nil, "")
 
-	data, _ := d.GetTasksJSONByOwner(ctx(), "org1", "bob")
-	user := data["orgs"].(map[string]map[string]interface{})["org1"]["bob"].(map[string]interface{})
+	data, _ := d.GetTasksJSONByOwner(ctx(), orgID, userID)
+	user := data["orgs"].(map[string]map[string]interface{})[strconv.FormatInt(orgID, 10)][strconv.FormatInt(userID, 10)].(map[string]interface{})
 	ver := user["version"].(map[string]string)
 	if ver["md5"] != "init" {
 		t.Fatalf("empty version should fall back to init, got %v", ver)
@@ -301,8 +308,8 @@ func TestShares_CRUD(t *testing.T) {
 	s := &Share{
 		ID:             "sid-1",
 		Token:          "tok-1",
-		OwnerUserID:    "alice",
-		OwnerOrgID:     "org1",
+		OwnerUserID:    1,
+		OwnerOrgID:     1,
 		ResourcePath:   "/docs",
 		ResourceType:   "dir",
 		MaxAccessCount: 3,
@@ -329,9 +336,9 @@ func TestShares_CRUD(t *testing.T) {
 		t.Fatalf("missing share = %v, err=%v", missing, err)
 	}
 
-	s2 := &Share{ID: "sid-2", Token: "tok-2", OwnerUserID: "alice", OwnerOrgID: "org1", ResourcePath: "/file.md"}
+	s2 := &Share{ID: "sid-2", Token: "tok-2", OwnerUserID: 1, OwnerOrgID: 1, ResourcePath: "/file.md"}
 	_ = d.CreateShare(ctx(), s2)
-	list, err := d.ListSharesByOwner(ctx(), "org1", "alice")
+	list, err := d.ListSharesByOwner(ctx(), 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,13 +346,13 @@ func TestShares_CRUD(t *testing.T) {
 		t.Fatalf("list len = %d, want 2", len(list))
 	}
 
-	if err := d.DeleteShare(ctx(), "org1", "alice", "sid-1"); err != nil {
+	if err := d.DeleteShare(ctx(), 1, 1, "sid-1"); err != nil {
 		t.Fatalf("delete own share: %v", err)
 	}
-	if err := d.DeleteShare(ctx(), "org1", "alice", "sid-1"); err == nil {
+	if err := d.DeleteShare(ctx(), 1, 1, "sid-1"); err == nil {
 		t.Fatal("delete missing share should error")
 	}
-	if err := d.DeleteShare(ctx(), "org1", "eve", "sid-2"); err == nil {
+	if err := d.DeleteShare(ctx(), 1, 2, "sid-2"); err == nil {
 		t.Fatal("delete by non-owner should error")
 	}
 }
@@ -354,7 +361,7 @@ func TestIncrementShareAccessCount_Limit(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 	_ = d.CreateShare(ctx(), &Share{
-		ID: "sid", Token: "tok", OwnerUserID: "alice", OwnerOrgID: "org1",
+		ID: "sid", Token: "tok", OwnerUserID: 1, OwnerOrgID: 1,
 		ResourcePath: "/f", MaxAccessCount: 2,
 	})
 
@@ -381,7 +388,7 @@ func TestIncrementShareAccessCount_Limit(t *testing.T) {
 func TestIncrementShareAccessCount_Unlimited(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
-	_ = d.CreateShare(ctx(), &Share{ID: "sid", Token: "tok", OwnerUserID: "a", OwnerOrgID: "o", ResourcePath: "/f", MaxAccessCount: 0})
+	_ = d.CreateShare(ctx(), &Share{ID: "sid", Token: "tok", OwnerUserID: 1, OwnerOrgID: 1, ResourcePath: "/f", MaxAccessCount: 0})
 	for i := 1; i <= 5; i++ {
 		count, reached, err := d.IncrementShareAccessCount(ctx(), "tok")
 		if err != nil || reached {
@@ -398,7 +405,7 @@ func TestStats_LogAndQuery(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 
-	stats, err := d.GetStatsByOrg(ctx(), "org1")
+	stats, err := d.GetStatsByOrg(ctx(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,11 +413,11 @@ func TestStats_LogAndQuery(t *testing.T) {
 		t.Fatalf("empty stats = %+v", stats)
 	}
 
-	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", "org1", "ua", "/a", 200)
-	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", "org1", "ua", "/b", 200)
-	_ = d.LogVisit(ctx(), "v2", "2.2.2.2", "org1", "ua", "/a", 200)
+	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", 1, "ua", "/a", 200)
+	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", 1, "ua", "/b", 200)
+	_ = d.LogVisit(ctx(), "v2", "2.2.2.2", 1, "ua", "/a", 200)
 
-	stats, _ = d.GetStatsByOrg(ctx(), "org1")
+	stats, _ = d.GetStatsByOrg(ctx(), 1)
 	if stats.TotalVisitors != 2 {
 		t.Fatalf("visitors = %d, want 2", stats.TotalVisitors)
 	}
@@ -508,5 +515,28 @@ func TestFlexString_UnmarshalJSON(t *testing.T) {
 	var f FlexString
 	if err := f.UnmarshalJSON([]byte(`{}`)); err == nil {
 		t.Fatal("unmarshal object should error")
+	}
+}
+
+// TestTaskItem_UnmarshalNumberAssignee 回归测试：PUT /api/tasks 请求体中 assignee 为 number
+// 时（主键改造中间态残留脏数据），json.Unmarshal 不应失败，且 assignee 归一化成字符串 id。
+func TestTaskItem_UnmarshalNumberAssignee(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"id":"38","title":"集成测试 skill 接入知识库","assignee":1}`)
+	var task TaskItem
+	if err := json.Unmarshal(raw, &task); err != nil {
+		t.Fatalf("unmarshal number assignee: %v", err)
+	}
+	if task.Assignee.String() != "1" {
+		t.Fatalf("assignee = %q, want \"1\"", task.Assignee.String())
+	}
+
+	raw2 := []byte(`{"id":"3","title":"x","assignee":"1"}`)
+	var task2 TaskItem
+	if err := json.Unmarshal(raw2, &task2); err != nil {
+		t.Fatalf("unmarshal string assignee: %v", err)
+	}
+	if task2.Assignee.String() != "1" {
+		t.Fatalf("assignee = %q, want \"1\"", task2.Assignee.String())
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"time"
 )
 
@@ -16,7 +17,7 @@ func md5Hex(data []byte) string {
 }
 
 // UpsertTasks 批量替换用户任务，同时存储客户端发来的 version JSON
-func (d *DB) UpsertTasks(ctx context.Context, orgID, userID string, tasks []TaskItem, versionJSON string) error {
+func (d *DB) UpsertTasks(ctx context.Context, orgID, userID int64, tasks []TaskItem, versionJSON string) error {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -39,7 +40,7 @@ func (d *DB) UpsertTasks(ctx context.Context, orgID, userID string, tasks []Task
 		if t.AutoPostponed {
 			autoP = 1
 		}
-		if _, err := stmt.ExecContext(ctx, string(t.ID), userID, orgID, t.Title, t.Content, t.Status, t.Priority, t.Scheduled, t.Due, t.Progress, t.Assignee, t.PostponedCount, autoP, t.SortOrder); err != nil {
+		if _, err := stmt.ExecContext(ctx, string(t.ID), userID, orgID, t.Title, t.Content, t.Status, t.Priority, t.Scheduled, t.Due, t.Progress, string(t.Assignee), t.PostponedCount, autoP, t.SortOrder); err != nil {
 			return err
 		}
 	}
@@ -53,7 +54,7 @@ func (d *DB) UpsertTasks(ctx context.Context, orgID, userID string, tasks []Task
 
 // UpdateTask 增量更新单条任务（PATCH /api/tasks/{id}）。
 // 更新后重新计算 version md5（服务端是唯一真相源），返回新的 versionJSON。
-func (d *DB) UpdateTask(ctx context.Context, orgID, userID string, task TaskItem) (string, error) {
+func (d *DB) UpdateTask(ctx context.Context, orgID, userID int64, task TaskItem) (string, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -66,7 +67,7 @@ func (d *DB) UpdateTask(ctx context.Context, orgID, userID string, task TaskItem
 	}
 	_, err = tx.ExecContext(ctx,
 		`UPDATE tasks SET title=?, content=?, status=?, priority=?, scheduled=?, due=?, progress=?, assignee=?, postponed_count=?, auto_postponed=?, sort_order=? WHERE org_id=? AND user_id=? AND id=?`,
-		task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, task.Assignee, task.PostponedCount, autoP, task.SortOrder, orgID, userID, string(task.ID))
+		task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, string(task.Assignee), task.PostponedCount, autoP, task.SortOrder, orgID, userID, string(task.ID))
 	if err != nil {
 		return "", err
 	}
@@ -84,7 +85,7 @@ func (d *DB) UpdateTask(ctx context.Context, orgID, userID string, task TaskItem
 }
 
 // AddTask 新增单条任务（POST /api/tasks/{id}）。
-func (d *DB) AddTask(ctx context.Context, orgID, userID string, task TaskItem) (string, error) {
+func (d *DB) AddTask(ctx context.Context, orgID, userID int64, task TaskItem) (string, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -97,7 +98,7 @@ func (d *DB) AddTask(ctx context.Context, orgID, userID string, task TaskItem) (
 	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO tasks (id, user_id, org_id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		string(task.ID), userID, orgID, task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, task.Assignee, task.PostponedCount, autoP, task.SortOrder)
+		string(task.ID), userID, orgID, task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, string(task.Assignee), task.PostponedCount, autoP, task.SortOrder)
 	if err != nil {
 		return "", err
 	}
@@ -114,7 +115,7 @@ func (d *DB) AddTask(ctx context.Context, orgID, userID string, task TaskItem) (
 }
 
 // DeleteTask 删除单条任务（DELETE /api/tasks/{id}）。
-func (d *DB) DeleteTask(ctx context.Context, orgID, userID, taskID string) (string, error) {
+func (d *DB) DeleteTask(ctx context.Context, orgID, userID int64, taskID string) (string, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -137,7 +138,7 @@ func (d *DB) DeleteTask(ctx context.Context, orgID, userID, taskID string) (stri
 }
 
 // GetVersionJSON 获取用户当前 version_json（供冲突检测用）。
-func (d *DB) GetVersionJSON(ctx context.Context, orgID, userID string) (string, error) {
+func (d *DB) GetVersionJSON(ctx context.Context, orgID, userID int64) (string, error) {
 	var versionJSON string
 	err := d.conn.QueryRowContext(ctx, `SELECT version_json FROM users WHERE org_id = ? AND id = ?`, orgID, userID).Scan(&versionJSON)
 	return versionJSON, err
@@ -146,7 +147,7 @@ func (d *DB) GetVersionJSON(ctx context.Context, orgID, userID string) (string, 
 // recomputeVersion 重新计算用户全部任务的 version md5（服务端唯一真相源）。
 // 生成格式和客户端一致：{"md5":"xxxx","timestamp":1234567890,"deviceId":"","baseMd5":"...","baseTimestamp":...}
 // 保留原 baseMd5/baseTimestamp 不变，只更新 md5 和 timestamp。
-func (d *DB) recomputeVersion(ctx context.Context, tx *sql.Tx, orgID, userID string) (string, error) {
+func (d *DB) recomputeVersion(ctx context.Context, tx *sql.Tx, orgID, userID int64) (string, error) {
 	// 读取当前 version 拿到 baseMd5/baseTimestamp/deviceId
 	var oldVersionJSON string
 	err := tx.QueryRowContext(ctx, `SELECT version_json FROM users WHERE org_id = ? AND id = ?`, orgID, userID).Scan(&oldVersionJSON)
@@ -214,7 +215,7 @@ func (d *DB) recomputeVersion(ctx context.Context, tx *sql.Tx, orgID, userID str
 }
 
 // GetTasks 获取用户任务
-func (d *DB) GetTasks(ctx context.Context, orgID, userID string) ([]TaskItem, error) {
+func (d *DB) GetTasks(ctx context.Context, orgID, userID int64) ([]TaskItem, error) {
 	rows, err := d.conn.QueryContext(ctx,
 		`SELECT id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order FROM tasks WHERE org_id = ? AND user_id = ? ORDER BY sort_order`,
 		orgID, userID)
@@ -237,8 +238,8 @@ func (d *DB) GetTasks(ctx context.Context, orgID, userID string) ([]TaskItem, er
 }
 
 // GetTasksJSONByOwner 获取指定用户的任务 JSON（供 /api/tasks GET 使用）
-// 按 orgID + userID 过滤，防止跨用户数据泄露
-func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID string) (map[string]interface{}, error) {
+// 按 orgID + userID 过滤，防止跨用户数据泄露；输出 orgs/users 的 map key 使用字符串化的整数 id
+func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[string]interface{}, error) {
 	result := map[string]interface{}{
 		"version":     "1.0",
 		"lastUpdated": time.Now().Format(time.RFC3339),
@@ -265,20 +266,23 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID string) (map
 	orgUsers := make(map[string]map[string]*userData)
 
 	for rows.Next() {
-		var orgID, userID, updatedAt, versionJSON string
+		var oID, uID int64
+		var updatedAt, versionJSON string
 		var taskID, taskTitle, taskContent, taskStatus, taskPriority, taskScheduled, taskDue, taskAssignee sql.NullString
 		var taskProgress, taskPostponed, taskAutoPostponed, sortOrder sql.NullInt64
-		if err := rows.Scan(&orgID, &userID, &updatedAt, &versionJSON, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder); err != nil {
+		if err := rows.Scan(&oID, &uID, &updatedAt, &versionJSON, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder); err != nil {
 			return nil, err
 		}
-		if orgUsers[orgID] == nil {
-			orgUsers[orgID] = make(map[string]*userData)
+		orgKey := strconv.FormatInt(oID, 10)
+		userKey := strconv.FormatInt(uID, 10)
+		if orgUsers[orgKey] == nil {
+			orgUsers[orgKey] = make(map[string]*userData)
 		}
-		if orgUsers[orgID][userID] == nil {
-			orgUsers[orgID][userID] = &userData{versionJSON: versionJSON}
+		if orgUsers[orgKey][userKey] == nil {
+			orgUsers[orgKey][userKey] = &userData{versionJSON: versionJSON}
 		}
 		if taskID.Valid {
-			orgUsers[orgID][userID].tasks = append(orgUsers[orgID][userID].tasks, TaskItem{
+			orgUsers[orgKey][userKey].tasks = append(orgUsers[orgKey][userKey].tasks, TaskItem{
 				ID:             FlexString(taskID.String),
 				Title:          taskTitle.String,
 				Content:        taskContent.String,
@@ -287,7 +291,7 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID string) (map
 				Scheduled:      taskScheduled.String,
 				Due:            taskDue.String,
 				Progress:       int(taskProgress.Int64),
-				Assignee:       taskAssignee.String,
+				Assignee:       FlexString(taskAssignee.String),
 				PostponedCount: int(taskPostponed.Int64),
 				AutoPostponed:  taskAutoPostponed.Int64 == 1,
 				SortOrder:      int(sortOrder.Int64),
@@ -295,9 +299,9 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID string) (map
 		}
 	}
 
-	for orgID, users := range orgUsers {
+	for orgKey, users := range orgUsers {
 		usersMap := make(map[string]interface{})
-		for userID, ud := range users {
+		for userKey, ud := range users {
 			tasks := ud.tasks
 			if tasks == nil {
 				tasks = []TaskItem{}
@@ -312,12 +316,12 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID string) (map
 			} else {
 				version = map[string]string{"md5": "init"}
 			}
-			usersMap[userID] = map[string]interface{}{
+			usersMap[userKey] = map[string]interface{}{
 				"version": version,
 				"tasks":   tasks,
 			}
 		}
-		orgsMap[orgID] = usersMap
+		orgsMap[orgKey] = usersMap
 	}
 	result["orgs"] = orgsMap
 	return result, nil

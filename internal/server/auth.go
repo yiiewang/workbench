@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,10 +61,10 @@ func VerifyPassword(hash, password string) bool {
 const secondsPerDay = 24 * 60 * 60
 
 // GenerateToken 生成带过期时间的 HMAC token
-// payload 格式: orgID:userID:expiry
-func GenerateToken(orgID, userID string, secret []byte, expiryDays int) string {
+// payload 格式: orgID:userID:expiry（orgID/userID 为整数 id）
+func GenerateToken(orgID, userID int64, secret []byte, expiryDays int) string {
 	expiry := time.Now().Unix() + int64(expiryDays)*secondsPerDay
-	payload := fmt.Sprintf("%s:%s:%d", orgID, userID, expiry)
+	payload := fmt.Sprintf("%d:%d:%d", orgID, userID, expiry)
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(payload))
 	sig := mac.Sum(nil)
@@ -72,34 +73,27 @@ func GenerateToken(orgID, userID string, secret []byte, expiryDays int) string {
 }
 
 // ValidateToken 校验 token，返回 (valid, orgID, userID)
-// 新格式: orgID:userID:expiry:sig（4 段）
-// 旧格式: userID:expiry:sig（3 段，orgID 返回空串，调用方需 findOrg 兜底）
-func ValidateToken(token string, secret []byte) (bool, string, string) {
+func ValidateToken(token string, secret []byte) (bool, int64, int64) {
 	data, err := base64.URLEncoding.DecodeString(token)
 	if err != nil {
-		return false, "", ""
+		return false, 0, 0
 	}
 
-	// 新格式 4 段
-	parts4 := strings.SplitN(string(data), ":", 4)
-	if len(parts4) == 4 {
-		orgID, userID, expiryStr, sigHex := parts4[0], parts4[1], parts4[2], parts4[3]
-		if verifySig(orgID+":"+userID+":"+expiryStr, sigHex, secret) && checkExpiry(expiryStr) {
-			return true, orgID, userID
-		}
-		return false, "", ""
+	parts := strings.SplitN(string(data), ":", 4)
+	if len(parts) != 4 {
+		return false, 0, 0
+	}
+	orgIDStr, userIDStr, expiryStr, sigHex := parts[0], parts[1], parts[2], parts[3]
+	if !verifySig(orgIDStr+":"+userIDStr+":"+expiryStr, sigHex, secret) || !checkExpiry(expiryStr) {
+		return false, 0, 0
 	}
 
-	// 旧格式 3 段（兼容期，旧 token 30 天内自然过期）
-	parts3 := strings.SplitN(string(data), ":", 3)
-	if len(parts3) == 3 {
-		userID, expiryStr, sigHex := parts3[0], parts3[1], parts3[2]
-		if verifySig(userID+":"+expiryStr, sigHex, secret) && checkExpiry(expiryStr) {
-			return true, "", userID
-		}
+	orgID, err1 := strconv.ParseInt(orgIDStr, 10, 64)
+	userID, err2 := strconv.ParseInt(userIDStr, 10, 64)
+	if err1 != nil || err2 != nil {
+		return false, 0, 0
 	}
-
-	return false, "", ""
+	return true, orgID, userID
 }
 
 // verifySig 校验 payload 与签名是否匹配
@@ -128,35 +122,57 @@ func extractTokenFromContext(ctx iris.Context) string {
 	return ""
 }
 
-// AuthMiddleware 是 iris 鉴权中间件，校验失败直接返回 401，成功把 orgID + userID 写入 ctx.Values()
-// findOrg 用于旧格式 token 兼容（orgID 为空时查 DB 补全），传 nil 则不补全
-func AuthMiddleware(secret []byte, findOrg func(context.Context, string) (string, error)) iris.Handler {
+// AuthMiddleware 是 iris 鉴权中间件，校验失败直接返回 401，成功把整数 orgID/userID 与 name 写入 ctx.Values()
+// lookupNames 用于按整数 id 反查 org/user 的 name（写 ctx 供目录路径与展示使用），传 nil 则不反查
+func AuthMiddleware(secret []byte, lookupNames func(context.Context, int64, int64) (string, string, error)) iris.Handler {
 	return func(ctx iris.Context) {
 		token := extractTokenFromContext(ctx)
 		if token == "" {
 			writeFail(ctx, iris.StatusUnauthorized, CodeMissingToken)
 			return
 		}
-		valid, orgID, uid := ValidateToken(token, secret)
+		valid, orgID, userID := ValidateToken(token, secret)
 		if !valid {
 			writeFail(ctx, iris.StatusUnauthorized, CodeInvalidToken)
 			return
 		}
-		// 旧格式 token 兼容：orgID 为空时查 DB 补全
-		if orgID == "" && findOrg != nil {
-			if oid, err := findOrg(ctx.Request().Context(), uid); err == nil && oid != "" {
-				orgID = oid
+		orgName, userName := "", ""
+		if lookupNames != nil {
+			if on, un, err := lookupNames(ctx.Request().Context(), orgID, userID); err == nil {
+				orgName, userName = on, un
 			}
 		}
-		ctx.Values().Set("userID", uid)
+		ctx.Values().Set("userID", userID)
 		ctx.Values().Set("orgID", orgID)
+		ctx.Values().Set("userName", userName)
+		ctx.Values().Set("orgName", orgName)
 		ctx.Next()
 	}
 }
 
-// currentUserID 从 iris.Context 中取出 AuthMiddleware 写入的 userID
-func currentUserID(ctx iris.Context) string {
+// currentUserID 从 iris.Context 中取出 AuthMiddleware 写入的整数 userID
+func currentUserID(ctx iris.Context) int64 {
 	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(int64); ok {
+			return id
+		}
+	}
+	return 0
+}
+
+// currentOrgID 从 iris.Context 中取出 AuthMiddleware 写入的整数 orgID
+func currentOrgID(ctx iris.Context) int64 {
+	if v := ctx.Values().Get("orgID"); v != nil {
+		if id, ok := v.(int64); ok {
+			return id
+		}
+	}
+	return 0
+}
+
+// currentUserName 从 iris.Context 中取出 AuthMiddleware 写入的用户 name
+func currentUserName(ctx iris.Context) string {
+	if v := ctx.Values().Get("userName"); v != nil {
 		if s, ok := v.(string); ok {
 			return s
 		}
@@ -164,9 +180,9 @@ func currentUserID(ctx iris.Context) string {
 	return ""
 }
 
-// currentOrgID 从 iris.Context 中取出 AuthMiddleware 写入的 orgID
-func currentOrgID(ctx iris.Context) string {
-	if v := ctx.Values().Get("orgID"); v != nil {
+// currentOrgName 从 iris.Context 中取出 AuthMiddleware 写入的组织 name
+func currentOrgName(ctx iris.Context) string {
+	if v := ctx.Values().Get("orgName"); v != nil {
 		if s, ok := v.(string); ok {
 			return s
 		}

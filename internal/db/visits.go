@@ -7,14 +7,14 @@ import (
 )
 
 // LogVisit 记录一次访问
-func (d *DB) LogVisit(ctx context.Context, visitorID, ip, orgID, userAgent, path string, statusCode int) error {
+func (d *DB) LogVisit(ctx context.Context, visitorID, ip string, orgID int64, userAgent, path string, statusCode int) error {
 	const q = `INSERT INTO visit_logs (visitor_id, ip, org_id, user_agent, path, status_code) VALUES (?, ?, ?, ?, ?, ?)`
 	_, err := d.conn.ExecContext(ctx, q, visitorID, ip, orgID, userAgent, path, statusCode)
 	return err
 }
 
 // GetStatsByOrg 查询指定组织的访问统计
-func (d *DB) GetStatsByOrg(ctx context.Context, orgID string) (*VisitStats, error) {
+func (d *DB) GetStatsByOrg(ctx context.Context, orgID int64) (*VisitStats, error) {
 	stats := &VisitStats{
 		Visitors: make(map[string]VisitorStat),
 		TopPages: make(map[string]int),

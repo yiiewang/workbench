@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -58,7 +59,25 @@ func createUser(t *testing.T, d *db.DB, secret []byte, orgName, userName, passwo
 	if err != nil {
 		t.Fatal(err)
 	}
-	userID, err := d.UpsertUser(context.Background(), orgID, userName, hash)
+	userID, err := d.UpsertUser(context.Background(), orgID, userName, hash, db.RoleIDUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return GenerateToken(orgID, userID, secret, 30)
+}
+
+// createAdminUser 创建一个 admin 角色用户，返回可直接用的 token。
+func createAdminUser(t *testing.T, d *db.DB, secret []byte, orgName, userName, password string) string {
+	t.Helper()
+	hash, err := HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orgID, err := d.EnsureOrg(context.Background(), orgName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userID, err := d.UpsertUser(context.Background(), orgID, userName, hash, db.RoleIDAdmin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +126,7 @@ func TestHandler_Login(t *testing.T) {
 func TestHandler_LoginUserWithoutPassword(t *testing.T) {
 	e, d, _, _ := setupTestServer(t)
 	orgID, _ := d.EnsureOrg(context.Background(), "org1")
-	_, _ = d.UpsertUser(context.Background(), orgID, "bob", "")
+	_, _ = d.UpsertUser(context.Background(), orgID, "bob", "", db.RoleIDUser)
 
 	e.POST("/api/login").WithJSON(map[string]string{
 		"orgId": "org1", "userId": "bob", "password": "anything",
@@ -118,18 +137,34 @@ func TestHandler_LoginUserWithoutPassword(t *testing.T) {
 func TestHandler_SetPassword_FirstInit(t *testing.T) {
 	e, _, _, _ := setupTestServer(t)
 
-	// 系统无任何用户时允许首次设置
+	// 系统无任何用户时允许首次设置，且首个用户自动成为 admin
 	obj := e.POST("/api/set-password").WithJSON(map[string]string{
 		"orgId": "org1", "userId": "admin", "newPassword": "secret123",
 	}).Expect().Status(http.StatusOK).JSON().Object()
 	obj.Value("code").Equal(0)
 	obj.Value("data").Object().Value("token").NotNull()
+	obj.Value("data").Object().Value("user").Object().Value("role").Equal("admin")
 
 	// 系统已有用户后禁止开放注册
 	e.POST("/api/set-password").WithJSON(map[string]string{
 		"orgId": "org1", "userId": "stranger", "newPassword": "secret123",
 	}).Expect().Status(http.StatusForbidden).
 		JSON().Object().Value("code").Equal(CodeUserNotFound)
+}
+
+func TestHandler_SetPassword_ActivateEmptyPassword(t *testing.T) {
+	e, d, _, _ := setupTestServer(t)
+	// 预置一个空密码用户（模拟迁移来的存量用户），此时系统已有用户
+	orgID, _ := d.EnsureOrg(context.Background(), "org1")
+	_, _ = d.UpsertUser(context.Background(), orgID, "bob", "", db.RoleIDUser)
+
+	// 空密码用户自助激活：应放行（修复原 HasAnyUser 恒真死代码）
+	obj := e.POST("/api/set-password").WithJSON(map[string]string{
+		"orgId": "org1", "userId": "bob", "newPassword": "newpass1",
+	}).Expect().Status(http.StatusOK).JSON().Object()
+	obj.Value("code").Equal(0)
+	// 激活不改变角色（仍为普通 user）
+	obj.Value("data").Object().Value("user").Object().Value("role").Equal("user")
 }
 
 // ============================================================
@@ -326,5 +361,102 @@ func TestHandler_MapAndStats(t *testing.T) {
 	e.GET("/api/map").WithHeader("Authorization", authHeader(tok)).
 		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
 	e.GET("/api/stats").WithHeader("Authorization", authHeader(tok)).
+		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
+}
+
+// ============================================================
+// /api/admin 用户管理
+// ============================================================
+
+func TestHandler_AdminRequired(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	userTok := createUser(t, d, secret, "org1", "alice", "p")
+
+	// 普通用户访问 admin API → 403
+	e.GET("/api/admin/users").WithHeader("Authorization", authHeader(userTok)).
+		Expect().Status(http.StatusForbidden).
+		JSON().Object().Value("code").Equal(CodeAdminRequired)
+
+	// 未登录 → 401
+	e.GET("/api/admin/users").Expect().Status(http.StatusUnauthorized)
+}
+
+func TestHandler_AdminListUsersAndRoles(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	adminTok := createAdminUser(t, d, secret, "org1", "root", "p")
+	_ = createUser(t, d, secret, "org2", "alice", "p")
+
+	e.GET("/api/admin/users").WithHeader("Authorization", authHeader(adminTok)).
+		Expect().Status(http.StatusOK).JSON().Object().
+		Value("data").Object().Value("users").Array().Length().Equal(2)
+
+	e.GET("/api/admin/roles").WithHeader("Authorization", authHeader(adminTok)).
+		Expect().Status(http.StatusOK).JSON().Object().
+		Value("data").Object().Value("roles").Array().Length().Equal(2)
+}
+
+func TestHandler_AdminCreateUser(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	adminTok := createAdminUser(t, d, secret, "org1", "root", "p")
+
+	obj := e.POST("/api/admin/users").WithHeader("Authorization", authHeader(adminTok)).
+		WithJSON(map[string]any{
+			"org": "org2", "name": "bob", "password": "pw123", "roleId": 2, "mobile": "13800138000",
+		}).Expect().Status(http.StatusOK).JSON().Object()
+	obj.Value("code").Equal(0)
+	obj.Value("data").Object().Value("role").Equal("user")
+	obj.Value("data").Object().Value("orgName").Equal("org2")
+
+	// 同名冲突 → 400
+	e.POST("/api/admin/users").WithHeader("Authorization", authHeader(adminTok)).
+		WithJSON(map[string]any{
+			"org": "org2", "name": "bob", "password": "pw123", "roleId": 2,
+		}).Expect().Status(http.StatusBadRequest).
+		JSON().Object().Value("code").Equal(CodeUserNameExists)
+}
+
+func TestHandler_AdminUpdateUser(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	adminTok := createAdminUser(t, d, secret, "org1", "root", "p")
+	hash, _ := HashPassword("oldp")
+	orgID, _ := d.EnsureOrg(context.Background(), "org2")
+	userID, _ := d.UpsertUser(context.Background(), orgID, "bob", hash, db.RoleIDUser)
+
+	obj := e.PATCH("/api/admin/users/"+strconv.FormatInt(userID, 10)).WithHeader("Authorization", authHeader(adminTok)).
+		WithJSON(map[string]any{
+			"name": "bobby", "mobile": "13900139000", "roleId": 1, "password": "newp",
+		}).Expect().Status(http.StatusOK).JSON().Object()
+	obj.Value("code").Equal(0)
+	obj.Value("data").Object().Value("name").Equal("bobby")
+	obj.Value("data").Object().Value("role").Equal("admin")
+
+	// 新密码可登录
+	e.POST("/api/login").WithJSON(map[string]string{
+		"orgId": "org2", "userId": "bobby", "password": "newp",
+	}).Expect().Status(http.StatusOK)
+}
+
+func TestHandler_AdminDeleteUser(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	adminTok := createAdminUser(t, d, secret, "org1", "root", "p") // id=1
+	_ = createUser(t, d, secret, "org2", "alice", "p")             // id=2
+
+	// 删除普通用户 alice
+	e.DELETE("/api/admin/users/2").WithHeader("Authorization", authHeader(adminTok)).
+		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
+
+	// 禁止删除自己（root）
+	e.DELETE("/api/admin/users/1").WithHeader("Authorization", authHeader(adminTok)).
+		Expect().Status(http.StatusForbidden).
+		JSON().Object().Value("code").Equal(CodeCannotDeleteSelf)
+}
+
+func TestHandler_AdminDeleteAnotherAdmin(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	adminTok := createAdminUser(t, d, secret, "org1", "root", "p") // id=1
+	_ = createAdminUser(t, d, secret, "org2", "admin2", "p")       // id=2
+
+	// 有 2 个 admin，root 删除 admin2（非自己）→ 允许
+	e.DELETE("/api/admin/users/2").WithHeader("Authorization", authHeader(adminTok)).
 		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
 }

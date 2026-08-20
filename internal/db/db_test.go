@@ -168,7 +168,7 @@ func TestUsers_CRUD(t *testing.T) {
 		t.Fatalf("HasAnyUser initial = %v, err=%v, want false", has, err)
 	}
 
-	_, _, hash, exists, err := d.FindUserByName(ctx(), "org1", "alice")
+	_, _, hash, _, exists, err := d.FindUserByName(ctx(), "org1", "alice")
 	if err != nil || exists || hash != "" {
 		t.Fatalf("FindUserByName missing = (%q,%v,%v), want empty/false/nil", hash, exists, err)
 	}
@@ -184,19 +184,19 @@ func TestUsers_CRUD(t *testing.T) {
 		t.Fatalf("EnsureOrg idempotent = (%d,%v), want (%d,nil)", id, err, orgID)
 	}
 
-	userID, err := d.UpsertUser(ctx(), orgID, "alice", "hash-v1")
+	userID, err := d.UpsertUser(ctx(), orgID, "alice", "hash-v1", RoleIDUser)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, hash, exists, err = d.FindUserByName(ctx(), "org1", "alice")
+	_, _, hash, _, exists, err = d.FindUserByName(ctx(), "org1", "alice")
 	if err != nil || !exists || hash != "hash-v1" {
 		t.Fatalf("FindUserByName after create = (%q,%v,%v), want hash-v1/true", hash, exists, err)
 	}
 
-	if _, err := d.UpsertUser(ctx(), orgID, "alice", "hash-v2"); err != nil {
+	if _, err := d.UpsertUser(ctx(), orgID, "alice", "hash-v2", RoleIDUser); err != nil {
 		t.Fatal(err)
 	}
-	_, _, hash, _, _ = d.FindUserByName(ctx(), "org1", "alice")
+	_, _, hash, _, _, _ = d.FindUserByName(ctx(), "org1", "alice")
 	if hash != "hash-v2" {
 		t.Fatalf("password not updated, got %q", hash)
 	}
@@ -229,7 +229,7 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 	orgID, _ := d.EnsureOrg(ctx(), "org1")
-	userID, _ := d.UpsertUser(ctx(), orgID, "alice", "h")
+	userID, _ := d.UpsertUser(ctx(), orgID, "alice", "h", RoleIDUser)
 
 	tasks := []TaskItem{
 		{ID: "t1", Title: "first", Status: "todo", SortOrder: 1},
@@ -286,7 +286,7 @@ func TestTasksJSON_EmptyVersionFallback(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 	orgID, _ := d.EnsureOrg(ctx(), "org1")
-	userID, _ := d.UpsertUser(ctx(), orgID, "bob", "h")
+	userID, _ := d.UpsertUser(ctx(), orgID, "bob", "h", RoleIDUser)
 	_ = d.UpsertTasks(ctx(), orgID, userID, nil, "")
 
 	data, _ := d.GetTasksJSONByOwner(ctx(), orgID, userID)

@@ -49,6 +49,7 @@ type userBrief struct {
 	OrgID    int64  `json:"orgId"`
 	UserName string `json:"userName"`
 	OrgName  string `json:"orgName"`
+	Role     string `json:"role"`
 }
 
 // loginData 登录/设置密码成功载荷
@@ -63,7 +64,18 @@ type meData struct {
 	OrgID    int64  `json:"orgId"`
 	UserName string `json:"userName"`
 	OrgName  string `json:"orgName"`
+	Role     string `json:"role"`
 	Exp      int64  `json:"exp"`
+}
+
+// usersData GET /api/admin/users 载荷
+type usersData struct {
+	Users []db.UserInfo `json:"users"`
+}
+
+// rolesData GET /api/admin/roles 载荷
+type rolesData struct {
+	Roles []db.Role `json:"roles"`
 }
 
 // membersData /api/org-members 载荷

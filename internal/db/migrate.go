@@ -30,6 +30,13 @@ CREATE TABLE IF NOT EXISTS orgs (
 	created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS roles (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL UNIQUE,
+	description TEXT NOT NULL DEFAULT '',
+	created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	org_id INTEGER NOT NULL,
@@ -37,11 +44,13 @@ CREATE TABLE IF NOT EXISTS users (
 	mobile TEXT UNIQUE,
 	password_hash TEXT DEFAULT '',
 	version_json TEXT DEFAULT '',
+	role_id INTEGER NOT NULL DEFAULT 2,
 	created_at TEXT DEFAULT (datetime('now')),
 	updated_at TEXT DEFAULT (datetime('now')),
 	UNIQUE (org_id, name),
 	UNIQUE (org_id, id),
-	FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE
+	FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE,
+	FOREIGN KEY (role_id) REFERENCES roles(id)
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -110,6 +119,11 @@ func (d *DB) migrate() error {
 		if _, err := d.conn.ExecContext(ctx, newSchema); err != nil {
 			return err
 		}
+	}
+
+	// 预置基础角色（幂等），须在建表后、users 使用 role_id 前执行
+	if err := d.seedRoles(ctx); err != nil {
+		return err
 	}
 
 	if err := d.migrateUsersColumns(ctx); err != nil {
@@ -366,6 +380,25 @@ func (d *DB) migrateUsersColumns(ctx context.Context) error {
 		}
 	}
 
+	// role_id 补列（存量库）：SQLite 限制 ADD COLUMN 不能同时带 REFERENCES 与非空默认值，
+	// 故补列时不加外键约束（新库 newSchema 已带），role_id 取值合法性由应用层保证。
+	if !existing["role_id"] {
+		if _, err := d.conn.ExecContext(ctx, `ALTER TABLE users ADD COLUMN role_id INTEGER NOT NULL DEFAULT 2`); err != nil {
+			return fmt.Errorf("add column role_id: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// seedRoles 幂等预置基础角色（admin/user），遵循「自增主键 id + 固定业务 id」约定。
+func (d *DB) seedRoles(ctx context.Context) error {
+	const q = `INSERT OR IGNORE INTO roles (id, name, description) VALUES
+		(1, 'admin', '超级管理员，可管理所有用户与组织'),
+		(2, 'user', '普通用户')`
+	if _, err := d.conn.ExecContext(ctx, q); err != nil {
+		return fmt.Errorf("seed roles: %w", err)
+	}
 	return nil
 }
 

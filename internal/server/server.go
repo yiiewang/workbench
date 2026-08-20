@@ -72,7 +72,7 @@ func (s *Server) App() *iris.Application {
 	// /api 统一分组
 	// ============================================================
 	api := app.Party("/api")
-	auth := AuthMiddleware(s.tokenSecret, s.db.GetUserNames)
+	auth := AuthMiddleware(s.tokenSecret, s.db.GetUserIdentity)
 
 	// 公开 API（无需鉴权）
 	api.Post("/login", s.handleLogin)
@@ -102,6 +102,14 @@ func (s *Server) App() *iris.Application {
 	api.Post("/share", auth, s.handleCreateShare)
 	api.Delete("/share/{id}", auth, s.handleDeleteShare)
 
+	// Admin API（需鉴权 + admin 角色，跨 org 管理所有用户）
+	admin := api.Party("/admin", auth, RequireAdmin)
+	admin.Get("/users", s.handleAdminListUsers)
+	admin.Post("/users", s.handleAdminCreateUser)
+	admin.Patch("/users/{id}", s.handleAdminUpdateUser)
+	admin.Delete("/users/{id}", s.handleAdminDeleteUser)
+	admin.Get("/roles", s.handleAdminListRoles)
+
 	// CORS 预检（sandboxed iframe null origin）
 	noop := func(ctx iris.Context) { ctx.StatusCode(204) }
 	api.Options("/me", noop)
@@ -111,6 +119,9 @@ func (s *Server) App() *iris.Application {
 	api.Options("/tasks", noop)
 	api.Options("/share", noop)
 	api.Options("/share/{token}", noop)
+	api.Options("/admin/users", noop)
+	api.Options("/admin/users/{id}", noop)
+	api.Options("/admin/roles", noop)
 
 	// ============================================================
 	// /s 分享页面（公开 URL，不走 /api）
@@ -219,6 +230,7 @@ func (s *Server) handleMe(ctx iris.Context) {
 		OrgID:    orgID,
 		UserName: currentUserName(ctx),
 		OrgName:  currentOrgName(ctx),
+		Role:     currentRole(ctx),
 		Exp:      time.Now().Unix() + int64(s.expiryDays())*secondsPerDay,
 	})
 }
@@ -252,7 +264,7 @@ func (s *Server) handleLogin(ctx iris.Context) {
 		return
 	}
 
-	orgID, userID, pwdHash, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
+	orgID, userID, pwdHash, role, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
 	if err != nil {
 		serverError(ctx, "find user failed", err, "org", req.OrgID, "user", req.UserID)
 		return
@@ -270,7 +282,7 @@ func (s *Server) handleLogin(ctx iris.Context) {
 
 	s.clearLoginFailures(rctx, ip)
 	token := GenerateToken(orgID, userID, s.tokenSecret, s.expiryDays())
-	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: req.OrgID}})
+	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: req.OrgID, Role: role}})
 }
 
 // ============================================================
@@ -302,14 +314,15 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 		return
 	}
 
-	_, _, pwdHash, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
+	_, userID, pwdHash, role, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
 	if err != nil {
 		serverError(ctx, "find user failed", err, "org", req.OrgID, "user", req.UserID)
 		return
 	}
-	// 不存在用户：仅当系统无任何用户时允许创建（首次初始化），之后禁止开放注册
+
 	switch {
 	case !exists:
+		// 不存在用户：仅当系统无任何用户时允许创建（首次初始化），首个用户自动成为 admin
 		hasUsers, err := s.db.HasAnyUser(rctx)
 		if err != nil {
 			serverError(ctx, "check has any user failed", err)
@@ -320,7 +333,7 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 			return
 		}
 	case pwdHash != "":
-		// 已存在用户且有密码：必须验证旧密码
+		// 已存在且有密码：改密需验证旧密码
 		if req.OldPassword == "" {
 			writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "oldPassword is required to change password")
 			return
@@ -330,16 +343,7 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 			return
 		}
 	default:
-		// 已存在用户但密码为空：仅首次初始化时允许设置，否则需要管理员重置
-		hasUsers, err := s.db.HasAnyUser(rctx)
-		if err != nil {
-			serverError(ctx, "check has any user failed", err)
-			return
-		}
-		if hasUsers {
-			writeFailMsg(ctx, iris.StatusForbidden, CodePasswordNotSet, "Password not set. Contact admin to reset.")
-			return
-		}
+		// 已存在但密码为空：首次激活，直接设置（修复原 HasAnyUser 恒真导致的死代码）
 	}
 
 	newHash, err := HashPassword(req.NewPassword)
@@ -347,14 +351,22 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 		serverError(ctx, "hash password failed", err)
 		return
 	}
-	userID, err := s.db.UpsertUser(rctx, orgID, req.UserID, newHash)
+
+	if !exists {
+		// 首用户 → admin
+		userID, err = s.db.UpsertUser(rctx, orgID, req.UserID, newHash, db.RoleIDAdmin)
+		role = roleNameAdmin
+	} else {
+		// 改密/激活：按 org+id 更新密码，不改角色
+		err = s.db.SetUserPassword(rctx, orgID, userID, newHash)
+	}
 	if err != nil {
-		serverError(ctx, "upsert user failed", err, "org", req.OrgID, "user", req.UserID)
+		serverError(ctx, "set password failed", err, "org", req.OrgID, "user", req.UserID)
 		return
 	}
 
 	token := GenerateToken(orgID, userID, s.tokenSecret, s.expiryDays())
-	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: req.OrgID}})
+	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: req.OrgID, Role: role}})
 }
 
 // ============================================================

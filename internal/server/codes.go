@@ -11,6 +11,7 @@ const (
 	CodeInvalidParam       = 40002 // 参数缺失或非法（动态消息）
 	CodeInvalidPath        = 40003 // 路径非法或越界
 	CodeInvalidTasksJSON   = 40004 // /api/tasks 结构非法
+	CodeUserNameExists     = 40005 // 用户名在组织内已存在
 	CodeUnauthorized       = 40101 // 需要登录
 	CodeMissingToken       = 40102 // 缺少 token
 	CodeInvalidToken       = 40103 // token 无效或过期
@@ -22,6 +23,9 @@ const (
 	CodePasswordRequired   = 40304 // 分享需要密码
 	CodeInvalidSharePwd    = 40305 // 分享密码错误
 	CodeShareNotEffective  = 40306 // 分享尚未生效
+	CodeAdminRequired      = 40307 // 需要管理员权限
+	CodeCannotDeleteSelf   = 40308 // 不能删除/降级自己
+	CodeLastAdmin          = 40309 // 不能删除/降级最后一个 admin
 	CodeNotFound           = 40401 // 资源不存在
 	CodeShareExpired       = 41001 // 分享已过期
 	CodeShareLimitReached  = 41002 // 分享访问次数已达上限
@@ -38,6 +42,7 @@ var errMsgMap = map[int]string{
 	CodeInvalidParam:       "Invalid parameter",
 	CodeInvalidPath:        "Invalid path",
 	CodeInvalidTasksJSON:   "Invalid tasks JSON",
+	CodeUserNameExists:     "User name already exists in this org",
 	CodeUnauthorized:       "Authentication required",
 	CodeMissingToken:       "Missing token",
 	CodeInvalidToken:       "Invalid or expired token",
@@ -49,6 +54,9 @@ var errMsgMap = map[int]string{
 	CodePasswordRequired:   "Password required",
 	CodeInvalidSharePwd:    "Invalid password",
 	CodeShareNotEffective:  "Share not effective yet",
+	CodeAdminRequired:      "Admin privilege required",
+	CodeCannotDeleteSelf:   "Cannot operate on yourself",
+	CodeLastAdmin:          "Cannot remove the last admin",
 	CodeNotFound:           "Not found",
 	CodeShareExpired:       "Share expired",
 	CodeShareLimitReached:  "Access limit reached",

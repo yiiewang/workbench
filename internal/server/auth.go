@@ -60,6 +60,12 @@ func VerifyPassword(hash, password string) bool {
 // secondsPerDay 一天的秒数，用于 token 过期时间换算
 const secondsPerDay = 24 * 60 * 60
 
+// 角色名常量（与 db.roles 表 name 字段对应）
+const (
+	roleNameAdmin = "admin"
+	roleNameUser  = "user"
+)
+
 // GenerateToken 生成带过期时间的 HMAC token
 // payload 格式: orgID:userID:expiry（orgID/userID 为整数 id）
 func GenerateToken(orgID, userID int64, secret []byte, expiryDays int) string {
@@ -122,9 +128,9 @@ func extractTokenFromContext(ctx iris.Context) string {
 	return ""
 }
 
-// AuthMiddleware 是 iris 鉴权中间件，校验失败直接返回 401，成功把整数 orgID/userID 与 name 写入 ctx.Values()
-// lookupNames 用于按整数 id 反查 org/user 的 name（写 ctx 供目录路径与展示使用），传 nil 则不反查
-func AuthMiddleware(secret []byte, lookupNames func(context.Context, int64, int64) (string, string, error)) iris.Handler {
+// AuthMiddleware 是 iris 鉴权中间件，校验失败直接返回 401，成功把整数 orgID/userID、name 与角色写入 ctx.Values()
+// lookupIdentity 用于按整数 id 反查 org/user 的 name 与角色（写 ctx 供目录路径、展示与权限判断使用），传 nil 则不反查
+func AuthMiddleware(secret []byte, lookupIdentity func(context.Context, int64, int64) (string, string, string, error)) iris.Handler {
 	return func(ctx iris.Context) {
 		token := extractTokenFromContext(ctx)
 		if token == "" {
@@ -136,18 +142,28 @@ func AuthMiddleware(secret []byte, lookupNames func(context.Context, int64, int6
 			writeFail(ctx, iris.StatusUnauthorized, CodeInvalidToken)
 			return
 		}
-		orgName, userName := "", ""
-		if lookupNames != nil {
-			if on, un, err := lookupNames(ctx.Request().Context(), orgID, userID); err == nil {
-				orgName, userName = on, un
+		orgName, userName, role := "", "", ""
+		if lookupIdentity != nil {
+			if on, un, r, err := lookupIdentity(ctx.Request().Context(), orgID, userID); err == nil {
+				orgName, userName, role = on, un, r
 			}
 		}
 		ctx.Values().Set("userID", userID)
 		ctx.Values().Set("orgID", orgID)
 		ctx.Values().Set("userName", userName)
 		ctx.Values().Set("orgName", orgName)
+		ctx.Values().Set("role", role)
 		ctx.Next()
 	}
+}
+
+// RequireAdmin 要求当前用户为 admin 角色，否则 403（须在 AuthMiddleware 之后使用）
+func RequireAdmin(ctx iris.Context) {
+	if currentRole(ctx) != roleNameAdmin {
+		writeFail(ctx, iris.StatusForbidden, CodeAdminRequired)
+		return
+	}
+	ctx.Next()
 }
 
 // currentUserID 从 iris.Context 中取出 AuthMiddleware 写入的整数 userID
@@ -183,6 +199,16 @@ func currentUserName(ctx iris.Context) string {
 // currentOrgName 从 iris.Context 中取出 AuthMiddleware 写入的组织 name
 func currentOrgName(ctx iris.Context) string {
 	if v := ctx.Values().Get("orgName"); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// currentRole 从 iris.Context 中取出 AuthMiddleware 写入的角色名
+func currentRole(ctx iris.Context) string {
+	if v := ctx.Values().Get("role"); v != nil {
 		if s, ok := v.(string); ok {
 			return s
 		}

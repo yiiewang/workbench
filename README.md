@@ -38,6 +38,8 @@ curl -s -X POST http://localhost/api/set-password \
   -d '{"orgId":"cm","userId":"yiiewang","newPassword":"your-password"}'
 ```
 
+> `orgId` is required at registration (it records which org the user belongs to). At **login** time, `orgId` is optional — usernames are globally unique, so you can sign in with just `userId` + `password`.
+
 Then log in as that user in the browser — the User Management icon appears in the activity bar (admin only). Use it to create more users, reset passwords, change roles, and manage organizations.
 
 Roles: `admin` (super admin, manages all users across orgs) and `user` (regular user).
@@ -105,7 +107,7 @@ logging:
 | `/__map__` | GET | Route configuration map (requires token) |
 | `/__tree__` | GET | File directory tree (JSON, requires token) |
 | `/api/org-members` | GET | List org members (`?orgId=xxx`, requires token) |
-| `/api/login` | POST | Login (`{orgId, userId, password}`) |
+| `/api/login` | POST | Login (`{userId, password, orgId?}` — orgId optional, username globally unique) |
 | `/api/set-password` | POST | Set/change password |
 | `/api/me` | GET | Current user info (requires token) |
 | `/tasks.json` | GET | Task data with version info (requires token) |

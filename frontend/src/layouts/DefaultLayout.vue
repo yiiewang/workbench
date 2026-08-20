@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 应用外壳布局：activity-bar + sidebar + resizer + main。
 // 仅包裹需要应用界面的路由；/login 等独立页面不走此布局。
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { dsMode, shareRootPath } from '../stores/indexStore'
 import { loggedIn, currentUser, isAdmin, clearAuth } from '../stores/auth'
@@ -37,14 +37,23 @@ function handleShareClick() { router.push('/shares') }
 function handleTodoClick() { router.push('/todo') }
 function handleAdminClick() { router.push('/admin') }
 
-// 已登录 → 点击用户图标登出；未登录 → 跳登录页
+// 用户信息弹窗显隐
+const showUserMenu = ref(false)
+
+// 已登录 → 点击用户图标弹出用户信息面板；未登录 → 跳登录页
 function onUserClick() {
   if (loggedIn.value) {
-    clearAuth()
-    router.push('/login')
+    showUserMenu.value = true
   } else {
     router.push('/login?redirect=' + encodeURIComponent(route.fullPath))
   }
+}
+
+// 退出登录
+function doLogout() {
+  showUserMenu.value = false
+  clearAuth()
+  router.push('/login')
 }
 </script>
 
@@ -65,8 +74,8 @@ function onUserClick() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
   </div>
   <div class="activity-divider"></div>
-  <!-- 用户图标：已登录显示头像（点击登出），未登录显示登录图标（跳转登录页） -->
-  <div class="activity-item activity-user" :title="loggedIn ? '点击登出' : '登录'" @click="onUserClick">
+  <!-- 用户图标：已登录显示头像（点击弹出用户信息），未登录显示登录图标（跳转登录页） -->
+  <div class="activity-item activity-user" :title="loggedIn ? currentUser?.userName : '登录'" @click="onUserClick">
     <svg v-if="!loggedIn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
       <circle cx="12" cy="7" r="4"/>
@@ -106,9 +115,59 @@ function onUserClick() {
     </KeepAlive>
   </RouterView>
 </div>
+
+<!-- 用户信息弹窗：点击活动栏底部头像弹出，展示账号信息 + 退出登录 -->
+<div v-if="showUserMenu" class="modal-mask" @click.self="showUserMenu = false">
+  <div class="modal-content user-menu">
+    <div class="modal-header">Account</div>
+    <div class="modal-body">
+      <div class="user-profile">
+        <div class="user-avatar">{{ (currentUser?.userName || '?').charAt(0).toUpperCase() }}</div>
+        <div class="user-meta">
+          <div class="user-name">{{ currentUser?.userName }}</div>
+          <div class="user-org">{{ currentUser?.orgName }}</div>
+        </div>
+        <span class="role-tag" :class="currentUser?.role">{{ currentUser?.role }}</span>
+      </div>
+      <div class="user-fields">
+        <div class="field-row"><span class="field-label">User ID</span><span class="field-value">{{ currentUser?.userId }}</span></div>
+        <div class="field-row"><span class="field-label">Org ID</span><span class="field-value">{{ currentUser?.orgId }}</span></div>
+        <div class="field-row"><span class="field-label">Role</span><span class="field-value">{{ currentUser?.role }}</span></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" @click="showUserMenu = false">Close</button>
+      <button class="btn btn-danger" @click="doLogout">Logout</button>
+    </div>
+  </div>
+</div>
 </template>
 
 <style scoped>
 .activity-user { margin-top: auto; }
 .user-badge { width:24px; height:24px; border-radius:50%; background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; }
+
+/* 用户信息弹窗 */
+.user-menu { width: 320px; max-width: 92vw; }
+.user-profile { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.user-avatar {
+  width: 44px; height: 44px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: 600; flex-shrink: 0;
+}
+.user-meta { flex: 1; min-width: 0; }
+.user-name { font-size: 15px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-org { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+/* 角色标签 */
+.role-tag { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px; font-weight: 500; flex-shrink: 0; }
+.role-tag.admin { background: #fde8ea; color: #cf222e; }
+.role-tag.org_admin { background: #fff4e1; color: #b35900; }
+.role-tag.user { background: var(--code-bg); color: var(--text-dim); }
+
+.user-fields { border-top: 1px solid var(--border); padding-top: 8px; }
+.field-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+.field-label { color: var(--text-dim); }
+.field-value { color: var(--text); font-family: var(--mono, monospace); }
 </style>

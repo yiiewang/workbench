@@ -252,8 +252,8 @@ func (s *Server) handleLogin(ctx iris.Context) {
 	}
 	req.OrgID = strings.TrimSpace(req.OrgID)
 	req.UserID = strings.TrimSpace(req.UserID)
-	if req.OrgID == "" || req.UserID == "" || req.Password == "" {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "orgId, userId and password are required")
+	if req.UserID == "" || req.Password == "" {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "userId and password are required")
 		return
 	}
 
@@ -264,7 +264,17 @@ func (s *Server) handleLogin(ctx iris.Context) {
 		return
 	}
 
-	orgID, userID, pwdHash, role, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
+	// 用户名全局唯一：orgId 可选。填了则按 org+name 校验，留空则按 name 全局匹配。
+	var orgID, userID int64
+	var pwdHash, role, orgName string
+	var exists bool
+	var err error
+	if req.OrgID != "" {
+		orgID, userID, pwdHash, role, exists, err = s.db.FindUserByName(rctx, req.OrgID, req.UserID)
+		orgName = req.OrgID
+	} else {
+		orgID, orgName, userID, pwdHash, role, exists, err = s.db.FindUserByGlobalName(rctx, req.UserID)
+	}
 	if err != nil {
 		serverError(ctx, "find user failed", err, "org", req.OrgID, "user", req.UserID)
 		return
@@ -282,7 +292,7 @@ func (s *Server) handleLogin(ctx iris.Context) {
 
 	s.clearLoginFailures(rctx, ip)
 	token := GenerateToken(orgID, userID, s.tokenSecret, s.expiryDays())
-	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: req.OrgID, Role: role}})
+	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: orgName, Role: role}})
 }
 
 // ============================================================

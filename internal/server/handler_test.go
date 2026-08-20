@@ -123,6 +123,23 @@ func TestHandler_Login(t *testing.T) {
 		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
 }
 
+func TestHandler_LoginWithoutOrg(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	_ = createUser(t, d, secret, "org1", "alice", "pass123")
+
+	// orgId 留空：按全局唯一 name 登录
+	obj := e.POST("/api/login").WithJSON(map[string]string{
+		"userId": "alice", "password": "pass123",
+	}).Expect().Status(http.StatusOK).JSON().Object()
+	obj.Value("code").Equal(0)
+	obj.Value("data").Object().Value("user").Object().Value("orgName").Equal("org1")
+
+	// 错误密码 → 401
+	e.POST("/api/login").WithJSON(map[string]string{
+		"userId": "alice", "password": "wrong",
+	}).Expect().Status(http.StatusUnauthorized)
+}
+
 func TestHandler_LoginUserWithoutPassword(t *testing.T) {
 	e, d, _, _ := setupTestServer(t)
 	orgID, _ := d.EnsureOrg(context.Background(), "org1")

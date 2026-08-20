@@ -221,6 +221,29 @@ func TestUsers_CRUD(t *testing.T) {
 	}
 }
 
+// TestUsers_GlobalUniqueName 验证用户名全局唯一：跨 org 同名应冲突
+func TestUsers_GlobalUniqueName(t *testing.T) {
+	t.Parallel()
+	d := newTestDB(t)
+
+	org1, _ := d.EnsureOrg(ctx(), "org1")
+	org2, _ := d.EnsureOrg(ctx(), "org2")
+	if _, err := d.CreateUser(ctx(), org1, "alice", "", "h1", RoleIDUser); err != nil {
+		t.Fatal(err)
+	}
+
+	// 跨 org 同名 → 因 name 全局唯一约束报错（CreateUser 是严格 INSERT）
+	if _, err := d.CreateUser(ctx(), org2, "alice", "", "h2", RoleIDUser); err == nil {
+		t.Fatal("expected UNIQUE constraint violation for duplicate global name")
+	}
+
+	// FindUserByGlobalName 不依赖 org 也能定位
+	orgID, orgName, userID, hash, role, exists, err := d.FindUserByGlobalName(ctx(), "alice")
+	if err != nil || !exists || hash != "h1" || role != "user" || orgName != "org1" || orgID != org1 || userID == 0 {
+		t.Fatalf("FindUserByGlobalName = (%d,%q,%d,%q,%q,%v,%v)", orgID, orgName, userID, hash, role, exists, err)
+	}
+}
+
 // ============================================================
 // 任务
 // ============================================================

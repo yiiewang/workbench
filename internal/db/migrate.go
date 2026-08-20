@@ -40,15 +40,13 @@ CREATE TABLE IF NOT EXISTS roles (
 CREATE TABLE IF NOT EXISTS users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	org_id INTEGER NOT NULL,
-	name TEXT NOT NULL,
+	name TEXT NOT NULL UNIQUE,
 	mobile TEXT UNIQUE,
 	password_hash TEXT DEFAULT '',
 	version_json TEXT DEFAULT '',
 	role_id INTEGER NOT NULL DEFAULT 2,
 	created_at TEXT DEFAULT (datetime('now')),
 	updated_at TEXT DEFAULT (datetime('now')),
-	UNIQUE (org_id, name),
-	UNIQUE (org_id, id),
 	FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE,
 	FOREIGN KEY (role_id) REFERENCES roles(id)
 );
@@ -127,6 +125,9 @@ func (d *DB) migrate() error {
 	}
 
 	if err := d.migrateUsersColumns(ctx); err != nil {
+		return err
+	}
+	if err := d.migrateUsersGlobalName(ctx); err != nil {
 		return err
 	}
 	if err := d.migrateTasksColumns(ctx); err != nil {
@@ -388,6 +389,16 @@ func (d *DB) migrateUsersColumns(ctx context.Context) error {
 		}
 	}
 
+	return nil
+}
+
+// migrateUsersGlobalName 确保 users.name 全局唯一（存量库收紧约束）。
+// 存量库建表时只有 UNIQUE(org_id, name)，本函数补一个 name 全局唯一索引，
+// 使「用户名全局唯一」语义生效；只要存量数据无跨 org 同名即幂等成功。
+func (d *DB) migrateUsersGlobalName(ctx context.Context) error {
+	if _, err := d.conn.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_name ON users(name)`); err != nil {
+		return fmt.Errorf("create unique index idx_users_name: %w", err)
+	}
 	return nil
 }
 

@@ -56,22 +56,34 @@ func (d *DB) FindOrgID(ctx context.Context, name string) (int64, error) {
 	return id, err
 }
 
-// UpsertUser 创建或更新用户密码（按 org_id + name），返回用户整数 id。
+// UpsertUser 创建或更新用户密码（按全局唯一 name），返回用户整数 id。
 // roleID 仅在新建时生效；更新已有用户密码时不改角色。
 func (d *DB) UpsertUser(ctx context.Context, orgID int64, name, passwordHash string, roleID int64) (int64, error) {
 	const q = `INSERT INTO users (org_id, name, password_hash, role_id, updated_at) VALUES (?, ?, ?, ?, datetime('now'))
-		ON CONFLICT(org_id, name) DO UPDATE SET password_hash=excluded.password_hash, updated_at=datetime('now')`
+		ON CONFLICT(name) DO UPDATE SET password_hash=excluded.password_hash, updated_at=datetime('now')`
 	if _, err := d.conn.ExecContext(ctx, q, orgID, name, passwordHash, roleID); err != nil {
 		return 0, err
 	}
-	return d.FindUserID(ctx, orgID, name)
+	return d.FindUserIDByName(ctx, name)
 }
 
-// FindUserID 按 org_id + name 查用户整数 id，不存在返回 0
+// FindUserID 按 org_id + name 查用户整数 id，不存在返回 0。
+// 用户名已全局唯一，org_id 仅为兼容旧调用方保留的冗余过滤条件。
 func (d *DB) FindUserID(ctx context.Context, orgID int64, name string) (int64, error) {
 	const q = `SELECT id FROM users WHERE org_id = ? AND name = ?`
 	var id int64
 	err := d.conn.QueryRowContext(ctx, q, orgID, name).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return id, err
+}
+
+// FindUserIDByName 按全局唯一 name 查用户整数 id，不存在返回 0
+func (d *DB) FindUserIDByName(ctx context.Context, name string) (int64, error) {
+	const q = `SELECT id FROM users WHERE name = ?`
+	var id int64
+	err := d.conn.QueryRowContext(ctx, q, name).Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -92,6 +104,22 @@ func (d *DB) FindUserByName(ctx context.Context, orgName, userName string) (orgI
 		return 0, 0, "", "", false, err
 	}
 	return orgID, userID, passwordHash, role, true, nil
+}
+
+// FindUserByGlobalName 按全局唯一 name 查登录凭据（不依赖 org），返回 orgID/orgName/userID、密码哈希与角色名
+func (d *DB) FindUserByGlobalName(ctx context.Context, userName string) (orgID int64, orgName string, userID int64, passwordHash, role string, exists bool, err error) {
+	const q = `SELECT u.org_id, o.name, u.id, u.password_hash, COALESCE(r.name, 'user')
+		FROM users u JOIN orgs o ON o.id = u.org_id
+		LEFT JOIN roles r ON r.id = u.role_id
+		WHERE u.name = ?`
+	err = d.conn.QueryRowContext(ctx, q, userName).Scan(&orgID, &orgName, &userID, &passwordHash, &role)
+	if err == sql.ErrNoRows {
+		return 0, "", 0, "", "", false, nil
+	}
+	if err != nil {
+		return 0, "", 0, "", "", false, err
+	}
+	return orgID, orgName, userID, passwordHash, role, true, nil
 }
 
 // HasAnyUser 判断系统是否已存在任意用户（用于 set-password 首次初始化判断）

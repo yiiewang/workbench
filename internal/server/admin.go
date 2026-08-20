@@ -63,7 +63,8 @@ func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 		serverError(ctx, "ensure org failed", err, "org", req.Org)
 		return
 	}
-	if existing, err := s.db.FindUserID(rctx, orgID, req.Name); err != nil {
+	// 用户名全局唯一：跨 org 查重
+	if existing, err := s.db.FindUserIDByName(rctx, req.Name); err != nil {
 		serverError(ctx, "check user exists failed", err, "org", req.Org, "user", req.Name)
 		return
 	} else if existing != 0 {
@@ -151,15 +152,15 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 		}
 	}
 
-	// 改用户名：非空 + org 内查重
+	// 改用户名：非空 + 全局查重（用户名全局唯一）
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" {
 			writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "name cannot be empty")
 			return
 		}
-		if existing, err := s.db.FindUserID(rctx, target.OrgID, name); err != nil {
-			serverError(ctx, "check user exists failed", err, "org", target.OrgID, "user", name)
+		if existing, err := s.db.FindUserIDByName(rctx, name); err != nil {
+			serverError(ctx, "check user exists failed", err, "user", name)
 			return
 		} else if existing != 0 && existing != userID {
 			writeFail(ctx, iris.StatusBadRequest, CodeUserNameExists)

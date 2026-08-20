@@ -45,6 +45,38 @@ func (s *Server) handleAdminListRoles(ctx iris.Context) {
 	writeOK(ctx, rolesData{Roles: roles})
 }
 
+// GET /api/admin/users/{id}/dashboard — 用户看板统计（任务数/完成数/分享数）
+func (s *Server) handleAdminUserDashboard(ctx iris.Context) {
+	rctx := ctx.Request().Context()
+	userID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	if err != nil {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid user id")
+		return
+	}
+
+	target, err := s.db.GetUserByID(rctx, userID)
+	if err != nil {
+		serverError(ctx, "get user failed", err, "user", userID)
+		return
+	}
+	if target == nil {
+		writeFail(ctx, iris.StatusForbidden, CodeUserNotFound)
+		return
+	}
+	// org_admin 只能看自己 org 用户的看板
+	if !isSuperAdmin(ctx) && target.OrgID != currentOrgID(ctx) {
+		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only view users in own org")
+		return
+	}
+
+	dash, err := s.db.GetUserDashboard(rctx, target.OrgID, userID)
+	if err != nil {
+		serverError(ctx, "get user dashboard failed", err, "user", userID)
+		return
+	}
+	writeOK(ctx, dash)
+}
+
 // POST /api/admin/users — 创建用户。admin 跨 org，org_admin 仅可创建自己 org 用户
 func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 	rctx := ctx.Request().Context()

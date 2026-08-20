@@ -109,6 +109,7 @@ func (s *Server) App() *iris.Application {
 	admin.Patch("/users/{id}", s.handleAdminUpdateUser)
 	admin.Delete("/users/{id}", s.handleAdminDeleteUser)
 	admin.Get("/roles", s.handleAdminListRoles)
+	admin.Get("/users/{id}/dashboard", s.handleAdminUserDashboard)
 
 	// CORS 预检（sandboxed iframe null origin）
 	noop := func(ctx iris.Context) { ctx.StatusCode(204) }

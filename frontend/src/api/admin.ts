@@ -20,6 +20,13 @@ export interface Role {
   description: string
 }
 
+// 用户看板统计（对应后端 db.UserDashboard）
+export interface UserDashboard {
+  totalTasks: number
+  doneTasks: number
+  shareCount: number
+}
+
 // 列出用户（GET /api/admin/users），orgId 可选（超级 admin 过滤某 org）
 export async function listUsers(orgId?: number): Promise<{ users: AdminUser[] }> {
   const q = orgId ? `?orgId=${orgId}` : ''
@@ -61,4 +68,9 @@ export async function updateUser(
 // 删除用户（DELETE /api/admin/users/{id}）
 export async function deleteUser(id: number): Promise<{ deleted: number }> {
   return apiCall(`/api/admin/users/${id}`, { method: 'DELETE' })
+}
+
+// 用户看板统计（GET /api/admin/users/{id}/dashboard）
+export async function getUserDashboard(id: number): Promise<UserDashboard> {
+  return apiCall(`/api/admin/users/${id}/dashboard`)
 }

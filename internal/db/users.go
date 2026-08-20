@@ -290,3 +290,28 @@ func (d *DB) CountAdmins(ctx context.Context) (int, error) {
 	err := d.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role_id = ?`, RoleIDAdmin).Scan(&count)
 	return count, err
 }
+
+// UserDashboard 用户看板统计（按 org+user 聚合，供 admin 看板展示）
+type UserDashboard struct {
+	TotalTasks int `json:"totalTasks"`
+	DoneTasks  int `json:"doneTasks"`
+	ShareCount int `json:"shareCount"`
+}
+
+// GetUserDashboard 统计某用户的任务总数、已完成数与分享数
+func (d *DB) GetUserDashboard(ctx context.Context, orgID, userID int64) (*UserDashboard, error) {
+	var dash UserDashboard
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tasks WHERE org_id = ? AND user_id = ?`, orgID, userID).Scan(&dash.TotalTasks); err != nil {
+		return nil, err
+	}
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tasks WHERE org_id = ? AND user_id = ? AND status = 'done'`, orgID, userID).Scan(&dash.DoneTasks); err != nil {
+		return nil, err
+	}
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM shares WHERE owner_org_id = ? AND owner_user_id = ?`, orgID, userID).Scan(&dash.ShareCount); err != nil {
+		return nil, err
+	}
+	return &dash, nil
+}

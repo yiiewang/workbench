@@ -1,14 +1,19 @@
 <script setup lang="ts">
 // Admin 用户管理主区：用户表格 + 新建/编辑/重置密码/删除
 // UI 与项目整体保持一致：自定义 .modal-mask/.btn/.user-table + showToast/confirm
-import { ref, onMounted } from 'vue'
+// 紧凑布局：padding 4-8px、字号 12px、表格 padding 4px 8px
+import { ref, onMounted, computed } from 'vue'
 import { showToast } from '../lib/common'
 import * as adminApi from '../api/admin'
 import type { AdminUser, Role } from '../api/admin'
+import { isAdmin, currentUser } from '../stores/auth'
 
 const users = ref<AdminUser[]>([])
 const roles = ref<Role[]>([])
 const loading = ref(false)
+const orgFilter = ref<string>('') // 超级 admin 可指定 orgId 过滤；org_admin 自动锁定自己 org
+
+const isSuperAdmin = computed(() => isAdmin.value)
 
 // 新建用户弹窗
 const createVisible = ref(false)
@@ -28,10 +33,13 @@ const pwdLoading = ref(false)
 async function loadData() {
   loading.value = true
   try {
-    const [u, r] = await Promise.all([adminApi.listUsers(), adminApi.listRoles()])
+    const params = isSuperAdmin.value && orgFilter.value ? '?orgId=' + orgFilter.value : ''
+    const [u, r] = await Promise.all([
+      fetch('/api/admin/users' + params, { headers: { Authorization: 'Bearer ' + localStorage.getItem('workbench_auth_token') } }).then(res => res.json()).then(j => ({ users: j.data?.users || [] })),
+      adminApi.listRoles(),
+    ])
     users.value = u.users || []
     roles.value = r.roles || []
-    // 通知侧栏统计卡刷新
     window.dispatchEvent(new Event('admin-users-refresh'))
   } catch (err: any) {
     showToast('Load failed: ' + (err.msg || err.message))
@@ -41,7 +49,14 @@ async function loadData() {
 }
 
 function openCreate() {
-  createForm.value = { org: '', name: '', password: '', roleId: 2, mobile: '' }
+  // org_admin 只能建自己 org 的用户，预填且锁定
+  createForm.value = {
+    org: isSuperAdmin.value ? '' : (currentUser.value?.orgName || ''),
+    name: '',
+    password: '',
+    roleId: 2,
+    mobile: '',
+  }
   createVisible.value = true
 }
 
@@ -138,8 +153,18 @@ onMounted(loadData)
       <div class="admin-title">
         <h2>User Management</h2>
         <span class="admin-subtitle">{{ users.length }} users</span>
+        <span v-if="!isSuperAdmin" class="admin-scope">· scope: {{ currentUser?.orgName }}</span>
       </div>
-      <button class="btn btn-primary" @click="openCreate">New User</button>
+      <div class="admin-actions">
+        <input
+          v-if="isSuperAdmin"
+          v-model="orgFilter"
+          class="form-input org-filter"
+          placeholder="Filter by orgId (empty = all)"
+          @keyup.enter="loadData"
+        />
+        <button class="btn btn-primary" @click="openCreate">New User</button>
+      </div>
     </div>
 
     <table class="user-table">
@@ -158,18 +183,18 @@ onMounted(loadData)
           <td colspan="6" class="cell-empty">Loading…</td>
         </tr>
         <tr v-else-if="!users.length">
-          <td colspan="6" class="cell-empty">No users yet</td>
+          <td colspan="6" class="cell-empty">No users</td>
         </tr>
         <tr v-for="u in users" :key="u.id">
-          <td class="cell-name">{{ u.name }}</td>
+          <td class="cell-name">{{ u.name }}<span v-if="u.id === currentUser?.userId" class="self-tag"> (you)</span></td>
           <td>{{ u.orgName }}</td>
           <td><span class="role-tag" :class="u.role">{{ u.role }}</span></td>
           <td class="cell-mobile">{{ u.mobile || '—' }}</td>
           <td class="cell-created">{{ u.createdAt }}</td>
           <td class="cell-actions">
             <button class="btn btn-sm" @click="openEdit(u)">Edit</button>
-            <button class="btn btn-sm" @click="openResetPwd(u)">Reset Pwd</button>
-            <button class="btn btn-sm btn-danger" @click="onDelete(u)">Delete</button>
+            <button class="btn btn-sm" @click="openResetPwd(u)">Pwd</button>
+            <button class="btn btn-sm btn-danger" @click="onDelete(u)">Del</button>
           </td>
         </tr>
       </tbody>
@@ -182,7 +207,7 @@ onMounted(loadData)
         <div class="modal-body">
           <div class="form-row">
             <label class="form-label">Org</label>
-            <input v-model="createForm.org" class="form-input" placeholder="org name" />
+            <input v-model="createForm.org" class="form-input" :readonly="!isSuperAdmin" placeholder="org name" />
           </div>
           <div class="form-row">
             <label class="form-label">Name</label>
@@ -226,7 +251,7 @@ onMounted(loadData)
           <div class="form-row">
             <label class="form-label">Role</label>
             <select v-model="editForm.roleId" class="form-input">
-              <option v-for="r in roles" :key="r.id" :value="r.id">{{ r.name }}</option>
+              <option v-for="r in roles.filter(r => isSuperAdmin || r.id !== 1)" :key="r.id" :value="r.id">{{ r.name }}</option>
             </select>
           </div>
         </div>
@@ -258,10 +283,10 @@ onMounted(loadData)
 
 <style scoped>
 .admin-view {
-  padding: 20px 24px;
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 8px;
   height: 100%;
   overflow: auto;
   box-sizing: border-box;
@@ -271,35 +296,50 @@ onMounted(loadData)
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
 }
 
 .admin-title {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
 }
 .admin-title h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text);
 }
-.admin-subtitle {
-  font-size: 12px;
+.admin-subtitle,
+.admin-scope {
+  font-size: 11px;
   color: var(--text-dim);
 }
+.admin-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.org-filter {
+  width: 200px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
 
-/* 用户表格：贴合 VS Code 风格（细边框、浅灰表头、hover 高亮） */
+/* 用户表格：紧凑（VS Code 风格细边框/浅灰表头/hover 高亮） */
 .user-table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1.4;
   background: var(--bg);
 }
 .user-table th,
 .user-table td {
   border: 1px solid var(--border);
-  padding: 8px 12px;
+  padding: 4px 8px;
   text-align: left;
   vertical-align: middle;
 }
@@ -308,6 +348,9 @@ onMounted(loadData)
   font-weight: 600;
   color: var(--text-dim);
   white-space: nowrap;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 .user-table tbody tr:hover {
   background: var(--hover);
@@ -316,67 +359,88 @@ onMounted(loadData)
   font-weight: 500;
   color: var(--text);
 }
+.self-tag {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
 .cell-mobile {
   color: var(--text-dim);
 }
 .cell-created {
   color: var(--text-dim);
   white-space: nowrap;
+  font-size: 11px;
 }
 .cell-actions {
   white-space: nowrap;
   width: 1%;
 }
 .cell-actions .btn {
-  margin-right: 4px;
+  margin-right: 3px;
 }
 .cell-empty {
   text-align: center;
   color: var(--text-muted);
-  padding: 32px 0;
+  padding: 20px 0;
 }
 
-/* 角色标签：与 .share-item-meta .tag 风格一致 */
+/* 角色标签 */
 .role-tag {
   display: inline-block;
-  padding: 1px 8px;
+  padding: 0 6px;
   border-radius: 3px;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.6;
+  font-weight: 500;
 }
 .role-tag.admin {
   background: #fde8ea;
   color: #cf222e;
+}
+.role-tag.org_admin {
+  background: #fff4e1;
+  color: #b35900;
 }
 .role-tag.user {
   background: var(--code-bg);
   color: var(--text-dim);
 }
 
-/* 弹窗：复用全局 .modal-mask/.modal-content，仅覆盖宽度 */
+/* 弹窗：复用全局 .modal-mask/.modal-content */
 .admin-modal {
-  width: 440px;
+  width: 380px;
   max-width: 92vw;
 }
+.admin-modal :deep(.modal-header) {
+  padding: 10px 16px;
+  font-size: 13px;
+}
+.admin-modal :deep(.modal-body) {
+  padding: 12px 16px;
+}
+.admin-modal :deep(.modal-actions) {
+  padding: 8px 16px;
+}
 
-/* 表单：贴合项目输入框风格 */
+/* 表单：紧凑 */
 .form-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 14px;
+  gap: 3px;
+  margin-bottom: 8px;
 }
 .form-label {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text-dim);
 }
 .form-input {
   width: 100%;
-  padding: 8px 10px;
+  padding: 5px 8px;
   border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 13px;
+  border-radius: 3px;
+  font-size: 12px;
   color: var(--text);
   background: var(--bg);
   box-sizing: border-box;
@@ -385,6 +449,10 @@ onMounted(loadData)
 .form-input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(0, 122, 204, 0.1);
+  box-shadow: 0 0 0 2px rgba(0, 122, 204, 0.1);
+}
+.form-input[readonly] {
+  background: var(--code-bg);
+  color: var(--text-dim);
 }
 </style>

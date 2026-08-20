@@ -102,8 +102,8 @@ func (s *Server) App() *iris.Application {
 	api.Post("/share", auth, s.handleCreateShare)
 	api.Delete("/share/{id}", auth, s.handleDeleteShare)
 
-	// Admin API（需鉴权 + admin 角色，跨 org 管理所有用户）
-	admin := api.Party("/admin", auth, RequireAdmin)
+	// Admin API（需鉴权 + admin 或 org_admin 角色，admin 跨 org、org_admin 仅本 org）
+	admin := api.Party("/admin", auth, RequireUserManager)
 	admin.Get("/users", s.handleAdminListUsers)
 	admin.Post("/users", s.handleAdminCreateUser)
 	admin.Patch("/users/{id}", s.handleAdminUpdateUser)

@@ -12,9 +12,22 @@ import (
 // Admin API（均需 auth + RequireAdmin，跨 org 管理所有用户）
 // ============================================================
 
-// GET /api/admin/users — 列出所有用户
+// GET /api/admin/users — 列出用户。admin 跨 org（可带 ?orgId=xxx 过滤），org_admin 仅看自己 org
 func (s *Server) handleAdminListUsers(ctx iris.Context) {
-	users, err := s.db.ListUsers(ctx.Request().Context())
+	rctx := ctx.Request().Context()
+	var orgFilter int64
+	if !isSuperAdmin(ctx) {
+		// org_admin 只能看自己 org，忽略请求参数
+		orgFilter = currentOrgID(ctx)
+	} else {
+		// 超级 admin 可选 ?orgId 过滤
+		if s := ctx.URLParam("orgId"); s != "" {
+			if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+				orgFilter = v
+			}
+		}
+	}
+	users, err := s.db.ListUsers(rctx, orgFilter)
 	if err != nil {
 		serverError(ctx, "list users failed", err)
 		return
@@ -32,7 +45,7 @@ func (s *Server) handleAdminListRoles(ctx iris.Context) {
 	writeOK(ctx, rolesData{Roles: roles})
 }
 
-// POST /api/admin/users — 创建用户
+// POST /api/admin/users — 创建用户。admin 跨 org，org_admin 仅可创建自己 org 用户
 func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	var req struct {
@@ -53,14 +66,24 @@ func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "org, name and password are required")
 		return
 	}
-	if req.RoleID != db.RoleIDAdmin && req.RoleID != db.RoleIDUser {
+	// 校验 roleId 在白名单内：user/org_admin 任何人都能创建；admin 仅超级 admin 可创建
+	if req.RoleID != db.RoleIDUser && req.RoleID != db.RoleIDOrgAdmin && req.RoleID != db.RoleIDAdmin {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid roleId")
+		return
+	}
+	if req.RoleID == db.RoleIDAdmin && !isSuperAdmin(ctx) {
+		writeFailMsg(ctx, iris.StatusForbidden, CodeAdminRequired, "Only super admin can create admin")
 		return
 	}
 
 	orgID, err := s.db.EnsureOrg(rctx, req.Org)
 	if err != nil {
 		serverError(ctx, "ensure org failed", err, "org", req.Org)
+		return
+	}
+	// org_admin 只能往自己 org 创建
+	if !isSuperAdmin(ctx) && orgID != currentOrgID(ctx) {
+		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only create users in own org")
 		return
 	}
 	// 用户名全局唯一：跨 org 查重
@@ -113,6 +136,11 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 		writeFail(ctx, iris.StatusForbidden, CodeUserNotFound)
 		return
 	}
+	// org_admin 只能操作自己 org 的用户
+	if !isSuperAdmin(ctx) && target.OrgID != currentOrgID(ctx) {
+		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only manage users in own org")
+		return
+	}
 
 	var req struct {
 		Name     *string `json:"name"`
@@ -127,8 +155,13 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 
 	// 改角色：降级 admin 需保护（不能降级自己、不能降级最后一个 admin）
 	if req.RoleID != nil {
-		if *req.RoleID != db.RoleIDAdmin && *req.RoleID != db.RoleIDUser {
+		if *req.RoleID != db.RoleIDAdmin && *req.RoleID != db.RoleIDUser && *req.RoleID != db.RoleIDOrgAdmin {
 			writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid roleId")
+			return
+		}
+		// 仅超级 admin 可把角色设为 admin
+		if *req.RoleID == db.RoleIDAdmin && !isSuperAdmin(ctx) {
+			writeFailMsg(ctx, iris.StatusForbidden, CodeAdminRequired, "Only super admin can grant admin role")
 			return
 		}
 		if target.RoleID == db.RoleIDAdmin && *req.RoleID != db.RoleIDAdmin {
@@ -230,6 +263,11 @@ func (s *Server) handleAdminDeleteUser(ctx iris.Context) {
 	}
 	if target == nil {
 		writeFail(ctx, iris.StatusForbidden, CodeUserNotFound)
+		return
+	}
+	// org_admin 只能删自己 org 的用户
+	if !isSuperAdmin(ctx) && target.OrgID != currentOrgID(ctx) {
+		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only delete users in own org")
 		return
 	}
 

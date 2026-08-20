@@ -84,6 +84,24 @@ func createAdminUser(t *testing.T, d *db.DB, secret []byte, orgName, userName, p
 	return GenerateToken(orgID, userID, secret, 30)
 }
 
+// createOrgAdminUser 创建一个 org_admin 角色用户，返回可直接用的 token。
+func createOrgAdminUser(t *testing.T, d *db.DB, secret []byte, orgName, userName, password string) string {
+	t.Helper()
+	hash, err := HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orgID, err := d.EnsureOrg(context.Background(), orgName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userID, err := d.UpsertUser(context.Background(), orgID, userName, hash, db.RoleIDOrgAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return GenerateToken(orgID, userID, secret, 30)
+}
+
 func authHeader(token string) string { return "Bearer " + token }
 
 // userTestRoot 返回测试中用户的文件根目录: staticDir/{orgId}/{userId}/
@@ -409,7 +427,7 @@ func TestHandler_AdminListUsersAndRoles(t *testing.T) {
 
 	e.GET("/api/admin/roles").WithHeader("Authorization", authHeader(adminTok)).
 		Expect().Status(http.StatusOK).JSON().Object().
-		Value("data").Object().Value("roles").Array().Length().Equal(2)
+		Value("data").Object().Value("roles").Array().Length().Equal(3)
 }
 
 func TestHandler_AdminCreateUser(t *testing.T) {
@@ -476,4 +494,52 @@ func TestHandler_AdminDeleteAnotherAdmin(t *testing.T) {
 	// 有 2 个 admin，root 删除 admin2（非自己）→ 允许
 	e.DELETE("/api/admin/users/2").WithHeader("Authorization", authHeader(adminTok)).
 		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
+}
+
+// ============================================================
+// org_admin 组织管理员：范围仅限本 org
+// ============================================================
+
+func TestHandler_OrgAdmin_ListScopedToOwnOrg(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	orgAdminTok := createOrgAdminUser(t, d, secret, "org1", "boss", "p")
+	_ = createUser(t, d, secret, "org1", "alice", "p")
+	_ = createUser(t, d, secret, "org2", "bob", "p") // 跨 org
+
+	// org_admin 只看到自己 org（2 个：boss + alice）
+	e.GET("/api/admin/users").WithHeader("Authorization", authHeader(orgAdminTok)).
+		Expect().Status(http.StatusOK).JSON().Object().
+		Value("data").Object().Value("users").Array().Length().Equal(2)
+}
+
+func TestHandler_OrgAdmin_CannotManageOtherOrgUser(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	orgAdminTok := createOrgAdminUser(t, d, secret, "org1", "boss", "p")
+	// id=2（org2 普通用户）
+	_ = createUser(t, d, secret, "org2", "bob", "p")
+
+	// org_admin 改 org2 用户 → 403
+	e.PATCH("/api/admin/users/2").WithHeader("Authorization", authHeader(orgAdminTok)).
+		WithJSON(map[string]any{"name": "hacked"}).
+		Expect().Status(http.StatusForbidden)
+
+	// org_admin 删 org2 用户 → 403
+	e.DELETE("/api/admin/users/2").WithHeader("Authorization", authHeader(orgAdminTok)).
+		Expect().Status(http.StatusForbidden)
+}
+
+func TestHandler_OrgAdmin_CannotGrantAdminRole(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	orgAdminTok := createOrgAdminUser(t, d, secret, "org1", "boss", "p")
+	_ = createUser(t, d, secret, "org1", "alice", "p") // id=2
+
+	// org_admin 尝试把 alice 提升为 admin → 403
+	e.PATCH("/api/admin/users/2").WithHeader("Authorization", authHeader(orgAdminTok)).
+		WithJSON(map[string]any{"roleId": db.RoleIDAdmin}).
+		Expect().Status(http.StatusForbidden)
+
+	// org_admin 把 alice 提升为 org_admin → 允许
+	e.PATCH("/api/admin/users/2").WithHeader("Authorization", authHeader(orgAdminTok)).
+		WithJSON(map[string]any{"roleId": db.RoleIDOrgAdmin}).
+		Expect().Status(http.StatusOK)
 }

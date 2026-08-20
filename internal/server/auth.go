@@ -62,8 +62,9 @@ const secondsPerDay = 24 * 60 * 60
 
 // 角色名常量（与 db.roles 表 name 字段对应）
 const (
-	roleNameAdmin = "admin"
-	roleNameUser  = "user"
+	roleNameAdmin    = "admin"
+	roleNameUser     = "user"
+	roleNameOrgAdmin = "org_admin"
 )
 
 // GenerateToken 生成带过期时间的 HMAC token
@@ -157,13 +158,26 @@ func AuthMiddleware(secret []byte, lookupIdentity func(context.Context, int64, i
 	}
 }
 
-// RequireAdmin 要求当前用户为 admin 角色，否则 403（须在 AuthMiddleware 之后使用）
-func RequireAdmin(ctx iris.Context) {
-	if currentRole(ctx) != roleNameAdmin {
+// RequireUserManager 要求当前用户为 admin 或 org_admin 角色（用户管理权限），否则 403。
+// 须在 AuthMiddleware 之后使用；通过后会把 isSuperAdmin 标志写入 ctx（admin=true, org_admin=false）。
+func RequireUserManager(ctx iris.Context) {
+	role := currentRole(ctx)
+	if role != roleNameAdmin && role != roleNameOrgAdmin {
 		writeFail(ctx, iris.StatusForbidden, CodeAdminRequired)
 		return
 	}
+	ctx.Values().Set("isSuperAdmin", role == roleNameAdmin)
 	ctx.Next()
+}
+
+// isSuperAdmin 从 ctx 读取 RequireUserManager 写入的标志（true=超级 admin，false=org_admin）
+func isSuperAdmin(ctx iris.Context) bool {
+	if v := ctx.Values().Get("isSuperAdmin"); v != nil {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
 }
 
 // currentUserID 从 iris.Context 中取出 AuthMiddleware 写入的整数 userID

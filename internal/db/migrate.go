@@ -402,11 +402,12 @@ func (d *DB) migrateUsersGlobalName(ctx context.Context) error {
 	return nil
 }
 
-// seedRoles 幂等预置基础角色（admin/user），遵循「自增主键 id + 固定业务 id」约定。
+// seedRoles 幂等预置基础角色（admin/user/org_admin），遵循「自增主键 id + 固定业务 id」约定。
 func (d *DB) seedRoles(ctx context.Context) error {
 	const q = `INSERT OR IGNORE INTO roles (id, name, description) VALUES
 		(1, 'admin', '超级管理员，可管理所有用户与组织'),
-		(2, 'user', '普通用户')`
+		(2, 'user', '普通用户'),
+		(3, 'org_admin', '组织管理员，仅可管理本组织用户')`
 	if _, err := d.conn.ExecContext(ctx, q); err != nil {
 		return fmt.Errorf("seed roles: %w", err)
 	}

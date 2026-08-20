@@ -7,8 +7,9 @@ import (
 
 // 角色 id 常量（与 roles 表预置数据对应，见 migrate.go seedRoles）
 const (
-	RoleIDAdmin = 1
-	RoleIDUser  = 2
+	RoleIDAdmin    = 1
+	RoleIDUser     = 2
+	RoleIDOrgAdmin = 3
 )
 
 // Member 组织成员
@@ -189,14 +190,15 @@ func (d *DB) ListRoles(ctx context.Context) ([]Role, error) {
 	return roles, nil
 }
 
-// ListUsers 跨 org 列出所有用户（admin 用户管理）
-func (d *DB) ListUsers(ctx context.Context) ([]UserInfo, error) {
+// ListUsers 跨 org 列出所有用户（admin 用户管理）；orgID > 0 时仅列该 org
+func (d *DB) ListUsers(ctx context.Context, orgID int64) ([]UserInfo, error) {
 	const q = `SELECT u.id, u.org_id, o.name, u.name, COALESCE(u.mobile, ''), u.role_id, COALESCE(r.name, 'user'), u.created_at
 		FROM users u
 		JOIN orgs o ON o.id = u.org_id
 		LEFT JOIN roles r ON r.id = u.role_id
+		WHERE (? <= 0 OR u.org_id = ?)
 		ORDER BY u.id`
-	rows, err := d.conn.QueryContext(ctx, q)
+	rows, err := d.conn.QueryContext(ctx, q, orgID, orgID)
 	if err != nil {
 		return nil, err
 	}

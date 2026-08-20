@@ -1,442 +1,286 @@
 <script setup lang="ts">
-// Admin 用户管理主区：用户表格 + 新建/编辑/重置密码/删除
-// UI 与项目整体保持一致：自定义 .modal-mask/.btn/.user-table + showToast/confirm
-// 紧凑布局：padding 4-8px、字号 12px、表格 padding 4px 8px
-import { ref, onMounted, computed } from 'vue'
+// Admin 用户管理主区：内联详情表单（新建/编辑/重置密码/删除，无弹窗）
+// 与侧栏通过 adminStore 共享状态：选中列表项 → 此处显示详情表单
+import { ref, computed, watch } from 'vue'
 import { showToast } from '../lib/common'
 import * as adminApi from '../api/admin'
-import type { AdminUser, Role } from '../api/admin'
+import {
+  roles,
+  selectedUser,
+  isNew,
+  loadAdminData,
+  selectUser,
+  clearSelectionIfDeleted,
+} from '../stores/adminStore'
 import { isAdmin, currentUser } from '../stores/auth'
 
-const users = ref<AdminUser[]>([])
-const roles = ref<Role[]>([])
-const loading = ref(false)
-const orgFilter = ref<string>('') // 超级 admin 可指定 orgId 过滤；org_admin 自动锁定自己 org
+const saving = ref(false)
+const deleting = ref(false)
+const showChangePwd = ref(false)
 
-const isSuperAdmin = computed(() => isAdmin.value)
+// 本地编辑表单（从选中用户派生，避免直接改 store）
+const form = ref({
+  name: '',
+  org: '',
+  mobile: '',
+  roleId: 2,
+  password: '',
+})
 
-// 新建用户弹窗
-const createVisible = ref(false)
-const createForm = ref({ org: '', name: '', password: '', roleId: 2, mobile: '' })
-const createLoading = ref(false)
+// 可选角色：org_admin 不能授予 admin 角色（id=1）
+const selectableRoles = computed(() =>
+  roles.value.filter((r) => isAdmin.value || r.id !== 1),
+)
 
-// 编辑用户弹窗
-const editVisible = ref(false)
-const editForm = ref({ id: 0, name: '', mobile: '', roleId: 2 })
-const editLoading = ref(false)
+// 标题
+const title = computed(() => {
+  if (isNew.value) return 'New User'
+  return selectedUser.value ? `Edit: ${selectedUser.value.name}` : 'User Detail'
+})
 
-// 重置密码弹窗
-const pwdVisible = ref(false)
-const pwdForm = ref({ id: 0, name: '', password: '' })
-const pwdLoading = ref(false)
+// 监听选中/新建状态，初始化表单
+watch([selectedUser, isNew], () => {
+  showChangePwd.value = false
+  if (isNew.value) {
+    form.value = {
+      name: '',
+      org: isAdmin.value ? '' : (currentUser.value?.orgName || ''),
+      mobile: '',
+      roleId: 2,
+      password: '',
+    }
+  } else if (selectedUser.value) {
+    const u = selectedUser.value
+    form.value = {
+      name: u.name,
+      org: u.orgName,
+      mobile: u.mobile || '',
+      roleId: u.roleId,
+      password: '',
+    }
+  }
+}, { immediate: true })
 
-async function loadData() {
-  loading.value = true
+// 校验：name 必填；新建时 org + password 必填
+const canSave = computed(() => {
+  if (!form.value.name.trim()) return false
+  if (isNew.value) {
+    if (!form.value.org.trim() || !form.value.password) return false
+  }
+  return true
+})
+
+// org 是否只读（org_admin 只能操作自己 org）
+const orgReadonly = computed(() => !isAdmin.value)
+
+async function onSave() {
+  if (!canSave.value) return
+  saving.value = true
   try {
-    const params = isSuperAdmin.value && orgFilter.value ? '?orgId=' + orgFilter.value : ''
-    const [u, r] = await Promise.all([
-      fetch('/api/admin/users' + params, { headers: { Authorization: 'Bearer ' + localStorage.getItem('workbench_auth_token') } }).then(res => res.json()).then(j => ({ users: j.data?.users || [] })),
-      adminApi.listRoles(),
-    ])
-    users.value = u.users || []
-    roles.value = r.roles || []
-    window.dispatchEvent(new Event('admin-users-refresh'))
+    if (isNew.value) {
+      const created = await adminApi.createUser({
+        org: form.value.org.trim(),
+        name: form.value.name.trim(),
+        password: form.value.password,
+        roleId: form.value.roleId,
+        mobile: form.value.mobile.trim(),
+      })
+      showToast('User created')
+      await loadAdminData()
+      selectUser(created.id) // 新建后选中该用户
+    } else if (selectedUser.value) {
+      const id = selectedUser.value.id
+      const body: any = {
+        name: form.value.name.trim(),
+        mobile: form.value.mobile.trim(),
+        roleId: form.value.roleId,
+      }
+      // 展开改密码且填了新密码时，一并提交
+      if (showChangePwd.value && form.value.password) {
+        body.password = form.value.password
+      }
+      await adminApi.updateUser(id, body)
+      showToast('User updated')
+      await loadAdminData()
+      showChangePwd.value = false
+    }
   } catch (err: any) {
-    showToast('Load failed: ' + (err.msg || err.message))
+    showToast('Save failed: ' + (err.msg || err.message))
   } finally {
-    loading.value = false
+    saving.value = false
   }
 }
 
-function openCreate() {
-  // org_admin 只能建自己 org 的用户，预填且锁定
-  createForm.value = {
-    org: isSuperAdmin.value ? '' : (currentUser.value?.orgName || ''),
-    name: '',
-    password: '',
-    roleId: 2,
-    mobile: '',
-  }
-  createVisible.value = true
-}
-
-async function submitCreate() {
-  if (!createForm.value.org.trim() || !createForm.value.name.trim() || !createForm.value.password) {
-    showToast('Org, name and password are required')
-    return
-  }
-  createLoading.value = true
-  try {
-    await adminApi.createUser({
-      org: createForm.value.org.trim(),
-      name: createForm.value.name.trim(),
-      password: createForm.value.password,
-      roleId: createForm.value.roleId,
-      mobile: createForm.value.mobile.trim(),
-    })
-    showToast('User created')
-    createVisible.value = false
-    loadData()
-  } catch (err: any) {
-    showToast('Create failed: ' + (err.msg || err.message))
-  } finally {
-    createLoading.value = false
-  }
-}
-
-function openEdit(u: AdminUser) {
-  editForm.value = { id: u.id, name: u.name, mobile: u.mobile || '', roleId: u.roleId }
-  editVisible.value = true
-}
-
-async function submitEdit() {
-  if (!editForm.value.name.trim()) {
-    showToast('Name is required')
-    return
-  }
-  editLoading.value = true
-  try {
-    await adminApi.updateUser(editForm.value.id, {
-      name: editForm.value.name.trim(),
-      mobile: editForm.value.mobile.trim(),
-      roleId: editForm.value.roleId,
-    })
-    showToast('User updated')
-    editVisible.value = false
-    loadData()
-  } catch (err: any) {
-    showToast('Update failed: ' + (err.msg || err.message))
-  } finally {
-    editLoading.value = false
-  }
-}
-
-function openResetPwd(u: AdminUser) {
-  pwdForm.value = { id: u.id, name: u.name, password: '' }
-  pwdVisible.value = true
-}
-
-async function submitResetPwd() {
-  if (!pwdForm.value.password) {
-    showToast('Password is required')
-    return
-  }
-  pwdLoading.value = true
-  try {
-    await adminApi.updateUser(pwdForm.value.id, { password: pwdForm.value.password })
-    showToast('Password reset')
-    pwdVisible.value = false
-  } catch (err: any) {
-    showToast('Reset failed: ' + (err.msg || err.message))
-  } finally {
-    pwdLoading.value = false
-  }
-}
-
-async function onDelete(u: AdminUser) {
+async function onDelete() {
+  const u = selectedUser.value
+  if (!u) return
   if (!confirm(`Delete user "${u.name}" (${u.orgName})? This cannot be undone.`)) return
+  deleting.value = true
   try {
     await adminApi.deleteUser(u.id)
     showToast('User deleted')
-    loadData()
+    clearSelectionIfDeleted(u.id)
+    await loadAdminData()
   } catch (err: any) {
     showToast('Delete failed: ' + (err.msg || err.message))
+  } finally {
+    deleting.value = false
   }
 }
-
-onMounted(loadData)
 </script>
 
 <template>
-  <div class="admin-view">
-    <div class="admin-toolbar">
-      <div class="admin-title">
-        <h2>User Management</h2>
-        <span class="admin-subtitle">{{ users.length }} users</span>
-        <span v-if="!isSuperAdmin" class="admin-scope">· scope: {{ currentUser?.orgName }}</span>
-      </div>
-      <div class="admin-actions">
-        <input
-          v-if="isSuperAdmin"
-          v-model="orgFilter"
-          class="form-input org-filter"
-          placeholder="Filter by orgId (empty = all)"
-          @keyup.enter="loadData"
-        />
-        <button class="btn btn-primary" @click="openCreate">New User</button>
-      </div>
+  <div class="admin-detail">
+    <!-- 空状态 -->
+    <div v-if="!isNew && !selectedUser" class="empty-state">
+      <div class="empty-icon">👥</div>
+      <div class="empty-title">No user selected</div>
+      <div class="empty-hint">Select a user from the left, or create a new one.</div>
     </div>
 
-    <table class="user-table">
-      <thead>
-        <tr>
-          <th>User</th>
-          <th>Org</th>
-          <th>Role</th>
-          <th>Mobile</th>
-          <th>Created</th>
-          <th class="th-actions">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-if="loading">
-          <td colspan="6" class="cell-empty">Loading…</td>
-        </tr>
-        <tr v-else-if="!users.length">
-          <td colspan="6" class="cell-empty">No users</td>
-        </tr>
-        <tr v-for="u in users" :key="u.id">
-          <td class="cell-name">{{ u.name }}<span v-if="u.id === currentUser?.userId" class="self-tag"> (you)</span></td>
-          <td>{{ u.orgName }}</td>
-          <td><span class="role-tag" :class="u.role">{{ u.role }}</span></td>
-          <td class="cell-mobile">{{ u.mobile || '—' }}</td>
-          <td class="cell-created">{{ u.createdAt }}</td>
-          <td class="cell-actions">
-            <button class="btn btn-sm" @click="openEdit(u)">Edit</button>
-            <button class="btn btn-sm" @click="openResetPwd(u)">Pwd</button>
-            <button class="btn btn-sm btn-danger" @click="onDelete(u)">Del</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-
-    <!-- 新建用户 -->
-    <div v-if="createVisible" class="modal-mask" @click.self="createVisible = false">
-      <div class="modal-content admin-modal">
-        <div class="modal-header">New User</div>
-        <div class="modal-body">
-          <div class="form-row">
-            <label class="form-label">Org</label>
-            <input v-model="createForm.org" class="form-input" :readonly="!isSuperAdmin" placeholder="org name" />
-          </div>
-          <div class="form-row">
-            <label class="form-label">Name</label>
-            <input v-model="createForm.name" class="form-input" placeholder="user name" />
-          </div>
-          <div class="form-row">
-            <label class="form-label">Password</label>
-            <input v-model="createForm.password" type="password" class="form-input" />
-          </div>
-          <div class="form-row">
-            <label class="form-label">Role</label>
-            <select v-model="createForm.roleId" class="form-input">
-              <option v-for="r in roles" :key="r.id" :value="r.id">{{ r.name }}</option>
-            </select>
-          </div>
-          <div class="form-row">
-            <label class="form-label">Mobile</label>
-            <input v-model="createForm.mobile" class="form-input" placeholder="optional" />
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="btn" @click="createVisible = false">Cancel</button>
-          <button class="btn btn-primary" :disabled="createLoading" @click="submitCreate">Create</button>
-        </div>
+    <!-- 详情 / 新建表单 -->
+    <div v-else class="detail-panel">
+      <div class="detail-header">
+        <h2 class="detail-title">{{ title }}</h2>
+        <button class="btn btn-primary" :disabled="!canSave || saving" @click="onSave">
+          {{ isNew ? 'Create' : 'Save' }}
+        </button>
       </div>
-    </div>
 
-    <!-- 编辑用户 -->
-    <div v-if="editVisible" class="modal-mask" @click.self="editVisible = false">
-      <div class="modal-content admin-modal">
-        <div class="modal-header">Edit User</div>
-        <div class="modal-body">
-          <div class="form-row">
-            <label class="form-label">Name</label>
-            <input v-model="editForm.name" class="form-input" />
-          </div>
-          <div class="form-row">
-            <label class="form-label">Mobile</label>
-            <input v-model="editForm.mobile" class="form-input" placeholder="optional" />
-          </div>
-          <div class="form-row">
-            <label class="form-label">Role</label>
-            <select v-model="editForm.roleId" class="form-input">
-              <option v-for="r in roles.filter(r => isSuperAdmin || r.id !== 1)" :key="r.id" :value="r.id">{{ r.name }}</option>
-            </select>
-          </div>
+      <div class="detail-body">
+        <div class="form-row">
+          <label class="form-label">Name</label>
+          <input v-model="form.name" class="form-input" placeholder="user name" spellcheck="false" />
         </div>
-        <div class="modal-actions">
-          <button class="btn" @click="editVisible = false">Cancel</button>
-          <button class="btn btn-primary" :disabled="editLoading" @click="submitEdit">Save</button>
-        </div>
-      </div>
-    </div>
 
-    <!-- 重置密码 -->
-    <div v-if="pwdVisible" class="modal-mask" @click.self="pwdVisible = false">
-      <div class="modal-content admin-modal">
-        <div class="modal-header">Reset Password — {{ pwdForm.name }}</div>
-        <div class="modal-body">
+        <div class="form-row">
+          <label class="form-label">Org</label>
+          <input v-model="form.org" class="form-input" :readonly="orgReadonly" placeholder="org name" spellcheck="false" />
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Role</label>
+          <select v-model="form.roleId" class="form-input">
+            <option v-for="r in selectableRoles" :key="r.id" :value="r.id">{{ r.name }}</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Mobile</label>
+          <input v-model="form.mobile" class="form-input" placeholder="optional" spellcheck="false" />
+        </div>
+
+        <!-- 新建：密码必填 -->
+        <div v-if="isNew" class="form-row">
+          <label class="form-label">Password</label>
+          <input v-model="form.password" type="password" class="form-input" placeholder="required" />
+        </div>
+
+        <!-- 编辑：展示创建时间 + 危险区 -->
+        <template v-else>
           <div class="form-row">
-            <label class="form-label">New Pwd</label>
-            <input v-model="pwdForm.password" type="password" class="form-input" />
+            <label class="form-label">Created</label>
+            <div class="readonly-text">{{ selectedUser?.createdAt }}</div>
           </div>
-        </div>
-        <div class="modal-actions">
-          <button class="btn" @click="pwdVisible = false">Cancel</button>
-          <button class="btn btn-primary" :disabled="pwdLoading" @click="submitResetPwd">Reset</button>
-        </div>
+
+          <div class="danger-zone">
+            <!-- 改密码 -->
+            <div v-if="!showChangePwd" class="danger-row">
+              <button class="btn btn-sm" @click="showChangePwd = true">Change Password</button>
+            </div>
+            <div v-else class="danger-row pwd-row">
+              <input
+                v-model="form.password"
+                type="password"
+                class="form-input"
+                placeholder="new password"
+              />
+              <button class="btn btn-sm" @click="showChangePwd = false">Cancel</button>
+            </div>
+
+            <!-- 删除 -->
+            <div class="danger-row">
+              <button class="btn btn-sm btn-danger" :disabled="deleting" @click="onDelete">
+                Delete User
+              </button>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.admin-view {
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.admin-detail {
+  padding: 16px 20px;
   height: 100%;
   overflow: auto;
   box-sizing: border-box;
 }
 
-.admin-toolbar {
+/* 空状态 */
+.empty-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-muted);
+}
+.empty-icon {
+  font-size: 32px;
+  opacity: 0.4;
+}
+.empty-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.empty-hint {
+  font-size: 12px;
+}
+
+/* 详情面板 */
+.detail-panel {
+  max-width: 560px;
+}
+.detail-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.detail-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.detail-body {
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
-.admin-title {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-}
-.admin-title h2 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-}
-.admin-subtitle,
-.admin-scope {
-  font-size: 11px;
-  color: var(--text-dim);
-}
-.admin-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.org-filter {
-  width: 200px;
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
-/* 用户表格：紧凑（VS Code 风格细边框/浅灰表头/hover 高亮） */
-.user-table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 12px;
-  line-height: 1.4;
-  background: var(--bg);
-}
-.user-table th,
-.user-table td {
-  border: 1px solid var(--border);
-  padding: 4px 8px;
-  text-align: left;
-  vertical-align: middle;
-}
-.user-table th {
-  background: var(--header-bg);
-  font-weight: 600;
-  color: var(--text-dim);
-  white-space: nowrap;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.user-table tbody tr:hover {
-  background: var(--hover);
-}
-.cell-name {
-  font-weight: 500;
-  color: var(--text);
-}
-.self-tag {
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-left: 4px;
-}
-.cell-mobile {
-  color: var(--text-dim);
-}
-.cell-created {
-  color: var(--text-dim);
-  white-space: nowrap;
-  font-size: 11px;
-}
-.cell-actions {
-  white-space: nowrap;
-  width: 1%;
-}
-.cell-actions .btn {
-  margin-right: 3px;
-}
-.cell-empty {
-  text-align: center;
-  color: var(--text-muted);
-  padding: 20px 0;
-}
-
-/* 角色标签 */
-.role-tag {
-  display: inline-block;
-  padding: 0 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  line-height: 1.6;
-  font-weight: 500;
-}
-.role-tag.admin {
-  background: #fde8ea;
-  color: #cf222e;
-}
-.role-tag.org_admin {
-  background: #fff4e1;
-  color: #b35900;
-}
-.role-tag.user {
-  background: var(--code-bg);
-  color: var(--text-dim);
-}
-
-/* 弹窗：复用全局 .modal-mask/.modal-content */
-.admin-modal {
-  width: 380px;
-  max-width: 92vw;
-}
-.admin-modal :deep(.modal-header) {
-  padding: 10px 16px;
-  font-size: 13px;
-}
-.admin-modal :deep(.modal-body) {
-  padding: 12px 16px;
-}
-.admin-modal :deep(.modal-actions) {
-  padding: 8px 16px;
-}
-
-/* 表单：紧凑 */
 .form-row {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  margin-bottom: 8px;
+  align-items: center;
+  gap: 12px;
 }
 .form-label {
-  font-size: 11px;
+  flex: 0 0 80px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-dim);
+  text-align: right;
 }
 .form-input {
-  width: 100%;
+  flex: 1;
   padding: 5px 8px;
   border: 1px solid var(--border);
   border-radius: 3px;
@@ -454,5 +298,32 @@ onMounted(loadData)
 .form-input[readonly] {
   background: var(--code-bg);
   color: var(--text-dim);
+}
+.readonly-text {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* 危险区 */
+.danger-zone {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.danger-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.danger-row .btn {
+  font-size: 12px;
+}
+.pwd-row .form-input {
+  flex: 1;
+  max-width: 240px;
 }
 </style>

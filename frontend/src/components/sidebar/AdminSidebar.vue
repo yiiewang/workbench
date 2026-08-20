@@ -1,121 +1,193 @@
 <script setup lang="ts">
-// Admin sidebar: 用户统计卡片，监听 admin-users-refresh 事件与主区同步刷新
-// 紧凑布局：padding 6-8px、字号 11-12px
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import * as adminApi from '../../api/admin'
-import type { AdminUser } from '../../api/admin'
+// Admin 侧栏：可搜索的用户列表（点击选中 → 主区显示详情）
+import { onMounted } from 'vue'
+import {
+  users,
+  filteredUsers,
+  searchQuery,
+  selectedId,
+  isNew,
+  loadAdminData,
+  selectUser,
+  startCreate,
+} from '../../stores/adminStore'
 import { isAdmin, currentUser } from '../../stores/auth'
 
-const users = ref<AdminUser[]>([])
-
-const userCount = computed(() => users.value.length)
-const adminCount = computed(() => users.value.filter((u) => u.role === 'admin').length)
-const orgAdminCount = computed(() => users.value.filter((u) => u.role === 'org_admin').length)
-const orgCount = computed(() => new Set(users.value.map((u) => u.orgName)).size)
-const scopeText = computed(() => isAdmin.value ? 'all orgs' : `org: ${currentUser.value?.orgName}`)
-
-async function load() {
-  try {
-    const data = await adminApi.listUsers()
-    users.value = data.users || []
-  } catch { /* 静默失败，统计卡显示 0 */ }
-}
-
 onMounted(() => {
-  load()
-  window.addEventListener('admin-users-refresh', load)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('admin-users-refresh', load)
+  loadAdminData()
 })
 </script>
 
 <template>
-  <div class="admin-panel active">
-    <div class="sidebar-header">USER MANAGEMENT <span class="scope">· {{ scopeText }}</span></div>
-    <div class="admin-stats">
-      <div class="stat-item">
-        <span class="stat-num">{{ userCount }}</span>
-        <span class="stat-label">Users</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-num">{{ adminCount }}</span>
-        <span class="stat-label">Admins</span>
-      </div>
-      <div v-if="isAdmin" class="stat-item">
-        <span class="stat-num">{{ orgAdminCount }}</span>
-        <span class="stat-label">Org Admins</span>
-      </div>
-      <div v-if="isAdmin" class="stat-item">
-        <span class="stat-num">{{ orgCount }}</span>
-        <span class="stat-label">Orgs</span>
+  <div class="admin-sidebar active">
+    <div class="sidebar-header">
+      USER MANAGEMENT
+      <span class="count">{{ users.length }}</span>
+    </div>
+
+    <div class="search-box">
+      <input
+        v-model="searchQuery"
+        class="search-input"
+        type="text"
+        placeholder="Search name / org…"
+        spellcheck="false"
+      />
+    </div>
+
+    <button class="btn btn-primary new-btn" @click="startCreate">+ New User</button>
+
+    <div class="user-list">
+      <div v-if="!filteredUsers.length" class="list-empty">No users</div>
+      <div
+        v-for="u in filteredUsers"
+        :key="u.id"
+        class="user-item"
+        :class="{ active: selectedId === u.id && !isNew }"
+        @click="selectUser(u.id)"
+      >
+        <div class="user-main">
+          <span class="user-name">{{ u.name }}</span>
+          <span class="role-tag" :class="u.role">{{ u.role }}</span>
+          <span v-if="u.id === currentUser?.userId" class="you-tag">you</span>
+        </div>
+        <div class="user-sub">{{ u.orgName }}</div>
       </div>
     </div>
-    <p class="admin-hint">The first registered user becomes super admin. org_admin manages only own org.</p>
   </div>
 </template>
 
 <style scoped>
-.admin-panel {
+.admin-sidebar {
   display: none;
   flex-direction: column;
   flex: 1;
-  overflow-y: auto;
+  overflow: hidden;
 }
-.admin-panel.active {
+.admin-sidebar.active {
   display: flex;
 }
 
-.admin-panel :deep(.sidebar-header) {
+.sidebar-header {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
   padding: 8px 12px;
   font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  flex-shrink: 0;
 }
-.admin-panel :deep(.scope) {
+.count {
   font-size: 10px;
-  color: var(--text-muted);
-  text-transform: none;
-  letter-spacing: 0;
   font-weight: 400;
+  color: var(--text-muted);
+  background: var(--code-bg);
+  border-radius: 9px;
+  padding: 0 6px;
+  line-height: 1.6;
 }
 
-.admin-stats {
-  padding: 0;
+.search-box {
+  padding: 0 12px 8px;
+  flex-shrink: 0;
+}
+.search-input {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--text);
+  box-sizing: border-box;
+}
+.search-input:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
-.stat-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+.new-btn {
+  margin: 0 12px 8px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.user-list {
+  flex: 1;
+  overflow-y: auto;
+}
+.list-empty {
+  padding: 16px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.user-item {
   padding: 5px 12px;
+  cursor: pointer;
   border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
 }
-.stat-item:hover {
+.user-item:hover {
   background: var(--hover);
 }
-.stat-item:last-child {
-  border-bottom: none;
+.user-item.active {
+  background: var(--selection);
 }
-
-.stat-num {
-  font-size: 14px;
-  font-weight: 600;
+.user-item.active .user-name {
   color: var(--text);
-  min-width: 24px;
-  text-align: right;
-}
-.stat-label {
-  font-size: 11px;
-  color: var(--text-dim);
 }
 
-.admin-hint {
+.user-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.user-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-sub {
   font-size: 10px;
   color: var(--text-muted);
-  line-height: 1.4;
-  margin: 8px 12px;
+  margin-top: 1px;
+  padding-left: 2px;
+}
+.you-tag {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* 角色标签（与主区一致） */
+.role-tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 1.5;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.role-tag.admin {
+  background: #fde8ea;
+  color: #cf222e;
+}
+.role-tag.org_admin {
+  background: #fff4e1;
+  color: #b35900;
+}
+.role-tag.user {
+  background: var(--code-bg);
+  color: var(--text-dim);
 }
 </style>

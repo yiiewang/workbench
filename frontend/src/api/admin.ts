@@ -20,9 +20,10 @@ export interface Role {
   description: string
 }
 
-// 列出所有用户（GET /api/admin/users）
-export async function listUsers(): Promise<{ users: AdminUser[] }> {
-  return apiCall('/api/admin/users')
+// 列出用户（GET /api/admin/users），orgId 可选（超级 admin 过滤某 org）
+export async function listUsers(orgId?: number): Promise<{ users: AdminUser[] }> {
+  const q = orgId ? `?orgId=${orgId}` : ''
+  return apiCall('/api/admin/users' + q)
 }
 
 // 列出所有角色（GET /api/admin/roles）

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Admin 用户管理主区：用户表格 + 新建/编辑/重置密码/删除
+// UI 与项目整体保持一致：自定义 .modal-mask/.btn/.user-table + showToast/confirm
 import { ref, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { showToast } from '../lib/common'
 import * as adminApi from '../api/admin'
 import type { AdminUser, Role } from '../api/admin'
 
@@ -33,7 +34,7 @@ async function loadData() {
     // 通知侧栏统计卡刷新
     window.dispatchEvent(new Event('admin-users-refresh'))
   } catch (err: any) {
-    ElMessage.error(err.msg || err.message || 'Load failed')
+    showToast('Load failed: ' + (err.msg || err.message))
   } finally {
     loading.value = false
   }
@@ -46,7 +47,7 @@ function openCreate() {
 
 async function submitCreate() {
   if (!createForm.value.org.trim() || !createForm.value.name.trim() || !createForm.value.password) {
-    ElMessage.warning('Org, name and password are required')
+    showToast('Org, name and password are required')
     return
   }
   createLoading.value = true
@@ -58,11 +59,11 @@ async function submitCreate() {
       roleId: createForm.value.roleId,
       mobile: createForm.value.mobile.trim(),
     })
-    ElMessage.success('User created')
+    showToast('User created')
     createVisible.value = false
     loadData()
   } catch (err: any) {
-    ElMessage.error(err.msg || err.message || 'Create failed')
+    showToast('Create failed: ' + (err.msg || err.message))
   } finally {
     createLoading.value = false
   }
@@ -75,7 +76,7 @@ function openEdit(u: AdminUser) {
 
 async function submitEdit() {
   if (!editForm.value.name.trim()) {
-    ElMessage.warning('Name is required')
+    showToast('Name is required')
     return
   }
   editLoading.value = true
@@ -85,11 +86,11 @@ async function submitEdit() {
       mobile: editForm.value.mobile.trim(),
       roleId: editForm.value.roleId,
     })
-    ElMessage.success('User updated')
+    showToast('User updated')
     editVisible.value = false
     loadData()
   } catch (err: any) {
-    ElMessage.error(err.msg || err.message || 'Update failed')
+    showToast('Update failed: ' + (err.msg || err.message))
   } finally {
     editLoading.value = false
   }
@@ -102,40 +103,30 @@ function openResetPwd(u: AdminUser) {
 
 async function submitResetPwd() {
   if (!pwdForm.value.password) {
-    ElMessage.warning('Password is required')
+    showToast('Password is required')
     return
   }
   pwdLoading.value = true
   try {
     await adminApi.updateUser(pwdForm.value.id, { password: pwdForm.value.password })
-    ElMessage.success('Password reset')
+    showToast('Password reset')
     pwdVisible.value = false
   } catch (err: any) {
-    ElMessage.error(err.msg || err.message || 'Reset failed')
+    showToast('Reset failed: ' + (err.msg || err.message))
   } finally {
     pwdLoading.value = false
   }
 }
 
 async function onDelete(u: AdminUser) {
-  try {
-    await ElMessageBox.confirm(`Delete user "${u.name}" (${u.orgName})? This cannot be undone.`, 'Confirm', {
-      type: 'warning',
-      confirmButtonText: 'Delete',
-      cancelButtonText: 'Cancel',
-    })
-  } catch { return }
+  if (!confirm(`Delete user "${u.name}" (${u.orgName})? This cannot be undone.`)) return
   try {
     await adminApi.deleteUser(u.id)
-    ElMessage.success('User deleted')
+    showToast('User deleted')
     loadData()
   } catch (err: any) {
-    ElMessage.error(err.msg || err.message || 'Delete failed')
+    showToast('Delete failed: ' + (err.msg || err.message))
   }
-}
-
-function roleTagType(role: string) {
-  return role === 'admin' ? 'danger' : 'info'
 }
 
 onMounted(loadData)
@@ -148,83 +139,252 @@ onMounted(loadData)
         <h2>User Management</h2>
         <span class="admin-subtitle">{{ users.length }} users</span>
       </div>
-      <el-button type="primary" @click="openCreate">New User</el-button>
+      <button class="btn btn-primary" @click="openCreate">New User</button>
     </div>
 
-    <el-table :data="users" v-loading="loading" stripe>
-      <el-table-column prop="name" label="User" min-width="120" />
-      <el-table-column prop="orgName" label="Org" min-width="100" />
-      <el-table-column label="Role" width="100">
-        <template #default="{ row }">
-          <el-tag :type="roleTagType(row.role)" size="small">{{ row.role }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="Mobile" min-width="120">
-        <template #default="{ row }">{{ row.mobile || '—' }}</template>
-      </el-table-column>
-      <el-table-column prop="createdAt" label="Created" min-width="150" />
-      <el-table-column label="Actions" width="220" fixed="right">
-        <template #default="{ row }">
-          <el-button size="small" @click="openEdit(row)">Edit</el-button>
-          <el-button size="small" @click="openResetPwd(row)">Reset Pwd</el-button>
-          <el-button size="small" type="danger" @click="onDelete(row)">Delete</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+    <table class="user-table">
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Org</th>
+          <th>Role</th>
+          <th>Mobile</th>
+          <th>Created</th>
+          <th class="th-actions">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-if="loading">
+          <td colspan="6" class="cell-empty">Loading…</td>
+        </tr>
+        <tr v-else-if="!users.length">
+          <td colspan="6" class="cell-empty">No users yet</td>
+        </tr>
+        <tr v-for="u in users" :key="u.id">
+          <td class="cell-name">{{ u.name }}</td>
+          <td>{{ u.orgName }}</td>
+          <td><span class="role-tag" :class="u.role">{{ u.role }}</span></td>
+          <td class="cell-mobile">{{ u.mobile || '—' }}</td>
+          <td class="cell-created">{{ u.createdAt }}</td>
+          <td class="cell-actions">
+            <button class="btn btn-sm" @click="openEdit(u)">Edit</button>
+            <button class="btn btn-sm" @click="openResetPwd(u)">Reset Pwd</button>
+            <button class="btn btn-sm btn-danger" @click="onDelete(u)">Delete</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
 
     <!-- 新建用户 -->
-    <el-dialog v-model="createVisible" title="New User" width="420px">
-      <el-form label-width="90px">
-        <el-form-item label="Org"><el-input v-model="createForm.org" placeholder="org name" /></el-form-item>
-        <el-form-item label="Name"><el-input v-model="createForm.name" placeholder="user name" /></el-form-item>
-        <el-form-item label="Password"><el-input v-model="createForm.password" type="password" show-password /></el-form-item>
-        <el-form-item label="Role">
-          <el-select v-model="createForm.roleId" style="width: 100%">
-            <el-option v-for="r in roles" :key="r.id" :label="r.name" :value="r.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="Mobile"><el-input v-model="createForm.mobile" placeholder="optional" /></el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="createVisible = false">Cancel</el-button>
-        <el-button type="primary" :loading="createLoading" @click="submitCreate">Create</el-button>
-      </template>
-    </el-dialog>
+    <div v-if="createVisible" class="modal-mask" @click.self="createVisible = false">
+      <div class="modal-content admin-modal">
+        <div class="modal-header">New User</div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label class="form-label">Org</label>
+            <input v-model="createForm.org" class="form-input" placeholder="org name" />
+          </div>
+          <div class="form-row">
+            <label class="form-label">Name</label>
+            <input v-model="createForm.name" class="form-input" placeholder="user name" />
+          </div>
+          <div class="form-row">
+            <label class="form-label">Password</label>
+            <input v-model="createForm.password" type="password" class="form-input" />
+          </div>
+          <div class="form-row">
+            <label class="form-label">Role</label>
+            <select v-model="createForm.roleId" class="form-input">
+              <option v-for="r in roles" :key="r.id" :value="r.id">{{ r.name }}</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Mobile</label>
+            <input v-model="createForm.mobile" class="form-input" placeholder="optional" />
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" @click="createVisible = false">Cancel</button>
+          <button class="btn btn-primary" :disabled="createLoading" @click="submitCreate">Create</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 编辑用户 -->
-    <el-dialog v-model="editVisible" title="Edit User" width="420px">
-      <el-form label-width="90px">
-        <el-form-item label="Name"><el-input v-model="editForm.name" /></el-form-item>
-        <el-form-item label="Mobile"><el-input v-model="editForm.mobile" placeholder="optional" /></el-form-item>
-        <el-form-item label="Role">
-          <el-select v-model="editForm.roleId" style="width: 100%">
-            <el-option v-for="r in roles" :key="r.id" :label="r.name" :value="r.id" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="editVisible = false">Cancel</el-button>
-        <el-button type="primary" :loading="editLoading" @click="submitEdit">Save</el-button>
-      </template>
-    </el-dialog>
+    <div v-if="editVisible" class="modal-mask" @click.self="editVisible = false">
+      <div class="modal-content admin-modal">
+        <div class="modal-header">Edit User</div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label class="form-label">Name</label>
+            <input v-model="editForm.name" class="form-input" />
+          </div>
+          <div class="form-row">
+            <label class="form-label">Mobile</label>
+            <input v-model="editForm.mobile" class="form-input" placeholder="optional" />
+          </div>
+          <div class="form-row">
+            <label class="form-label">Role</label>
+            <select v-model="editForm.roleId" class="form-input">
+              <option v-for="r in roles" :key="r.id" :value="r.id">{{ r.name }}</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" @click="editVisible = false">Cancel</button>
+          <button class="btn btn-primary" :disabled="editLoading" @click="submitEdit">Save</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 重置密码 -->
-    <el-dialog v-model="pwdVisible" :title="`Reset Password — ${pwdForm.name}`" width="420px">
-      <el-form label-width="90px">
-        <el-form-item label="New Pwd"><el-input v-model="pwdForm.password" type="password" show-password /></el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="pwdVisible = false">Cancel</el-button>
-        <el-button type="primary" :loading="pwdLoading" @click="submitResetPwd">Reset</el-button>
-      </template>
-    </el-dialog>
+    <div v-if="pwdVisible" class="modal-mask" @click.self="pwdVisible = false">
+      <div class="modal-content admin-modal">
+        <div class="modal-header">Reset Password — {{ pwdForm.name }}</div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label class="form-label">New Pwd</label>
+            <input v-model="pwdForm.password" type="password" class="form-input" />
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" @click="pwdVisible = false">Cancel</button>
+          <button class="btn btn-primary" :disabled="pwdLoading" @click="submitResetPwd">Reset</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.admin-view { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; height: 100%; overflow: auto; box-sizing: border-box; }
-.admin-toolbar { display: flex; align-items: center; justify-content: space-between; }
-.admin-title { display: flex; align-items: baseline; gap: 10px; }
-.admin-title h2 { margin: 0; font-size: 20px; font-weight: 600; color: var(--fg, #1a1a1a); }
-.admin-subtitle { font-size: 13px; color: #999; }
+.admin-view {
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.admin-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.admin-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.admin-title h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.admin-subtitle {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* 用户表格：贴合 VS Code 风格（细边框、浅灰表头、hover 高亮） */
+.user-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  background: var(--bg);
+}
+.user-table th,
+.user-table td {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: middle;
+}
+.user-table th {
+  background: var(--header-bg);
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.user-table tbody tr:hover {
+  background: var(--hover);
+}
+.cell-name {
+  font-weight: 500;
+  color: var(--text);
+}
+.cell-mobile {
+  color: var(--text-dim);
+}
+.cell-created {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.cell-actions {
+  white-space: nowrap;
+  width: 1%;
+}
+.cell-actions .btn {
+  margin-right: 4px;
+}
+.cell-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 32px 0;
+}
+
+/* 角色标签：与 .share-item-meta .tag 风格一致 */
+.role-tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.role-tag.admin {
+  background: #fde8ea;
+  color: #cf222e;
+}
+.role-tag.user {
+  background: var(--code-bg);
+  color: var(--text-dim);
+}
+
+/* 弹窗：复用全局 .modal-mask/.modal-content，仅覆盖宽度 */
+.admin-modal {
+  width: 440px;
+  max-width: 92vw;
+}
+
+/* 表单：贴合项目输入框风格 */
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.form-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  box-sizing: border-box;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 204, 0.1);
+}
 </style>

@@ -49,10 +49,46 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.admin-panel { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-.admin-stats { display: flex; flex-direction: column; gap: 8px; }
-.stat-item { display: flex; align-items: baseline; gap: 8px; padding: 10px 12px; background: rgba(0,0,0,0.03); border-radius: 8px; }
-.stat-num { font-size: 22px; font-weight: 700; color: var(--accent, #007acc); }
-.stat-label { font-size: 12px; color: #999; }
-.admin-hint { font-size: 12px; color: #999; line-height: 1.5; margin: 4px 0 0; }
+.admin-panel {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+  overflow-y: auto;
+}
+.admin-panel.active {
+  display: flex;
+}
+
+.admin-stats {
+  padding: 4px 0;
+}
+
+.stat-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.stat-item:hover {
+  background: var(--hover);
+}
+
+.stat-num {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 28px;
+}
+.stat-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.admin-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 12px 16px;
+}
 </style>

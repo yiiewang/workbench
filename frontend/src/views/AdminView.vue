@@ -164,10 +164,10 @@ async function onDelete() {
       <button class="btn btn-primary" @click="openCreate">+ New User</button>
     </div>
 
-    <!-- 用户看板 -->
+    <!-- 用户看板：左侧概览 + 操作，右侧统计 + 详情，水平占满主区 -->
     <div v-else class="board">
-      <!-- 概览卡片 -->
-      <div class="overview-card">
+      <!-- 左侧：概览 + 操作按钮 -->
+      <div class="board-left">
         <div class="avatar">{{ selectedUser.name.charAt(0).toUpperCase() }}</div>
         <div class="overview-meta">
           <div class="ov-name">
@@ -178,38 +178,39 @@ async function onDelete() {
           <span class="role-tag" :class="selectedUser.role">{{ selectedUser.role }}</span>
         </div>
         <div class="overview-actions">
-          <button class="btn btn-sm" @click="openEdit">Edit</button>
-          <button class="btn btn-sm" @click="openPwd">Reset Pwd</button>
-          <button class="btn btn-sm btn-danger" :disabled="deleting" @click="onDelete">Delete</button>
+          <button class="btn btn-primary" @click="openEdit">Edit</button>
+          <button class="btn" @click="openPwd">Reset Pwd</button>
+          <button class="btn btn-danger" :disabled="deleting" @click="onDelete">Delete</button>
         </div>
       </div>
 
-      <!-- 统计卡片 -->
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-num">{{ dashboard?.totalTasks ?? '—' }}</div>
-          <div class="stat-label">Total Tasks</div>
+      <!-- 右侧：统计 + 详细信息 -->
+      <div class="board-right">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-num">{{ dashboard?.totalTasks ?? '—' }}</div>
+            <div class="stat-label">Total Tasks</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">{{ dashboard?.doneTasks ?? '—' }}</div>
+            <div class="stat-label">Done Tasks</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">{{ dashboard?.shareCount ?? '—' }}</div>
+            <div class="stat-label">Shares</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">{{ doneRate }}%</div>
+            <div class="stat-label">Done Rate</div>
+          </div>
         </div>
-        <div class="stat-card">
-          <div class="stat-num">{{ dashboard?.doneTasks ?? '—' }}</div>
-          <div class="stat-label">Done Tasks</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-num">{{ dashboard?.shareCount ?? '—' }}</div>
-          <div class="stat-label">Shares</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-num">{{ doneRate }}%</div>
-          <div class="stat-label">Done Rate</div>
-        </div>
-      </div>
 
-      <!-- 详细信息 -->
-      <div class="detail-card">
-        <div class="field-row"><span class="field-label">User ID</span><span class="field-value">{{ selectedUser.id }}</span></div>
-        <div class="field-row"><span class="field-label">Org ID</span><span class="field-value">{{ selectedUser.orgId }}</span></div>
-        <div class="field-row"><span class="field-label">Mobile</span><span class="field-value">{{ selectedUser.mobile || '—' }}</span></div>
-        <div class="field-row"><span class="field-label">Created</span><span class="field-value">{{ selectedUser.createdAt }}</span></div>
+        <div class="detail-card">
+          <div class="field-row"><span class="field-label">User ID</span><span class="field-value">{{ selectedUser.id }}</span></div>
+          <div class="field-row"><span class="field-label">Org ID</span><span class="field-value">{{ selectedUser.orgId }}</span></div>
+          <div class="field-row"><span class="field-label">Mobile</span><span class="field-value">{{ selectedUser.mobile || '—' }}</span></div>
+          <div class="field-row"><span class="field-label">Created</span><span class="field-value">{{ selectedUser.createdAt }}</span></div>
+        </div>
       </div>
     </div>
 
@@ -296,7 +297,7 @@ async function onDelete() {
 
 <style scoped>
 .admin-board {
-  padding: 16px 20px;
+  padding: 12px 16px;
   height: 100%;
   overflow: auto;
   box-sizing: border-box;
@@ -316,39 +317,42 @@ async function onDelete() {
 .empty-title { font-size: 14px; font-weight: 500; color: var(--text-dim); }
 .empty-hint { font-size: 12px; margin-bottom: 8px; }
 
-/* 看板 */
+/* 看板：左侧概览+操作 / 右侧统计+详情，水平占满主区 */
 .board {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  max-width: 640px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 12px;
+  width: 100%;
+  align-items: start;
 }
 
-/* 概览卡片 */
-.overview-card {
+/* 左侧：概览 + 操作 */
+.board-left {
   display: flex;
-  align-items: center;
-  gap: 14px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
 }
 .avatar {
-  width: 52px;
-  height: 52px;
+  width: 56px;
+  height: 56px;
   border-radius: 50%;
   background: var(--accent);
   color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 600;
+  margin: 0 auto;
   flex-shrink: 0;
 }
 .overview-meta {
-  flex: 1;
+  text-align: center;
   min-width: 0;
 }
 .ov-name {
@@ -357,6 +361,7 @@ async function onDelete() {
   color: var(--text);
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
 }
 .you-tag {
@@ -374,7 +379,18 @@ async function onDelete() {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  flex-shrink: 0;
+  margin-top: 4px;
+}
+.overview-actions .btn {
+  width: 100%;
+}
+
+/* 右侧：统计 + 详情 */
+.board-right {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
 }
 
 /* 角色标签 */
@@ -393,7 +409,7 @@ async function onDelete() {
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
+  gap: 10px;
 }
 .stat-card {
   padding: 14px 12px;

@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { loggedIn } from '../stores/auth'
+import { loggedIn, isAdmin } from '../stores/auth'
 import IndexView from '../views/IndexView.vue'
 import ExplorerSidebar from '../components/sidebar/ExplorerSidebar.vue'
 import SharesSidebar from '../components/sidebar/SharesSidebar.vue'
@@ -44,6 +44,14 @@ const router = createRouter({
           },
         },
         {
+          path: 'admin',
+          components: {
+            default: () => import('../views/AdminView.vue'),
+            sidebar: () => import('../components/sidebar/AdminSidebar.vue'),
+          },
+          meta: { requiresAdmin: true },
+        },
+        {
           path: 's/:token',
           components: { default: IndexView, sidebar: ExplorerSidebar },
           meta: { public: true },
@@ -59,11 +67,12 @@ const router = createRouter({
 })
 
 // 路由守卫：未登录用户访问受保护页面时跳转登录页，带 redirect 参数。
-// 公开路由（/login 和 /s/:token 分享页）不拦截。
+// 公开路由（/login 和 /s/:token 分享页）不拦截；/admin 额外要求 admin 角色。
 router.beforeEach((to) => {
   if (to.meta.public) return true
-  if (loggedIn.value) return true
-  return { path: '/login', query: { redirect: to.fullPath } }
+  if (!loggedIn.value) return { path: '/login', query: { redirect: to.fullPath } }
+  if (to.meta.requiresAdmin && !isAdmin.value) return { path: '/' }
+  return true
 })
 
 export default router

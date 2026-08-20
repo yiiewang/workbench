@@ -28,6 +28,20 @@ PORT=3000 STATIC_DIR=/var/www make run
 
 Then open http://localhost:80 in your browser.
 
+## First-time Setup (Admin Initialization)
+
+On first launch the `users` table is empty. The **first user to set a password automatically becomes the super admin** and gains access to the User Management panel:
+
+```bash
+curl -s -X POST http://localhost/api/set-password \
+  -H "Content-Type: application/json" \
+  -d '{"orgId":"cm","userId":"yiiewang","newPassword":"your-password"}'
+```
+
+Then log in as that user in the browser — the User Management icon appears in the activity bar (admin only). Use it to create more users, reset passwords, change roles, and manage organizations.
+
+Roles: `admin` (super admin, manages all users across orgs) and `user` (regular user).
+
 ## Configuration
 
 All settings in `config.yaml`:
@@ -77,6 +91,7 @@ logging:
 - **Route Mapping** — Clean URLs, display name aliases, redirects, directory listings
 - **Visit Tracking** — Per-visitor and per-page statistics persisted in SQLite (`GET /__stats__`)
 - **Token Auth** — HMAC-SHA256 authentication; all file access requires valid Bearer token (fully private mode)
+- **User Management** — Admin role with a user management UI (create / edit / reset-password / delete users across orgs)
 - **Share Management** — Create shares with access count limits, time ranges, optional passwords; manage all shares from sidebar panel
 - **Todo Board** — User/org task management with conflict detection, version sync, multi-device support
 - **SQLite Storage** — All data in a single portable `workbench.db` file (WAL mode)
@@ -98,6 +113,11 @@ logging:
 | `/api/share` | GET | List my shares (requires token) |
 | `/api/share` | POST | Create share `{resourcePath, resourceType, maxAccessCount, password, effectiveAt, expiresAt}` (requires token) |
 | `/api/share/{id}` | DELETE | Revoke share (requires token) |
+| `/api/admin/users` | GET | List all users across orgs (admin only) |
+| `/api/admin/users` | POST | Create user `{org, name, password, roleId, mobile}` (admin only) |
+| `/api/admin/users/{id}` | PATCH | Update user `{name?, mobile?, password?, roleId?}` (admin only) |
+| `/api/admin/users/{id}` | DELETE | Delete user (admin only, cannot delete self or last admin) |
+| `/api/admin/roles` | GET | List roles (admin only) |
 | `/s/{token}` | GET | Access shared resource (public, subject to share permissions) |
 | `/api/*`, `/tasks.json` | OPTIONS | CORS preflight (returns 204) |
 

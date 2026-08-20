@@ -30,6 +30,7 @@ async function doLogin() {
       orgId: data.user.orgId,
       userName: data.user.userName,
       orgName: data.user.orgName,
+      role: data.user.role || 'user',
     })
     const redirect = (route.query.redirect as string) || '/'
     router.replace(redirect)

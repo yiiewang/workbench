@@ -4,7 +4,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { dsMode, shareRootPath } from '../stores/indexStore'
-import { loggedIn, currentUser, clearAuth } from '../stores/auth'
+import { loggedIn, currentUser, isAdmin, clearAuth } from '../stores/auth'
 import { useSidebarResize } from '../composables/useSidebarResize'
 
 const {
@@ -20,6 +20,7 @@ const isExplorerActive = computed(() =>
 )
 const isSharesActive = computed(() => route.path === '/shares')
 const isTodoActive = computed(() => route.path === '/todo')
+const isAdminActive = computed(() => route.path === '/admin')
 
 // 折叠按钮 left 位置：activity-bar(48px) + sidebar 宽度 - 按钮一半宽度(6px)。
 // 分享模式无 activity-bar，偏移 0；折叠态 sidebar 宽度算 0。
@@ -34,6 +35,7 @@ const toggleBtnLeft = computed(() => {
 function handleExplorerClick() { router.push('/') }
 function handleShareClick() { router.push('/shares') }
 function handleTodoClick() { router.push('/todo') }
+function handleAdminClick() { router.push('/admin') }
 
 // 已登录 → 点击用户图标登出；未登录 → 跳登录页
 function onUserClick() {
@@ -58,6 +60,9 @@ function onUserClick() {
   </div>
   <div class="activity-item" :class="{ active: isTodoActive }" title="Todo 看板" @click="handleTodoClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+  </div>
+  <div v-if="isAdmin" class="activity-item" :class="{ active: isAdminActive }" title="用户管理" @click="handleAdminClick">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
   </div>
   <div class="activity-divider"></div>
   <!-- 用户图标：已登录显示头像（点击登出），未登录显示登录图标（跳转登录页） -->

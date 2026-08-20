@@ -25,12 +25,13 @@ import {
 /** 当前 Bearer token（从 localStorage 恢复，无则空串） */
 export const authToken = ref<string>(getAuthToken() || '')
 
-/** 认证用户信息：整数 id + 业务 name（双轨架构） */
+/** 认证用户信息：整数 id + 业务 name + 角色（双轨架构） */
 export interface AuthUser {
   userId: number
   orgId: number
   userName: string
   orgName: string
+  role: string
 }
 
 /** 当前登录用户（从 localStorage 恢复，无则 null） */
@@ -40,6 +41,9 @@ export const currentUser = ref<AuthUser | null>(
 
 /** 是否已登录（token + user 均存在） */
 export const loggedIn = computed(() => !!authToken.value && !!currentUser.value)
+
+/** 是否超级管理员（admin 角色） */
+export const isAdmin = computed(() => currentUser.value?.role === 'admin')
 
 // ============================================================
 // Actions
@@ -101,12 +105,13 @@ export async function checkAuth(): Promise<boolean> {
     if (resp.ok) {
       const body = await resp.json()
       if (body.data && body.data.userId) {
-        // 刷新 user 信息（后端返回整数 id 与 name）
+        // 刷新 user 信息（后端返回整数 id、name 与 role）
         const user: AuthUser = {
           userId: body.data.userId,
           orgId: body.data.orgId,
           userName: body.data.userName,
           orgName: body.data.orgName,
+          role: body.data.role || 'user',
         }
         saveAuthState(token, user)
         currentUser.value = user

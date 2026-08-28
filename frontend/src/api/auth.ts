@@ -20,3 +20,49 @@ export async function setPassword(userId: string, password: string, orgId?: stri
     body: JSON.stringify({ orgId: orgId || '', userId, newPassword: password }),
   })
 }
+
+// ============================================================
+// 组织上下文（RBAC 阶段 C）
+// ============================================================
+
+// 组织信息（与后端 db.UserOrgContext 对应，内部角色 owner/admin/member）
+export interface OrgInfo {
+  orgId: number
+  orgName: string
+  role: string
+  status: string
+  features: string[]
+}
+
+// userinfo 聚合接口载荷（与后端 userinfoData 对应）
+export interface UserInfo {
+  user: {
+    userId: number
+    userName: string
+    mobile: string
+    isPlatformAdmin: boolean
+  }
+  orgs: OrgInfo[]
+  currentOrgId: number
+  role: string
+  features: string[]
+}
+
+// 聚合接口：一次返回用户全部上下文（GET /api/userinfo）
+export async function fetchUserInfo(): Promise<UserInfo> {
+  return apiCall('/api/userinfo')
+}
+
+// 组织切换（POST /api/org/switch）
+export async function switchOrg(orgId: number) {
+  return apiCall('/api/org/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orgId }),
+  })
+}
+
+// 当前组织功能列表（GET /api/org/features）
+export async function fetchFeatures(): Promise<{ features: string[] }> {
+  return apiCall('/api/org/features')
+}

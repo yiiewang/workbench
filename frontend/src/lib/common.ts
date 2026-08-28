@@ -6,6 +6,8 @@
 // 统一的 localStorage key
 export const STORAGE_KEY_TOKEN = 'workbench_auth_token';
 export const STORAGE_KEY_USER = 'workbench-current-user';
+export const STORAGE_KEY_ORG = 'workbench-current-org';
+export const STORAGE_KEY_FEATURES = 'workbench-current-features';
 export const STORAGE_KEY_SHARE_PWD = 'workbench-share-pwd';
 
 // ============================================================
@@ -17,10 +19,46 @@ export function getAuthToken() {
   return localStorage.getItem(STORAGE_KEY_TOKEN) || '';
 }
 
-/** 获取 Authorization header（无 token 时返回空对象） */
+/** 读取当前组织 id（localStorage 持久化，无则 null） */
+export function getCurrentOrgId(): number | null {
+  const v = localStorage.getItem(STORAGE_KEY_ORG);
+  if (!v) return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** 持久化当前组织 id（null 表示清除） */
+export function setCurrentOrgId(id: number | null) {
+  if (id == null) localStorage.removeItem(STORAGE_KEY_ORG);
+  else localStorage.setItem(STORAGE_KEY_ORG, String(id));
+}
+
+/** 读取当前组织启用的功能列表（localStorage 持久化，无则空数组） */
+export function getFeatures(): string[] {
+  try {
+    const v = localStorage.getItem(STORAGE_KEY_FEATURES);
+    if (!v) return [];
+    const arr = JSON.parse(v);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 持久化当前组织启用的功能列表（null 表示清除） */
+export function setFeatures(features: string[] | null) {
+  if (features == null) localStorage.removeItem(STORAGE_KEY_FEATURES);
+  else localStorage.setItem(STORAGE_KEY_FEATURES, JSON.stringify(features));
+}
+
+/** 获取请求头：Authorization（带 token 时）+ X-Org-Id（有当前组织时） */
 export function authHeaders() {
+  const headers: Record<string, string> = {};
   const token = getAuthToken();
-  return token ? { 'Authorization': 'Bearer ' + token } : {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const orgId = getCurrentOrgId();
+  if (orgId) headers['X-Org-Id'] = String(orgId);
+  return headers;
 }
 
 /** 带 token 的 fetch 包装 */
@@ -34,6 +72,8 @@ export function authFetch(url: string, opts: any = {}) {
 export function clearAuthState() {
   localStorage.removeItem(STORAGE_KEY_TOKEN);
   localStorage.removeItem(STORAGE_KEY_USER);
+  localStorage.removeItem(STORAGE_KEY_ORG);
+  localStorage.removeItem(STORAGE_KEY_FEATURES);
 }
 
 /** 持久化登录态 */
@@ -73,8 +113,9 @@ export const API_CODE = {
  */
 export async function apiCall(url: string, opts: any = {}) {
   const resp = await authFetch(url, opts);
-  // 401 全局拦截：跳转登录页（排除 /api/login 和 /api/me 自身，避免循环）
-  if (resp.status === 401 && !url.startsWith('/api/login') && !url.startsWith('/api/me')) {
+  // 401 全局拦截：跳转登录页（排除 /api/login、/api/me 自身，避免循环；
+  // 排除 /api/share——分享需要密码/密码错误时后端也返回 401，应走下方业务码分支弹密码框而非跳登录）
+  if (resp.status === 401 && !url.startsWith('/api/login') && !url.startsWith('/api/me') && !url.startsWith('/api/share')) {
     clearAuthState();
     const current = window.location.pathname + window.location.search;
     if (!current.startsWith('/login')) {

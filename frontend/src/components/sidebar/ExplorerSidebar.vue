@@ -5,13 +5,18 @@
 //     侧栏只展示分享根范围内的内容，且 onMounted 不再触发 treeStore.loadDir('/')
 //     （避免在 dsMode 切换前误用浏览器模式请求暴露完整目录）
 import { onMounted, watch, computed } from 'vue'
+import { useRoute } from 'vue-router'
 import { activeTabPath, dsMode, shareRootPath } from '../../stores/indexStore'
 import { treeStore } from '../../composables/useTreeStore'
 import TreeNode from './TreeNode.vue'
 
-// 浏览器模式：挂载时按需加载根目录；分享模式由 useIndexApp 在 initApp 中加载
+// 浏览器模式：挂载时按需加载根目录；分享模式由 useIndexApp 在 initApp 中加载。
+// 注意：不能用 dsMode==='share' 判断——ExplorerSidebar 是 IndexView 的兄弟子组件，
+// 挂载先于 IndexView.onMounted（Ms 里才设置 dsMode='share'），会误触发 loadDir('/')
+// 导致未登录访问分享页时 /api/tree 401 全局跳登录。改用路由判断，组件 setup 时即可读。
+const route = useRoute()
 onMounted(async () => {
-  if (dsMode.value === 'share') return
+  if (route.path.startsWith('/s/')) return
   if (!treeStore.dirCache.has('/')) {
     try {
       await treeStore.loadDir('/')
@@ -34,22 +39,8 @@ const rootPath = computed<string | null>(() => {
   }
   return '/'
 })
-
-// 侧栏 header：分享模式显示 "SHARED: {分享根的 basename}"，浏览器模式显示 "EXPLORER"
-const headerText = computed(() => {
-  if (dsMode.value !== 'share') return 'EXPLORER'
-  const root = shareRootPath.value
-  if (!root || root === '/') return 'SHARED'
-  const basename = root.split('/').filter(Boolean).pop() || root
-  return 'SHARED: ' + basename
-})
 </script>
 
 <template>
-  <div class="tree-panel active" id="explorerPanel">
-    <div class="sidebar-header">{{ headerText }}</div>
-    <div class="file-tree" id="tree">
-      <TreeNode v-if="rootPath" :path="rootPath" :depth="0" />
-    </div>
-  </div>
+  <TreeNode v-if="rootPath" :path="rootPath" :depth="0" />
 </template>

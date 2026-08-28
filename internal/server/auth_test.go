@@ -8,38 +8,38 @@ import (
 
 func TestGenerateAndValidateToken(t *testing.T) {
 	secret := []byte("test-secret")
-	tok := GenerateToken(1, 1, secret, 30)
+	tok := GenerateToken(1, secret, 30)
 	if tok == "" {
 		t.Fatal("empty token")
 	}
-	ok, orgID, uid := ValidateToken(tok, secret)
-	if !ok || orgID != 1 || uid != 1 {
-		t.Fatalf("validate = %v,%d,%d want true,1,1", ok, orgID, uid)
+	ok, uid := ValidateToken(tok, secret)
+	if !ok || uid != 1 {
+		t.Fatalf("validate = %v,%d want true,1", ok, uid)
 	}
 }
 
 func TestValidateToken_Expired(t *testing.T) {
 	secret := []byte("s")
 	// expiryDays=-1 → 已过期
-	tok := GenerateToken(1, 2, secret, -1)
-	if ok, _, _ := ValidateToken(tok, secret); ok {
+	tok := GenerateToken(2, secret, -1)
+	if ok, _ := ValidateToken(tok, secret); ok {
 		t.Fatal("expired token should be invalid")
 	}
 }
 
 func TestValidateToken_WrongSecret(t *testing.T) {
-	tok := GenerateToken(1, 1, []byte("secret-a"), 30)
-	if ok, _, _ := ValidateToken(tok, []byte("secret-b")); ok {
+	tok := GenerateToken(1, []byte("secret-a"), 30)
+	if ok, _ := ValidateToken(tok, []byte("secret-b")); ok {
 		t.Fatal("token verified with wrong secret should be invalid")
 	}
 }
 
 func TestValidateToken_Tampered(t *testing.T) {
 	secret := []byte("s")
-	tok := GenerateToken(1, 1, secret, 30)
+	tok := GenerateToken(1, secret, 30)
 	// 篡改尾部签名
 	tampered := tok[:len(tok)-4] + "AAAA"
-	if ok, _, _ := ValidateToken(tampered, secret); ok {
+	if ok, _ := ValidateToken(tampered, secret); ok {
 		t.Fatal("tampered token should be invalid")
 	}
 }
@@ -47,7 +47,7 @@ func TestValidateToken_Tampered(t *testing.T) {
 func TestValidateToken_Malformed(t *testing.T) {
 	secret := []byte("s")
 	for _, bad := range []string{"", "not-base64!!!", "####", "aGVsbG8="} {
-		if ok, _, _ := ValidateToken(bad, secret); ok {
+		if ok, _ := ValidateToken(bad, secret); ok {
 			t.Fatalf("malformed token %q should be invalid", bad)
 		}
 	}

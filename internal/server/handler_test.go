@@ -63,7 +63,7 @@ func createUser(t *testing.T, d *db.DB, secret []byte, orgName, userName, passwo
 	if err != nil {
 		t.Fatal(err)
 	}
-	return GenerateToken(orgID, userID, secret, 30)
+	return GenerateToken(userID, secret, 30)
 }
 
 // createAdminUser 创建一个 admin 角色用户，返回可直接用的 token。
@@ -81,7 +81,7 @@ func createAdminUser(t *testing.T, d *db.DB, secret []byte, orgName, userName, p
 	if err != nil {
 		t.Fatal(err)
 	}
-	return GenerateToken(orgID, userID, secret, 30)
+	return GenerateToken(userID, secret, 30)
 }
 
 // createOrgAdminUser 创建一个 org_admin 角色用户，返回可直接用的 token。
@@ -99,7 +99,7 @@ func createOrgAdminUser(t *testing.T, d *db.DB, secret []byte, orgName, userName
 	if err != nil {
 		t.Fatal(err)
 	}
-	return GenerateToken(orgID, userID, secret, 30)
+	return GenerateToken(userID, secret, 30)
 }
 
 func authHeader(token string) string { return "Bearer " + token }
@@ -218,7 +218,7 @@ func TestHandler_Me(t *testing.T) {
 	obj.Value("data").Object().Value("userId").Equal(1)
 
 	// 过期 token → 401
-	expired := GenerateToken(1, 1, secret, -1)
+	expired := GenerateToken(1, secret, -1)
 	e.GET("/api/me").WithHeader("Authorization", authHeader(expired)).
 		Expect().Status(http.StatusUnauthorized)
 }
@@ -542,4 +542,36 @@ func TestHandler_OrgAdmin_CannotGrantAdminRole(t *testing.T) {
 	e.PATCH("/api/admin/users/2").WithHeader("Authorization", authHeader(orgAdminTok)).
 		WithJSON(map[string]any{"roleId": db.RoleIDOrgAdmin}).
 		Expect().Status(http.StatusOK)
+}
+
+// ============================================================
+// 组织切换（X-Org-Id 请求头）
+// ============================================================
+
+func TestHandler_OrgSwitchViaHeader(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	tok := createUser(t, d, secret, "org1", "alice", "p")
+
+	// 再绑定 alice 到 org2（多组织）
+	org2, _ := d.EnsureOrg(context.Background(), "org2")
+	userID, _ := d.FindUserIDByName(context.Background(), "alice")
+	if err := d.AddUserOrg(context.Background(), userID, org2, db.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+
+	// 不带 X-Org-Id → 默认组织 org1
+	obj := e.GET("/api/me").WithHeader("Authorization", authHeader(tok)).
+		Expect().Status(http.StatusOK).JSON().Object()
+	obj.Value("data").Object().Value("orgName").Equal("org1")
+
+	// 带 X-Org-Id: org2 → 切到 org2
+	obj2 := e.GET("/api/me").WithHeader("Authorization", authHeader(tok)).
+		WithHeader("X-Org-Id", strconv.FormatInt(org2, 10)).
+		Expect().Status(http.StatusOK).JSON().Object()
+	obj2.Value("data").Object().Value("orgName").Equal("org2")
+
+	// 带 X-Org-Id: 不存在的组织 → 403
+	e.GET("/api/me").WithHeader("Authorization", authHeader(tok)).
+		WithHeader("X-Org-Id", "9999").
+		Expect().Status(http.StatusForbidden)
 }

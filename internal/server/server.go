@@ -72,7 +72,7 @@ func (s *Server) App() *iris.Application {
 	// /api 统一分组
 	// ============================================================
 	api := app.Party("/api")
-	auth := AuthMiddleware(s.tokenSecret, s.db.GetUserIdentity)
+	auth := AuthMiddleware(s.tokenSecret, s.db.ResolveUserOrgIdentity)
 
 	// 公开 API（无需鉴权）
 	api.Post("/login", s.handleLogin)
@@ -84,6 +84,9 @@ func (s *Server) App() *iris.Application {
 
 	// 需要鉴权的 API
 	api.Get("/me", auth, s.handleMe)
+	api.Get("/userinfo", auth, s.handleUserInfo)
+	api.Post("/org/switch", auth, s.handleOrgSwitch)
+	api.Get("/org/features", auth, s.handleOrgFeatures)
 	api.Get("/stats", auth, s.handleStats)
 	api.Get("/map", auth, s.handleMap)
 	api.Get("/tree", auth, s.handleTree)
@@ -110,6 +113,8 @@ func (s *Server) App() *iris.Application {
 	admin.Delete("/users/{id}", s.handleAdminDeleteUser)
 	admin.Get("/roles", s.handleAdminListRoles)
 	admin.Get("/users/{id}/dashboard", s.handleAdminUserDashboard)
+	admin.Get("/users/{id}/features", s.handleAdminListUserFeatures)
+	admin.Patch("/users/{id}/features/{code}", s.handleAdminUpdateUserFeature)
 
 	// CORS 预检（sandboxed iframe null origin）
 	noop := func(ctx iris.Context) { ctx.StatusCode(204) }
@@ -123,6 +128,8 @@ func (s *Server) App() *iris.Application {
 	api.Options("/admin/users", noop)
 	api.Options("/admin/users/{id}", noop)
 	api.Options("/admin/roles", noop)
+	api.Options("/admin/users/{id}/features", noop)
+	api.Options("/admin/users/{id}/features/{code}", noop)
 
 	// ============================================================
 	// /s 分享页面（公开 URL，不走 /api）
@@ -267,14 +274,13 @@ func (s *Server) handleLogin(ctx iris.Context) {
 
 	// 用户名全局唯一：orgId 可选。填了则按 org+name 校验，留空则按 name 全局匹配。
 	var orgID, userID int64
-	var pwdHash, role, orgName string
+	var pwdHash string
 	var exists bool
 	var err error
 	if req.OrgID != "" {
-		orgID, userID, pwdHash, role, exists, err = s.db.FindUserByName(rctx, req.OrgID, req.UserID)
-		orgName = req.OrgID
+		orgID, userID, pwdHash, _, exists, err = s.db.FindUserByName(rctx, req.OrgID, req.UserID)
 	} else {
-		orgID, orgName, userID, pwdHash, role, exists, err = s.db.FindUserByGlobalName(rctx, req.UserID)
+		orgID, _, userID, pwdHash, _, exists, err = s.db.FindUserByGlobalName(rctx, req.UserID)
 	}
 	if err != nil {
 		serverError(ctx, "find user failed", err, "org", req.OrgID, "user", req.UserID)
@@ -292,8 +298,25 @@ func (s *Server) handleLogin(ctx iris.Context) {
 	}
 
 	s.clearLoginFailures(rctx, ip)
-	token := GenerateToken(orgID, userID, s.tokenSecret, s.expiryDays())
-	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: orgName, Role: role}})
+
+	// 组织上下文：优先登录指定的 org（FindUserByName 校验过的），否则回退用户默认组织
+	resolvedOrgID, resOrgName, _, orgRole, platformAdmin, err := s.db.ResolveUserOrgIdentity(rctx, userID, orgID)
+	if err != nil || resolvedOrgID == 0 {
+		resolvedOrgID, resOrgName, _, orgRole, platformAdmin, err = s.db.ResolveUserOrgIdentity(rctx, userID, 0)
+		if err != nil || resolvedOrgID == 0 {
+			serverError(ctx, "resolve user org failed", err)
+			return
+		}
+	}
+
+	token := GenerateToken(userID, s.tokenSecret, s.expiryDays())
+	writeOK(ctx, loginData{Token: token, User: userBrief{
+		UserID:   userID,
+		OrgID:    resolvedOrgID,
+		UserName: req.UserID,
+		OrgName:  resOrgName,
+		Role:     externalRole(orgRole, platformAdmin),
+	}})
 }
 
 // ============================================================
@@ -325,7 +348,7 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 		return
 	}
 
-	_, userID, pwdHash, role, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
+	_, userID, pwdHash, _, exists, err := s.db.FindUserByName(rctx, req.OrgID, req.UserID)
 	if err != nil {
 		serverError(ctx, "find user failed", err, "org", req.OrgID, "user", req.UserID)
 		return
@@ -364,9 +387,8 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 	}
 
 	if !exists {
-		// 首用户 → admin
+		// 首用户 → admin（UpsertUser 会设置 is_platform_admin 标志与组织关系）
 		userID, err = s.db.UpsertUser(rctx, orgID, req.UserID, newHash, db.RoleIDAdmin)
-		role = roleNameAdmin
 	} else {
 		// 改密/激活：按 org+id 更新密码，不改角色
 		err = s.db.SetUserPassword(rctx, orgID, userID, newHash)
@@ -376,8 +398,16 @@ func (s *Server) handleSetPassword(ctx iris.Context) {
 		return
 	}
 
-	token := GenerateToken(orgID, userID, s.tokenSecret, s.expiryDays())
-	writeOK(ctx, loginData{Token: token, User: userBrief{UserID: userID, OrgID: orgID, UserName: req.UserID, OrgName: req.OrgID, Role: role}})
+	// 解析组织上下文（orgID 已在上面 EnsureOrg/FindUserByName 确定）
+	resolvedOrgID, resOrgName, _, orgRole, platformAdmin, err := s.db.ResolveUserOrgIdentity(rctx, userID, orgID)
+	if err != nil || resolvedOrgID == 0 {
+		serverError(ctx, "resolve user org failed", err)
+		return
+	}
+
+	token := GenerateToken(userID, s.tokenSecret, s.expiryDays())
+	writeOK(ctx, loginData{Token: token, User: userBrief{
+		UserID: userID, OrgID: resolvedOrgID, UserName: req.UserID, OrgName: resOrgName, Role: externalRole(orgRole, platformAdmin)}})
 }
 
 // ============================================================
@@ -831,20 +861,30 @@ func (s *Server) handleStaticWithAuth(ctx iris.Context) {
 		writeFail(ctx, iris.StatusUnauthorized, CodeUnauthorized)
 		return
 	}
-	valid, orgID, userID := ValidateToken(token, s.tokenSecret)
+	valid, userID := ValidateToken(token, s.tokenSecret)
 	if !valid {
 		writeFail(ctx, iris.StatusUnauthorized, CodeInvalidToken)
 		return
 	}
-	// 反查 name 写入 ctx（静态文件服务 userRoot 按 name 拼目录）
-	orgName, userName := "", ""
-	if on, un, err := s.db.GetUserNames(context.Background(), orgID, userID); err == nil {
-		orgName, userName = on, un
+	// 组织上下文：X-Org-Id 头（可选），缺省默认组织
+	orgID := int64(0)
+	if h := ctx.GetHeader("X-Org-Id"); h != "" {
+		if v, err := strconv.ParseInt(strings.TrimSpace(h), 10, 64); err == nil {
+			orgID = v
+		}
+	}
+	resolvedOrgID, orgName, userName, orgRole, isPlatformAdmin, err := s.db.ResolveUserOrgIdentity(context.Background(), userID, orgID)
+	if err != nil || resolvedOrgID == 0 {
+		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
+		return
 	}
 	ctx.Values().Set("userID", userID)
-	ctx.Values().Set("orgID", orgID)
+	ctx.Values().Set("orgID", resolvedOrgID)
 	ctx.Values().Set("userName", userName)
 	ctx.Values().Set("orgName", orgName)
+	ctx.Values().Set("orgRole", orgRole)
+	ctx.Values().Set("isPlatformAdmin", isPlatformAdmin)
+	ctx.Values().Set("role", externalRole(orgRole, isPlatformAdmin))
 	s.handleStatic(ctx)
 }
 

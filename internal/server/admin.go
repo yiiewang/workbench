@@ -64,7 +64,7 @@ func (s *Server) handleAdminUserDashboard(ctx iris.Context) {
 		return
 	}
 	// org_admin 只能看自己 org 用户的看板
-	if !isSuperAdmin(ctx) && target.OrgID != currentOrgID(ctx) {
+	if !s.requireSameOrg(ctx, userID) {
 		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only view users in own org")
 		return
 	}
@@ -169,7 +169,7 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 		return
 	}
 	// org_admin 只能操作自己 org 的用户
-	if !isSuperAdmin(ctx) && target.OrgID != currentOrgID(ctx) {
+	if !s.requireSameOrg(ctx, userID) {
 		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only manage users in own org")
 		return
 	}
@@ -211,7 +211,12 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 				return
 			}
 		}
-		if err := s.db.UpdateUserRoleByID(rctx, userID, *req.RoleID); err != nil {
+		// 角色是组织级（user_orgs.role）：super admin 改主组织，org_admin 改当前组织
+		targetOrgID := target.OrgID
+		if !isSuperAdmin(ctx) {
+			targetOrgID = currentOrgID(ctx)
+		}
+		if err := s.db.UpdateUserRoleByID(rctx, userID, targetOrgID, *req.RoleID); err != nil {
 			serverError(ctx, "update user role failed", err, "user", userID)
 			return
 		}
@@ -298,7 +303,7 @@ func (s *Server) handleAdminDeleteUser(ctx iris.Context) {
 		return
 	}
 	// org_admin 只能删自己 org 的用户
-	if !isSuperAdmin(ctx) && target.OrgID != currentOrgID(ctx) {
+	if !s.requireSameOrg(ctx, userID) {
 		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only delete users in own org")
 		return
 	}
@@ -324,4 +329,93 @@ func (s *Server) handleAdminDeleteUser(ctx iris.Context) {
 		return
 	}
 	writeOK(ctx, map[string]any{"deleted": userID})
+}
+
+// requireSameOrg 校验目标用户是否属于当前会话组织（org_admin 越权防护）。
+// 平台超级管理员（isSuperAdmin）跨 org，直接放行。
+func (s *Server) requireSameOrg(ctx iris.Context, targetUserID int64) bool {
+	if isSuperAdmin(ctx) {
+		return true
+	}
+	uo, err := s.db.GetUserOrg(ctx.Request().Context(), targetUserID, currentOrgID(ctx))
+	if err != nil || uo == nil || uo.Status != db.StatusActive {
+		return false
+	}
+	return true
+}
+
+// ============================================================
+// 成员功能配置（user_org_feature，per-user-per-org）—— 组织 owner/admin 与平台 admin 均可用
+// 操作对象为「某成员在当前会话组织」（currentOrgID，即 X-Org-Id 头）的功能开关
+// ============================================================
+
+// GET /api/admin/users/{id}/features — 列出某成员在当前组织的全部功能及启用状态
+func (s *Server) handleAdminListUserFeatures(ctx iris.Context) {
+	rctx := ctx.Request().Context()
+	userID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	if err != nil {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid user id")
+		return
+	}
+	orgID := currentOrgID(ctx)
+
+	// org_admin 只能配置自己 org 成员
+	if !s.requireSameOrg(ctx, userID) {
+		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only manage users in own org")
+		return
+	}
+
+	features, err := s.db.ListUserOrgFeaturesWithState(rctx, userID, orgID)
+	if err != nil {
+		serverError(ctx, "list user org features failed", err, "user", userID, "org", orgID)
+		return
+	}
+	writeOK(ctx, userFeaturesStateData{Features: features})
+}
+
+// PATCH /api/admin/users/{id}/features/{code} — 更新某成员在当前组织的某功能启用状态
+func (s *Server) handleAdminUpdateUserFeature(ctx iris.Context) {
+	rctx := ctx.Request().Context()
+	userID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	if err != nil {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid user id")
+		return
+	}
+	orgID := currentOrgID(ctx)
+
+	// org_admin 只能配置自己 org 成员
+	if !s.requireSameOrg(ctx, userID) {
+		writeFailMsg(ctx, iris.StatusForbidden, CodeForbidden, "org_admin can only manage users in own org")
+		return
+	}
+
+	code := strings.TrimSpace(ctx.Params().Get("code"))
+	if !isValidFeature(code) {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid feature code")
+		return
+	}
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readJSON(ctx, &req); err != nil {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
+		return
+	}
+
+	if err := s.db.UpsertUserOrgFeature(rctx, userID, orgID, code, req.Enabled); err != nil {
+		serverError(ctx, "update user org feature failed", err, "user", userID, "org", orgID, "feature", code)
+		return
+	}
+	writeOK(ctx, map[string]any{"featureCode": code, "enabled": req.Enabled})
+}
+
+// isValidFeature 校验功能标识是否在白名单内
+func isValidFeature(code string) bool {
+	for _, f := range db.AllFeatures {
+		if f == code {
+			return true
+		}
+	}
+	return false
 }

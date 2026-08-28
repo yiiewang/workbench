@@ -1,22 +1,75 @@
 <script setup lang="ts">
 // Admin 用户管理主区：右侧用户看板（信息概览 + 统计卡片）
 // 创建/编辑/重置密码/删除均通过弹窗操作
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { showToast } from '../lib/common'
 import * as adminApi from '../api/admin'
+import type { UserOrgFeature } from '../api/admin'
 import {
   roles,
+  users,
+  selectedId,
   selectedUser,
   dashboard,
   loadAdminData,
   selectUser,
   clearSelectionIfDeleted,
-  startCreate,
+  createVisible,
+  openCreate,
+  closeCreate,
 } from '../stores/adminStore'
-import { isAdmin, currentUser } from '../stores/auth'
+import { isAdmin, currentUser, refreshFeatures } from '../stores/auth'
+
+// ============ 成员功能配置（per-user-per-org） ============
+// 功能标识 → 展示名（UI 全英文）
+const featureLabels: Record<string, string> = {
+  file: 'File Browser',
+  share: 'Share',
+  todo: 'Todo Board',
+  admin: 'User Management',
+}
+const userFeatures = ref<UserOrgFeature[]>([])
+const featuresLoading = ref(false)
+
+// 选中用户变化时，加载该用户在当前组织的功能配置
+watch(selectedUser, (u) => {
+  if (u) {
+    loadUserFeatures(u.id)
+  } else {
+    userFeatures.value = []
+  }
+})
+
+async function loadUserFeatures(userId: number) {
+  featuresLoading.value = true
+  try {
+    const data = await adminApi.listUserFeatures(userId)
+    userFeatures.value = data.features || []
+  } catch {
+    userFeatures.value = []
+  } finally {
+    featuresLoading.value = false
+  }
+}
+
+async function toggleFeature(code: string, enabled: boolean) {
+  const u = selectedUser.value
+  if (!u) return
+  try {
+    await adminApi.updateUserFeature(u.id, code, enabled)
+    showToast(`${featureLabels[code] || code} ${enabled ? 'enabled' : 'disabled'}`)
+    await loadUserFeatures(u.id)
+    // 仅当配置的是当前登录用户自己时，才刷新全局功能集合（动态菜单即时生效）
+    if (u.id === currentUser.value?.userId) {
+      await refreshFeatures()
+    }
+  } catch (err: any) {
+    showToast('Update failed: ' + (err.msg || err.message))
+    await loadUserFeatures(u.id) // 回滚本地状态
+  }
+}
 
 // ============ 弹窗状态 ============
-const createVisible = ref(false)
 const editVisible = ref(false)
 const pwdVisible = ref(false)
 const saving = ref(false)
@@ -41,7 +94,9 @@ const doneRate = computed(() => {
 })
 
 // ============ 新建 ============
-function openCreate() {
+// 打开新建弹窗时初始化表单（org 字段：admin 可跨 org，org_admin 锁定自己 org）
+watch(createVisible, (v) => {
+  if (!v) return
   createForm.value = {
     org: isAdmin.value ? '' : (currentUser.value?.orgName || ''),
     name: '',
@@ -49,8 +104,14 @@ function openCreate() {
     roleId: 2,
     mobile: '',
   }
-  createVisible.value = true
-}
+})
+
+// 进入页面时若无选中用户，默认选中第一个用户，保证 main 始终展示看板
+watch(users, (list) => {
+  if (selectedId.value == null && list.length > 0) {
+    selectUser(list[0].id)
+  }
+}, { immediate: true })
 
 async function submitCreate() {
   if (!createForm.value.org.trim() || !createForm.value.name.trim() || !createForm.value.password) {
@@ -67,7 +128,7 @@ async function submitCreate() {
       mobile: createForm.value.mobile.trim(),
     })
     showToast('User created')
-    createVisible.value = false
+    closeCreate()
     await loadAdminData()
     selectUser(created.id)
   } catch (err: any) {
@@ -211,11 +272,36 @@ async function onDelete() {
           <div class="field-row"><span class="field-label">Mobile</span><span class="field-value">{{ selectedUser.mobile || '—' }}</span></div>
           <div class="field-row"><span class="field-label">Created</span><span class="field-value">{{ selectedUser.createdAt }}</span></div>
         </div>
+
+        <!-- 成员功能配置：当前选中用户在当前组织的功能开关（owner/admin 与平台 admin 可操作） -->
+        <div class="features-panel">
+          <div class="features-header">
+            <span class="features-title">Member Features</span>
+            <span class="features-sub">{{ selectedUser.name }}</span>
+          </div>
+          <div v-if="featuresLoading" class="features-empty">Loading…</div>
+          <div v-else class="features-list">
+            <div v-for="f in userFeatures" :key="f.featureCode" class="feature-item">
+              <div class="feature-info">
+                <div class="feature-name">{{ featureLabels[f.featureCode] || f.featureCode }}</div>
+                <div class="feature-code">{{ f.featureCode }}</div>
+              </div>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="f.enabled"
+                  @change="toggleFeature(f.featureCode, ($event.target as HTMLInputElement).checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
     <!-- 新建用户弹窗 -->
-    <div v-if="createVisible" class="modal-mask" @click.self="createVisible = false">
+    <div v-if="createVisible" class="modal-mask" @click.self="closeCreate()">
       <div class="modal-content admin-modal">
         <div class="modal-header">New User</div>
         <div class="modal-body">
@@ -243,7 +329,7 @@ async function onDelete() {
           </div>
         </div>
         <div class="modal-actions">
-          <button class="btn" @click="createVisible = false">Cancel</button>
+          <button class="btn" @click="closeCreate()">Cancel</button>
           <button class="btn btn-primary" :disabled="saving" @click="submitCreate">Create</button>
         </div>
       </div>
@@ -301,6 +387,100 @@ async function onDelete() {
   height: 100%;
   overflow: auto;
   box-sizing: border-box;
+}
+
+/* 成员功能配置面板 */
+.features-panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  padding: 12px 16px;
+}
+.features-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.features-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.features-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.features-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+.features-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.feature-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.feature-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.feature-code {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--mono, monospace);
+  margin-top: 1px;
+}
+
+/* 开关 */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  transition: 0.2s;
+}
+.slider::before {
+  content: '';
+  position: absolute;
+  height: 12px;
+  width: 12px;
+  left: 2px;
+  bottom: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.2s;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.switch input:checked + .slider {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.switch input:checked + .slider::before {
+  transform: translateX(16px);
 }
 
 /* 空状态 */

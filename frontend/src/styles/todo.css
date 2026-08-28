@@ -701,50 +701,34 @@
     flex-shrink: 0;
 }
 
-/* ---- Todo Sidebar（左侧任务列表栏，VS Code 暗色风格） ---- */
-#todo-sidebar-app {
-  padding: 0;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  display: flex; flex-direction: column;
-  background: var(--sidebar-bg, #1e1e1e);
-  color: var(--sidebar-fg, #ccc);
-  font-size: 13px;
+/* ---- Todo Sidebar（左侧任务列表栏，风格与文件树侧栏统一） ---- */
+.todo-sidebar {
+  padding: 0 0 12px;
 }
-#todo-sidebar-app .sidebar-header {
-  padding: 10px 16px 8px;
-  font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 1px;
-  color: #888;
-  display: flex; align-items: center; gap: 6px;
-}
-#todo-sidebar-app .sync-badge { font-size: 12px; }
-#todo-sidebar-app .task-groups { flex: 1; min-height: 0; overflow-y: auto; padding: 0 0 12px; scrollbar-width: none; -ms-overflow-style: none; }
-#todo-sidebar-app .task-groups::-webkit-scrollbar { display: none; }
-#todo-sidebar-app .empty-hint { padding: 20px 16px; color: #666; font-size: 12px; }
-#todo-sidebar-app .task-group { margin-bottom: 4px; }
-#todo-sidebar-app .group-label { padding: 6px 16px; font-size: 11px; font-weight: 600; color: #888; }
-#todo-sidebar-app .task-row {
+.todo-sidebar .empty-hint { padding: 20px 16px; color: var(--text-muted); font-size: 12px; }
+.todo-sidebar .task-group { margin-bottom: 4px; }
+.todo-sidebar .group-label { padding: 6px 16px; font-size: 11px; font-weight: 600; color: var(--text-dim); }
+.todo-sidebar .task-row {
   display: flex; align-items: center; gap: 6px;
   padding: 5px 16px; cursor: pointer;
   transition: background .1s;
   border-left: 2px solid transparent;
+  color: var(--text);
 }
-#todo-sidebar-app .task-row:hover { background: rgba(255,255,255,.05); }
-#todo-sidebar-app .task-row.active {
-  background: rgba(255,255,255,.08);
-  border-left-color: var(--accent, #1976d2);
+.todo-sidebar .task-row:hover { background: var(--hover); }
+.todo-sidebar .task-row.active {
+  background: var(--active);
+  border-left-color: var(--accent);
 }
-#todo-sidebar-app .task-row.overdue { color: #ef5350; }
-#todo-sidebar-app .task-priority { font-size: 10px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; }
-#todo-sidebar-app .p-high    { background: rgba(244,67,54,.2); color: #ef5350; }
-#todo-sidebar-app .p-medium  { background: rgba(255,152,0,.2); color: #ffb74d; }
-#todo-sidebar-app .p-low     { background: rgba(76,175,80,.2); color: #81c784; }
-#todo-sidebar-app .task-name {
+.todo-sidebar .task-row.overdue { color: #ef5350; }
+.todo-sidebar .task-priority { font-size: 10px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; }
+.todo-sidebar .p-high    { background: rgba(244,67,54,.12); color: #c62828; }
+.todo-sidebar .p-medium  { background: rgba(255,152,0,.12); color: #e65100; }
+.todo-sidebar .p-low     { background: rgba(76,175,80,.12); color: #2e7d32; }
+.todo-sidebar .task-name {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px;
 }
-#todo-sidebar-app .task-due { font-size: 10px; color: #888; flex-shrink: 0; }
+.todo-sidebar .task-due { font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
 
 /* ---- Markdown Editor (toolbar / split) ---- */
 #todo-app .md-editor-wrapper { display: flex; flex-direction: column; height: 100%; min-height: 0; }

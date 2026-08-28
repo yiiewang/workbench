@@ -1,9 +1,18 @@
 <script setup>
 // Todo 侧栏：按状态分组的任务列表，保持与文件树一致的外观风格
-import { computed } from 'vue'
+import { computed, watch, onUnmounted } from 'vue'
 import { tasks, activeTaskId, viewingMember, syncStatus } from '../../stores/todoStore'
+import { injectSidebarHeader } from '../../composables/useSidebarHeader'
 
 const priorityMap = { high: '高', medium: '中', low: '低' }
+
+// 向 layout 的 sidebar-header 注入同步状态 badge（⏳/⚠️）
+const header = injectSidebarHeader()
+watch(syncStatus, (s) => {
+  if (!header) return
+  header.badge = s === 'syncing' ? '⏳' : s === 'error' ? '⚠️' : ''
+}, { immediate: true })
+onUnmounted(() => { if (header) header.badge = '' })
 
 function isOverdue(task) {
   if (!task.due) return false
@@ -36,32 +45,25 @@ const groupedTasks = computed(() => [
 </script>
 
 <template>
-  <div class="todo-sidebar-panel" id="todo-sidebar-app">
-    <div class="sidebar-header">
-      TASKS
-      <span v-if="syncStatus === 'syncing'" class="sync-badge">⏳</span>
-      <span v-if="syncStatus === 'error'" class="sync-badge" title="Sync failed">⚠️</span>
-    </div>
-    <div class="task-groups">
-      <div v-if="displayTasks.length === 0" class="empty-hint">No tasks</div>
-      <template v-for="group in groupedTasks" :key="group.key">
-        <div class="task-group" v-if="group.items.length > 0">
-          <div class="group-label">{{ group.label }} ({{ group.items.length }})</div>
-          <div
-            v-for="task in group.items"
-            :key="task.id"
-            class="task-row"
-            :class="{ active: task.id === activeTaskId, overdue: isOverdue(task), done: task.status === 'done' }"
-            @click="activeTaskId = task.id"
-          >
-            <span class="task-priority" :class="'p-' + task.priority">{{ priorityMap[task.priority] || task.priority }}</span>
-            <span class="task-name">{{ task.title }}</span>
-            <span v-if="task.due" class="task-due">{{ task.due }}</span>
-          </div>
+  <div class="todo-sidebar">
+    <div v-if="displayTasks.length === 0" class="empty-hint">No tasks</div>
+    <template v-for="group in groupedTasks" :key="group.key">
+      <div class="task-group" v-if="group.items.length > 0">
+        <div class="group-label">{{ group.label }} ({{ group.items.length }})</div>
+        <div
+          v-for="task in group.items"
+          :key="task.id"
+          class="task-row"
+          :class="{ active: task.id === activeTaskId, overdue: isOverdue(task), done: task.status === 'done' }"
+          @click="activeTaskId = task.id"
+        >
+          <span class="task-priority" :class="'p-' + task.priority">{{ priorityMap[task.priority] || task.priority }}</span>
+          <span class="task-name">{{ task.title }}</span>
+          <span v-if="task.due" class="task-due">{{ task.due }}</span>
         </div>
-      </template>
-    </div>
+      </div>
+    </template>
   </div>
 </template>
 
-<!-- todo sidebar 样式已统一在 src/styles/todo.css（#todo-app 前缀全局样式） -->
+<!-- todo sidebar 样式已统一在 src/styles/todo.css（.todo-sidebar 前缀全局样式） -->

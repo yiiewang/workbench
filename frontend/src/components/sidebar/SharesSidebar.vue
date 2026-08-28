@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // Shares sidebar: reactive list of shares, no DOM manipulation
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { injectSidebarHeader } from '../../composables/useSidebarHeader'
 import { authToken, setLoadSharesFn, dsMode, currentUser } from '../../stores/indexStore'
 import { showToast, copyToClipboard } from '../../lib/common'
 import * as shareApi from '../../api/share'
@@ -22,6 +23,12 @@ interface Share {
 const shares = ref<Share[]>([])
 
 const shareCount = computed(() => shares.value.length)
+
+// 向 layout 的 sidebar-header 注入分享数量 badge
+const header = injectSidebarHeader()
+watch(shareCount, (v) => {
+  if (header) header.badge = v ? String(v) : ''
+}, { immediate: true })
 
 async function loadShares() {
   if (!authToken.value) return
@@ -76,6 +83,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   setLoadSharesFn(null)
+  if (header) header.badge = ''
 })
 
 defineExpose({ loadShares })
@@ -85,26 +93,18 @@ defineExpose({ loadShares })
 </script>
 
 <template>
-  <div class="share-panel active" id="sharesPanel">
-    <div class="sidebar-header">
-      MY SHARES
-      <span v-if="shareCount" class="share-badge" id="shareBadge">{{ shareCount }}</span>
-    </div>
-    <div class="share-list" id="shareList">
-      <div v-if="!shares.length" class="share-panel-empty">No shares yet</div>
-      <div
-        v-for="s in shares"
-        :key="s.id"
-        class="share-item"
-      >
-        <div class="share-item-path" :title="s.resourcePath">{{ s.resourcePath }}</div>
-        <div v-if="s.remark" class="share-item-remark" :title="s.remark">{{ s.remark }}</div>
-        <div class="share-item-meta">{{ tagText(s) }}</div>
-        <div class="share-item-actions">
-          <button class="btn btn-sm" @click="onCopyShare(s.token, s.remark)">Copy</button>
-          <button class="btn btn-sm btn-danger" @click="onDeleteShare(s.id)">Revoke</button>
-        </div>
-      </div>
+  <div v-if="!shares.length" class="share-panel-empty">No shares yet</div>
+  <div
+    v-for="s in shares"
+    :key="s.id"
+    class="share-item"
+  >
+    <div class="share-item-path" :title="s.resourcePath">{{ s.resourcePath }}</div>
+    <div v-if="s.remark" class="share-item-remark" :title="s.remark">{{ s.remark }}</div>
+    <div class="share-item-meta">{{ tagText(s) }}</div>
+    <div class="share-item-actions">
+      <button class="btn btn-sm" @click="onCopyShare(s.token, s.remark)">Copy</button>
+      <button class="btn btn-sm btn-danger" @click="onDeleteShare(s.id)">Revoke</button>
     </div>
   </div>
 </template>

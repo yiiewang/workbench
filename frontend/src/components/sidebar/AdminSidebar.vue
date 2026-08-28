@@ -1,17 +1,24 @@
 <script setup lang="ts">
 // Admin 侧栏：可搜索的用户列表（点击选中 → 主区显示详情）
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted, watch } from 'vue'
 import {
   users,
   filteredUsers,
   searchQuery,
   selectedId,
-  isNew,
   loadAdminData,
   selectUser,
-  startCreate,
+  openCreate,
 } from '../../stores/adminStore'
-import { isAdmin, currentUser } from '../../stores/auth'
+import { currentUser } from '../../stores/auth'
+import { injectSidebarHeader } from '../../composables/useSidebarHeader'
+
+// 向 layout 的 sidebar-header 注入用户数量 badge
+const header = injectSidebarHeader()
+watch(() => users.value.length, (v) => {
+  if (header) header.badge = v ? String(v) : ''
+}, { immediate: true })
+onUnmounted(() => { if (header) header.badge = '' })
 
 onMounted(() => {
   loadAdminData()
@@ -19,12 +26,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="admin-sidebar active">
-    <div class="sidebar-header">
-      USER MANAGEMENT
-      <span class="count">{{ users.length }}</span>
-    </div>
-
+  <div class="admin-sidebar">
     <div class="search-box">
       <input
         v-model="searchQuery"
@@ -35,7 +37,7 @@ onMounted(() => {
       />
     </div>
 
-    <button class="btn btn-primary new-btn" @click="startCreate">+ New User</button>
+    <button class="btn btn-primary new-btn" @click="openCreate">+ New User</button>
 
     <div class="user-list">
       <div v-if="!filteredUsers.length" class="list-empty">No users</div>
@@ -43,7 +45,7 @@ onMounted(() => {
         v-for="u in filteredUsers"
         :key="u.id"
         class="user-item"
-        :class="{ active: selectedId === u.id && !isNew }"
+        :class="{ active: selectedId === u.id }"
         @click="selectUser(u.id)"
       >
         <div class="user-main">
@@ -59,35 +61,11 @@ onMounted(() => {
 
 <style scoped>
 .admin-sidebar {
-  display: none;
+  display: flex;
   flex-direction: column;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
-}
-.admin-sidebar.active {
-  display: flex;
-}
-
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  flex-shrink: 0;
-}
-.count {
-  font-size: 10px;
-  font-weight: 400;
-  color: var(--text-muted);
-  background: var(--code-bg);
-  border-radius: 9px;
-  padding: 0 6px;
-  line-height: 1.6;
 }
 
 .search-box {
@@ -136,7 +114,7 @@ onMounted(() => {
   background: var(--hover);
 }
 .user-item.active {
-  background: var(--selection);
+  background: var(--active);
 }
 .user-item.active .user-name {
   color: var(--text);

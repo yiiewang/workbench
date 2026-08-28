@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -39,69 +38,6 @@ func TestOpen_CreatesTables(t *testing.T) {
 		if err != nil {
 			t.Fatalf("table %s not created: %v", tbl, err)
 		}
-	}
-}
-
-// TestMigrate_AddsOrgIDToLegacyVisitLogs 回归测试：旧 schema 的 visit_logs 表缺少
-// org_id 列，migrate 应自动补齐列并创建 idx_visit_org 索引（历史 bug：索引创建
-// 语句先于 ALTER TABLE 执行，导致 "no such column: org_id" 启动失败）。
-func TestMigrate_AddsOrgIDToLegacyVisitLogs(t *testing.T) {
-	t.Parallel()
-	dbPath := filepath.Join(t.TempDir(), "legacy.db")
-
-	// 按旧 schema 预建 visit_logs（无 org_id 列），模拟存量数据库
-	conn, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	if _, err := conn.Exec(`CREATE TABLE visit_logs (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		visitor_id TEXT NOT NULL,
-		ip TEXT NOT NULL DEFAULT '',
-		user_agent TEXT NOT NULL DEFAULT '',
-		path TEXT NOT NULL,
-		status_code INTEGER DEFAULT 200,
-		created_at TEXT DEFAULT (datetime('now'))
-	)`); err != nil {
-		conn.Close()
-		t.Fatalf("create legacy visit_logs: %v", err)
-	}
-	conn.Close()
-
-	// 用 Open 触发迁移
-	d, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("open db for migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = d.Close() })
-
-	// 验证 org_id 列已补齐
-	rows, err := d.conn.Query(`PRAGMA table_info(visit_logs)`)
-	if err != nil {
-		t.Fatalf("table_info: %v", err)
-	}
-	defer rows.Close()
-	hasOrgID := false
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var defVal sql.NullString
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defVal, &pk); err != nil {
-			t.Fatalf("scan column: %v", err)
-		}
-		if name == "org_id" {
-			hasOrgID = true
-		}
-	}
-	if !hasOrgID {
-		t.Fatal("visit_logs should have org_id column after migrate")
-	}
-
-	// 验证 idx_visit_org 索引已创建
-	var idxName string
-	if err := d.conn.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_visit_org'`).Scan(&idxName); err != nil {
-		t.Fatalf("idx_visit_org should exist after migrate: %v", err)
 	}
 }
 

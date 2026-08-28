@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kataras/iris/v12"
+	"github.com/yiiewang/workbench/internal/db"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -68,10 +69,10 @@ const (
 )
 
 // GenerateToken 生成带过期时间的 HMAC token
-// payload 格式: orgID:userID:expiry（orgID/userID 为整数 id）
-func GenerateToken(orgID, userID int64, secret []byte, expiryDays int) string {
+// payload 格式: userID:expiry（组织上下文通过 X-Org-Id 请求头传递，不在 token 固化）
+func GenerateToken(userID int64, secret []byte, expiryDays int) string {
 	expiry := time.Now().Unix() + int64(expiryDays)*secondsPerDay
-	payload := fmt.Sprintf("%d:%d:%d", orgID, userID, expiry)
+	payload := fmt.Sprintf("%d:%d", userID, expiry)
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(payload))
 	sig := mac.Sum(nil)
@@ -79,28 +80,27 @@ func GenerateToken(orgID, userID int64, secret []byte, expiryDays int) string {
 	return base64.URLEncoding.EncodeToString([]byte(raw))
 }
 
-// ValidateToken 校验 token，返回 (valid, orgID, userID)
-func ValidateToken(token string, secret []byte) (bool, int64, int64) {
+// ValidateToken 校验 token，返回 (valid, userID)
+func ValidateToken(token string, secret []byte) (bool, int64) {
 	data, err := base64.URLEncoding.DecodeString(token)
 	if err != nil {
-		return false, 0, 0
+		return false, 0
 	}
 
-	parts := strings.SplitN(string(data), ":", 4)
-	if len(parts) != 4 {
-		return false, 0, 0
+	parts := strings.SplitN(string(data), ":", 3)
+	if len(parts) != 3 {
+		return false, 0
 	}
-	orgIDStr, userIDStr, expiryStr, sigHex := parts[0], parts[1], parts[2], parts[3]
-	if !verifySig(orgIDStr+":"+userIDStr+":"+expiryStr, sigHex, secret) || !checkExpiry(expiryStr) {
-		return false, 0, 0
+	userIDStr, expiryStr, sigHex := parts[0], parts[1], parts[2]
+	if !verifySig(userIDStr+":"+expiryStr, sigHex, secret) || !checkExpiry(expiryStr) {
+		return false, 0
 	}
 
-	orgID, err1 := strconv.ParseInt(orgIDStr, 10, 64)
-	userID, err2 := strconv.ParseInt(userIDStr, 10, 64)
-	if err1 != nil || err2 != nil {
-		return false, 0, 0
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		return false, 0
 	}
-	return true, orgID, userID
+	return true, userID
 }
 
 // verifySig 校验 payload 与签名是否匹配
@@ -129,45 +129,62 @@ func extractTokenFromContext(ctx iris.Context) string {
 	return ""
 }
 
-// AuthMiddleware 是 iris 鉴权中间件，校验失败直接返回 401，成功把整数 orgID/userID、name 与角色写入 ctx.Values()
-// lookupIdentity 用于按整数 id 反查 org/user 的 name 与角色（写 ctx 供目录路径、展示与权限判断使用），传 nil 则不反查
-func AuthMiddleware(secret []byte, lookupIdentity func(context.Context, int64, int64) (string, string, string, error)) iris.Handler {
+// AuthMiddleware 是 iris 鉴权中间件，校验失败返回 401，成功把用户与组织上下文写入 ctx.Values()。
+// 组织上下文解析：优先 X-Org-Id 请求头（组织切换），缺省时由 resolveIdentity 取用户默认组织。
+// resolveIdentity 返回 (resolvedOrgID, orgName, userName, orgRole, isPlatformAdmin, err)。
+func AuthMiddleware(secret []byte, resolveIdentity func(context.Context, int64, int64) (int64, string, string, string, bool, error)) iris.Handler {
 	return func(ctx iris.Context) {
 		token := extractTokenFromContext(ctx)
 		if token == "" {
 			writeFail(ctx, iris.StatusUnauthorized, CodeMissingToken)
 			return
 		}
-		valid, orgID, userID := ValidateToken(token, secret)
+		valid, userID := ValidateToken(token, secret)
 		if !valid {
 			writeFail(ctx, iris.StatusUnauthorized, CodeInvalidToken)
 			return
 		}
-		orgName, userName, role := "", "", ""
-		if lookupIdentity != nil {
-			if on, un, r, err := lookupIdentity(ctx.Request().Context(), orgID, userID); err == nil {
-				orgName, userName, role = on, un, r
+
+		// 组织上下文：优先 X-Org-Id 头，缺省 0 由 resolveIdentity 取默认组织
+		orgID := int64(0)
+		if h := ctx.GetHeader("X-Org-Id"); h != "" {
+			if v, err := strconv.ParseInt(strings.TrimSpace(h), 10, 64); err == nil {
+				orgID = v
 			}
 		}
+
+		resolvedOrgID, orgName, userName, orgRole, isPlatformAdmin, err := resolveIdentity(ctx.Request().Context(), userID, orgID)
+		if err != nil || resolvedOrgID == 0 {
+			writeFail(ctx, iris.StatusForbidden, CodeForbidden)
+			return
+		}
+
 		ctx.Values().Set("userID", userID)
-		ctx.Values().Set("orgID", orgID)
+		ctx.Values().Set("orgID", resolvedOrgID)
 		ctx.Values().Set("userName", userName)
 		ctx.Values().Set("orgName", orgName)
-		ctx.Values().Set("role", role)
+		ctx.Values().Set("orgRole", orgRole)
+		ctx.Values().Set("isPlatformAdmin", isPlatformAdmin)
+		ctx.Values().Set("role", externalRole(orgRole, isPlatformAdmin))
 		ctx.Next()
 	}
 }
 
-// RequireUserManager 要求当前用户为 admin 或 org_admin 角色（用户管理权限），否则 403。
-// 须在 AuthMiddleware 之后使用；通过后会把 isSuperAdmin 标志写入 ctx（admin=true, org_admin=false）。
+// RequireUserManager 要求当前用户具备用户管理权限（平台超管，或组织 owner/admin），否则 403。
+// 须在 AuthMiddleware 之后使用；通过后把 isSuperAdmin 标志写入 ctx（平台超管=true，组织管理员=false）。
 func RequireUserManager(ctx iris.Context) {
-	role := currentRole(ctx)
-	if role != roleNameAdmin && role != roleNameOrgAdmin {
+	if !isPlatformAdmin(ctx) && !isOrgManager(ctx) {
 		writeFail(ctx, iris.StatusForbidden, CodeAdminRequired)
 		return
 	}
-	ctx.Values().Set("isSuperAdmin", role == roleNameAdmin)
+	ctx.Values().Set("isSuperAdmin", isPlatformAdmin(ctx))
 	ctx.Next()
+}
+
+// isOrgManager 判断当前用户是否为组织管理员（owner/admin 角色）
+func isOrgManager(ctx iris.Context) bool {
+	r := currentOrgRole(ctx)
+	return r == db.RoleOwner || r == db.RoleAdmin
 }
 
 // isSuperAdmin 从 ctx 读取 RequireUserManager 写入的标志（true=超级 admin，false=org_admin）
@@ -220,7 +237,7 @@ func currentOrgName(ctx iris.Context) string {
 	return ""
 }
 
-// currentRole 从 iris.Context 中取出 AuthMiddleware 写入的角色名
+// currentRole 从 iris.Context 中取出 AuthMiddleware 写入的角色名（对外语义：admin/org_admin/user）
 func currentRole(ctx iris.Context) string {
 	if v := ctx.Values().Get("role"); v != nil {
 		if s, ok := v.(string); ok {
@@ -228,4 +245,36 @@ func currentRole(ctx iris.Context) string {
 		}
 	}
 	return ""
+}
+
+// currentOrgRole 从 iris.Context 中取出 AuthMiddleware 写入的组织内角色（owner/admin/member）
+func currentOrgRole(ctx iris.Context) string {
+	if v := ctx.Values().Get("orgRole"); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// isPlatformAdmin 从 iris.Context 中取出 AuthMiddleware 写入的平台超管标志
+func isPlatformAdmin(ctx iris.Context) bool {
+	if v := ctx.Values().Get("isPlatformAdmin"); v != nil {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// externalRole 将内部组织角色 + 平台超管标志映射为对外角色（供前端展示与权限判断）。
+// 平台超管→admin，组织 owner/admin→org_admin，其余→user。
+func externalRole(orgRole string, platformAdmin bool) string {
+	if platformAdmin {
+		return roleNameAdmin
+	}
+	if orgRole == db.RoleOwner || orgRole == db.RoleAdmin {
+		return roleNameOrgAdmin
+	}
+	return roleNameUser
 }

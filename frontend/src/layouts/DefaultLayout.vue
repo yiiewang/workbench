@@ -4,8 +4,12 @@
 import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { dsMode, shareRootPath } from '../stores/indexStore'
-import { loggedIn, currentUser, isAdmin, clearAuth } from '../stores/auth'
+import {
+  loggedIn, currentUser, canManageUsers, clearAuth,
+  orgs, currentOrgId, switchOrg, hasFeature,
+} from '../stores/auth'
 import { useSidebarResize } from '../composables/useSidebarResize'
+import { useSidebarHeader } from '../composables/useSidebarHeader'
 
 const {
   sidebarWidth, collapsed, resizerActive,
@@ -14,6 +18,21 @@ const {
 
 const route = useRoute()
 const router = useRouter()
+
+// 侧栏统一 header/body 外壳（见 template 中 .sidebar-header / .sidebar-body）。
+// header 状态由各侧栏组件注入后更新 badge（动态徽标）。
+const header = useSidebarHeader()
+
+// 侧栏标题：默认取自路由 meta.sidebarTitle；分享模式动态显示 SHARED: basename
+const sidebarTitle = computed(() => {
+  if (dsMode.value === 'share') {
+    const root = shareRootPath.value
+    if (!root || root === '/') return 'SHARED'
+    const basename = root.split('/').filter(Boolean).pop() || root
+    return 'SHARED: ' + basename
+  }
+  return (route.meta.sidebarTitle as string) || ''
+})
 
 const isExplorerActive = computed(() =>
   route.path === '/' || route.path.startsWith('/s/')
@@ -55,22 +74,29 @@ function doLogout() {
   clearAuth()
   router.push('/login')
 }
+
+// 切换组织：更新本地组织上下文 + 功能集合
+async function onSwitchOrg(orgId: number) {
+  await switchOrg(orgId)
+  // 组织切换后回到文件浏览器首页（新组织的文件树需重新加载）
+  if (route.path !== '/') router.push('/')
+}
 </script>
 
 <template>
 <!-- Activity Bar -->
 <div v-show="dsMode !== 'share'" class="activity-bar">
-  <div class="activity-item" :class="{ active: isExplorerActive }" title="文件浏览器" @click="handleExplorerClick">
+  <div v-if="hasFeature('file')" class="activity-item" :class="{ active: isExplorerActive }" title="文件浏览器" @click="handleExplorerClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
   </div>
-  <div class="activity-item" :class="{ active: isSharesActive }" title="分享管理" @click="handleShareClick">
+  <div v-if="hasFeature('share')" class="activity-item" :class="{ active: isSharesActive }" title="分享管理" @click="handleShareClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>
     <span class="badge" id="shareBadge" style="display:none"></span>
   </div>
-  <div class="activity-item" :class="{ active: isTodoActive }" title="Todo 看板" @click="handleTodoClick">
+  <div v-if="hasFeature('todo')" class="activity-item" :class="{ active: isTodoActive }" title="Todo 看板" @click="handleTodoClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
   </div>
-  <div v-if="isAdmin" class="activity-item" :class="{ active: isAdminActive }" title="用户管理" @click="handleAdminClick">
+  <div v-if="canManageUsers" class="activity-item" :class="{ active: isAdminActive }" title="用户管理" @click="handleAdminClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
   </div>
   <div class="activity-divider"></div>
@@ -85,7 +111,13 @@ function doLogout() {
 </div>
 
 <div class="sidebar" :style="{ width: sidebarWidth + 'px' }" :class="{ collapsed: collapsed, resizing: resizerActive }" v-show="!(dsMode === 'share' && !shareRootPath)">
-  <RouterView name="sidebar" />
+  <div class="sidebar-header">
+    <span class="sidebar-title">{{ sidebarTitle }}</span>
+    <span v-if="header.badge" class="sidebar-badge">{{ header.badge }}</span>
+  </div>
+  <div class="sidebar-body">
+    <RouterView name="sidebar" />
+  </div>
 </div>
 <div
   v-if="!collapsed && !(dsMode === 'share' && !shareRootPath)"
@@ -129,6 +161,22 @@ function doLogout() {
         </div>
         <span class="role-tag" :class="currentUser?.role">{{ currentUser?.role }}</span>
       </div>
+
+      <!-- 组织切换器：多组织用户可切换当前组织上下文 -->
+      <div v-if="orgs.length > 1" class="org-switcher">
+        <div class="org-switcher-label">Organizations</div>
+        <div
+          v-for="o in orgs"
+          :key="o.orgId"
+          class="org-item"
+          :class="{ active: o.orgId === currentOrgId }"
+          @click="onSwitchOrg(o.orgId)"
+        >
+          <span class="org-name">{{ o.orgName }}</span>
+          <span class="org-role" :class="o.role">{{ o.role }}</span>
+        </div>
+      </div>
+
       <div class="user-fields">
         <div class="field-row"><span class="field-label">User ID</span><span class="field-value">{{ currentUser?.userId }}</span></div>
         <div class="field-row"><span class="field-label">Org ID</span><span class="field-value">{{ currentUser?.orgId }}</span></div>
@@ -144,6 +192,47 @@ function doLogout() {
 </template>
 
 <style scoped>
+/* 侧栏统一 header/body 外壳（各侧栏组件只填充 body 内容） */
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.sidebar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-badge {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  background: var(--code-bg);
+  border-radius: 9px;
+  padding: 0 6px;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+.sidebar-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: none;
+}
+.sidebar-body::-webkit-scrollbar {
+  display: none;
+}
+
 .activity-user { margin-top: auto; }
 .user-badge { width:24px; height:24px; border-radius:50%; background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; }
 
@@ -159,6 +248,22 @@ function doLogout() {
 .user-meta { flex: 1; min-width: 0; }
 .user-name { font-size: 15px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .user-org { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+/* 组织切换器 */
+.org-switcher { margin-bottom: 12px; }
+.org-switcher-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+.org-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer;
+  font-size: 13px; transition: background .15s;
+}
+.org-item:hover { background: var(--hover, #f2f3f5); }
+.org-item.active { background: var(--accent-soft, #e8f1fa); }
+.org-item.active .org-name { color: var(--accent); font-weight: 600; }
+.org-name { color: var(--text); }
+.org-role { font-size: 11px; color: var(--text-dim); padding: 1px 6px; border-radius: 3px; background: var(--code-bg); }
+.org-role.owner { color: #b35900; background: #fff4e1; }
+.org-role.admin { color: #b35900; background: #fff4e1; }
 
 /* 角色标签 */
 .role-tag { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px; font-weight: 500; flex-shrink: 0; }

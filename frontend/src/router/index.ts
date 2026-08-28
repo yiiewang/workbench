@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { loggedIn, isAdmin } from '../stores/auth'
+import { loggedIn, canManageUsers } from '../stores/auth'
 import IndexView from '../views/IndexView.vue'
 import ExplorerSidebar from '../components/sidebar/ExplorerSidebar.vue'
 import SharesSidebar from '../components/sidebar/SharesSidebar.vue'
@@ -31,10 +31,12 @@ const router = createRouter({
         {
           path: '',
           components: { default: IndexView, sidebar: ExplorerSidebar },
+          meta: { sidebarTitle: 'EXPLORER' },
         },
         {
           path: 'shares',
           components: { default: IndexView, sidebar: SharesSidebar },
+          meta: { sidebarTitle: 'MY SHARES' },
         },
         {
           path: 'todo',
@@ -42,6 +44,7 @@ const router = createRouter({
             default: () => import('../views/TodoView.vue'),
             sidebar: () => import('../components/sidebar/TodoSidebar.vue'),
           },
+          meta: { sidebarTitle: 'TASKS' },
         },
         {
           path: 'admin',
@@ -49,7 +52,7 @@ const router = createRouter({
             default: () => import('../views/AdminView.vue'),
             sidebar: () => import('../components/sidebar/AdminSidebar.vue'),
           },
-          meta: { requiresAdmin: true },
+          meta: { requiresAdmin: true, sidebarTitle: 'USER MANAGEMENT' },
         },
         {
           path: 's/:token',
@@ -71,7 +74,7 @@ const router = createRouter({
 router.beforeEach((to) => {
   if (to.meta.public) return true
   if (!loggedIn.value) return { path: '/login', query: { redirect: to.fullPath } }
-  if (to.meta.requiresAdmin && !isAdmin.value) return { path: '/' }
+  if (to.meta.requiresAdmin && !canManageUsers.value) return { path: '/' }
   return true
 })
 

@@ -74,3 +74,29 @@ export async function deleteUser(id: number): Promise<{ deleted: number }> {
 export async function getUserDashboard(id: number): Promise<UserDashboard> {
   return apiCall(`/api/admin/users/${id}/dashboard`)
 }
+
+// ============================================================
+// 成员功能配置（user_org_feature，per-user-per-org）
+// ============================================================
+
+// 功能状态（对应后端 db.UserOrgFeature）
+export interface UserOrgFeature {
+  userId: number
+  orgId: number
+  featureCode: string
+  enabled: boolean
+}
+
+// 列出某成员在当前组织的全部功能及启用状态（GET /api/admin/users/{id}/features）
+export async function listUserFeatures(userId: number): Promise<{ features: UserOrgFeature[] }> {
+  return apiCall(`/api/admin/users/${userId}/features`)
+}
+
+// 更新某成员在当前组织的某功能启用状态（PATCH /api/admin/users/{id}/features/{code}）
+export async function updateUserFeature(userId: number, code: string, enabled: boolean) {
+  return apiCall(`/api/admin/users/${userId}/features/${code}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+}

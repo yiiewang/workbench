@@ -7,9 +7,11 @@ import type { AdminUser, Role, UserDashboard } from '../api/admin'
 export const users = ref<AdminUser[]>([])
 export const roles = ref<Role[]>([])
 
-// 选中状态：selectedId = 用户 id（查看/编辑），isNew = 新建模式
+// 选中状态：selectedId = 用户 id（查看/编辑）
 export const selectedId = ref<number | null>(null)
-export const isNew = ref(false)
+
+// 新建用户弹窗显隐（侧栏与主区共用，点击 + New User 直接弹窗，不影响选中状态）
+export const createVisible = ref(false)
 
 // 侧栏搜索关键词（按 name / orgName 过滤）
 export const searchQuery = ref('')
@@ -53,22 +55,17 @@ export async function loadAdminData(orgId?: number) {
 // 选中某个用户（进入看板，自动加载统计）
 export function selectUser(id: number) {
   selectedId.value = id
-  isNew.value = false
   loadDashboard(id)
 }
 
-// 进入新建模式
-export function startCreate() {
-  selectedId.value = null
-  isNew.value = true
-  dashboard.value = null
+// 打开新建用户弹窗（不清空选中，main 看板保持不变）
+export function openCreate() {
+  createVisible.value = true
 }
 
-// 关闭详情/新建（回到空状态）
-export function closeDetail() {
-  selectedId.value = null
-  isNew.value = false
-  dashboard.value = null
+// 关闭新建用户弹窗
+export function closeCreate() {
+  createVisible.value = false
 }
 
 // 选中项被删除后，清除选中状态

@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { setAuth, loggedIn } from '../stores/auth'
+import { setAuth, checkAuth, loggedIn } from '../stores/auth'
 import * as authApi from '../api/auth'
 
 const router = useRouter()
 const route = useRoute()
 const userId = ref('')
 const password = ref('')
-const orgId = ref('')
 const error = ref('')
 const loading = ref(false)
 
@@ -24,7 +23,7 @@ async function doLogin() {
   if (!password.value.trim()) { error.value = 'Password required'; return }
   loading.value = true
   try {
-    const data = await authApi.login(userId.value.trim(), password.value, orgId.value.trim())
+    const data = await authApi.login(userId.value.trim(), password.value)
     setAuth(data.token, {
       userId: data.user.userId,
       orgId: data.user.orgId,
@@ -32,6 +31,8 @@ async function doLogin() {
       orgName: data.user.orgName,
       role: data.user.role || 'user',
     })
+    // 登录后立即拉取完整组织上下文（orgs / features / 默认组织），供组织切换器与动态菜单使用
+    await checkAuth()
     const redirect = (route.query.redirect as string) || '/'
     router.replace(redirect)
   } catch (err: any) {
@@ -72,10 +73,6 @@ async function doLogin() {
           <input v-model="password" type="password" placeholder=" " id="password" />
           <label for="password">Password</label>
         </div>
-        <div class="field">
-          <input v-model="orgId" type="text" placeholder=" " id="orgId" />
-          <label for="orgId">Org ID <span class="optional">(optional)</span></label>
-        </div>
 
         <transition name="fade">
           <p v-if="error" class="error">
@@ -92,6 +89,12 @@ async function doLogin() {
           {{ loading ? 'Signing in...' : 'Sign in' }}
         </button>
       </form>
+
+      <!-- 注册提示：不允许自行注册，需邮件联系管理员 -->
+      <p class="register-note">
+        Registration is not allowed. To request an account, please contact
+        <a href="mailto:yiiewang@qq.com">yiiewang@qq.com</a>.
+      </p>
     </div>
   </div>
 </template>
@@ -274,6 +277,22 @@ async function doLogin() {
   animation: spin 0.6s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* 注册提示 */
+.register-note {
+  margin: 20px 0 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #999;
+}
+.register-note a {
+  color: #007acc;
+  text-decoration: none;
+}
+.register-note a:hover {
+  text-decoration: underline;
+}
 
 /* 过渡动画 */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s, transform 0.2s; }

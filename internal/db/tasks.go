@@ -45,7 +45,7 @@ func (d *DB) UpsertTasks(ctx context.Context, orgID, userID int64, tasks []TaskI
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE org_id = ? AND id = ?`, versionJSON, orgID, userID)
+	_, err = tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID)
 	if err != nil {
 		return err
 	}
@@ -78,7 +78,7 @@ func (d *DB) UpdateTask(ctx context.Context, orgID, userID int64, task TaskItem)
 		return "", err
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE org_id = ? AND id = ?`, versionJSON, orgID, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
 		return "", err
 	}
 	return versionJSON, tx.Commit()
@@ -108,7 +108,7 @@ func (d *DB) AddTask(ctx context.Context, orgID, userID int64, task TaskItem) (s
 		return "", err
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE org_id = ? AND id = ?`, versionJSON, orgID, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
 		return "", err
 	}
 	return versionJSON, tx.Commit()
@@ -131,7 +131,7 @@ func (d *DB) DeleteTask(ctx context.Context, orgID, userID int64, taskID string)
 		return "", err
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE org_id = ? AND id = ?`, versionJSON, orgID, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
 		return "", err
 	}
 	return versionJSON, tx.Commit()
@@ -140,7 +140,7 @@ func (d *DB) DeleteTask(ctx context.Context, orgID, userID int64, taskID string)
 // GetVersionJSON 获取用户当前 version_json（供冲突检测用）。
 func (d *DB) GetVersionJSON(ctx context.Context, orgID, userID int64) (string, error) {
 	var versionJSON string
-	err := d.conn.QueryRowContext(ctx, `SELECT version_json FROM users WHERE org_id = ? AND id = ?`, orgID, userID).Scan(&versionJSON)
+	err := d.conn.QueryRowContext(ctx, `SELECT version_json FROM users WHERE id = ?`, userID).Scan(&versionJSON)
 	return versionJSON, err
 }
 
@@ -150,7 +150,7 @@ func (d *DB) GetVersionJSON(ctx context.Context, orgID, userID int64) (string, e
 func (d *DB) recomputeVersion(ctx context.Context, tx *sql.Tx, orgID, userID int64) (string, error) {
 	// 读取当前 version 拿到 baseMd5/baseTimestamp/deviceId
 	var oldVersionJSON string
-	err := tx.QueryRowContext(ctx, `SELECT version_json FROM users WHERE org_id = ? AND id = ?`, orgID, userID).Scan(&oldVersionJSON)
+	err := tx.QueryRowContext(ctx, `SELECT version_json FROM users WHERE id = ?`, userID).Scan(&oldVersionJSON)
 	if err != nil && err != sql.ErrNoRows {
 		return "", err
 	}
@@ -247,13 +247,13 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 	orgsMap := make(map[string]map[string]interface{})
 
 	rows, err := d.conn.QueryContext(ctx, `
-		SELECT u.org_id, u.id, u.updated_at, u.version_json,
+		SELECT ?, u.id, u.updated_at, u.version_json,
 		       t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due, t.progress, t.assignee, t.postponed_count, t.auto_postponed, t.sort_order
 		FROM users u
-		LEFT JOIN tasks t ON t.org_id = u.org_id AND t.user_id = u.id
-		WHERE u.org_id = ? AND u.id = ?
-		ORDER BY u.org_id, u.id, t.sort_order
-	`, orgID, userID)
+		LEFT JOIN tasks t ON t.org_id = ? AND t.user_id = u.id
+		WHERE u.id = ?
+		ORDER BY u.id, t.sort_order
+	`, orgID, orgID, userID)
 	if err != nil {
 		return nil, err
 	}

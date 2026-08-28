@@ -1,4 +1,5 @@
 <script>
+import { ref, watch, nextTick } from 'vue'
 import { setupTodoApp } from '../composables/useTodoApp'
 import TaskItem from '../components/todo/TaskItem.vue'
 import MarkdownEditor from '../components/todo/MarkdownEditor.vue'
@@ -19,7 +20,19 @@ function progressLabel(p) {
 export default {
   components: { TaskItem, MarkdownEditor },
   setup() {
-    return { ...setupTodoApp(), progressOptions, progressLabel }
+    const todoApp = setupTodoApp()
+    const modalRef = ref(null)
+
+    // Modal 打开时自动聚焦，使 ESC 快捷键无需点击即可生效
+    watch(() => todoApp.showModal.value, (show) => {
+      if (show) {
+        nextTick(() => {
+          modalRef.value?.focus()
+        })
+      }
+    })
+
+    return { ...todoApp, progressOptions, progressLabel, modalRef }
   }
 }
 </script>
@@ -195,7 +208,7 @@ export default {
             </div>
 
             <!-- Unified Task Modal (Create & Edit) -->
-            <div class="modal-mask" v-if="showModal" @click.self="closeModal" @keydown="handleModalKeydown" tabindex="-1">
+            <div ref="modalRef" class="modal-mask" v-if="showModal" @click.self="closeModal" @keydown="handleModalKeydown" tabindex="-1">
                 <div class="modal-content">
                     <div class="modal-header">
                         <h3>{{ isCreating ? '创建任务' : '编辑任务' }}</h3>

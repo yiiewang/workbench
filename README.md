@@ -178,6 +178,75 @@ workbench/
 └── .gitignore
 ```
 
+## Release Process
+
+### Prerequisites
+
+- Go 1.25+
+- Node 18+ with pnpm
+- Docker (for xgo cross-compilation)
+- GitHub CLI (`gh`) with authentication
+
+### Version Bump
+
+1. Update version in code if needed (optional, version is auto-detected from git tag)
+2. Commit all changes and ensure working tree is clean
+
+### Create Release
+
+```bash
+# 1. Create and push tag
+git tag -a v1.x.x -m "Release v1.x.x - brief description"
+git push origin v1.x.x
+
+# 2. Create GitHub release (or use web UI)
+gh release create v1.x.x --title "v1.x.x" --notes "Release notes..."
+```
+
+### Build & Upload Packages
+
+```bash
+# Full build: frontend + cross-platform binaries + packaging
+make build-all
+
+# This generates:
+#   build/workbench-v1.x.x-linux-x86_64.tar.gz
+#   build/workbench-v1.x.x-linux-arm64.tar.gz
+#   build/workbench-v1.x.x-darwin-x86_64.tar.gz
+#   build/workbench-v1.x.x-darwin-arm64.tar.gz
+#   build/workbench-v1.x.x-win-x86_64.exe.zip
+
+# Upload to GitHub release
+gh release upload v1.x.x build/workbench-v1.x.x-* --clobber
+```
+
+### Build Targets
+
+| Target | Description |
+|--------|-------------|
+| `make all` | Frontend build + Go build (for local dev) |
+| `make build` | Go build only (requires frontend/dist exists) |
+| `make frontend` | Vite build to frontend/dist |
+| `make build-all` | Full cross-platform build + package (uses xgo) |
+| `make package` | Create tar.gz/zip from existing binaries |
+
+### Package Contents
+
+Each release package contains:
+- `workbench` (or `workbench.exe`) — compiled binary with embedded frontend
+- `config.yaml` — configuration template
+- `README.md` — documentation
+
+### Quick Release Checklist
+
+- [ ] All changes committed and pushed
+- [ ] Tests pass: `make check`
+- [ ] Version tag created: `git tag -a v1.x.x`
+- [ ] Tag pushed: `git push origin v1.x.x`
+- [ ] GitHub release created
+- [ ] `make build-all` completes successfully
+- [ ] All 5 platform packages uploaded to release
+
 ## License
 
 MIT

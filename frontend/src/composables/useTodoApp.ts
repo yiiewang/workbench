@@ -1710,12 +1710,75 @@ export function setupTodoApp() {
         activeTaskId.value = null
     }
 
+    // Modal 键盘快捷键处理：Ctrl+S 自动保存（不关闭 panel），Ctrl+W 关闭 panel
+    function handleModalKeydown(e: KeyboardEvent) {
+        // 检测 Ctrl+S (Windows/Linux) 或 Cmd+S (Mac) - 保存
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault()
+            e.stopPropagation()
+            if (isCreating.value) {
+                confirmCreate()
+            } else {
+                // saveEdit 内部会关闭 modal，我们需要保存但不关闭
+                // 因此直接调用保存逻辑
+                quickSaveEdit()
+            }
+            return
+        }
+        // 检测 Ctrl+W (Windows/Linux) 或 Cmd+W (Mac) - 关闭 panel
+        if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+            e.preventDefault()
+            e.stopPropagation()
+            closeModal()
+            return
+        }
+    }
+
+    // 快速保存：执行保存逻辑但不关闭 modal
+    function quickSaveEdit() {
+        if (viewingMember.value) return
+        if (!currentUser.value) {
+            showToast('请先填写用户信息', 'error')
+            showGlobalLogin()
+            return
+        }
+        const updatedTask = { ...editingTask.value }
+        if (!updatedTask.scheduled) {
+            showToast('请填写计划日期', 'error')
+            return
+        }
+        if (!updatedTask.due) {
+            showToast('请填写截止日期', 'error')
+            return
+        }
+        if (updatedTask.scheduled > updatedTask.due) {
+            showToast('计划日期不能晚于截止日期', 'error')
+            return
+        }
+        const idx = tasks.value.findIndex(t => t.id === updatedTask.id)
+        if (idx !== -1) {
+            if (updatedTask.status === 'done' || updatedTask.status === 'conflict') {
+                updatedTask.confirmedDate = formatDate(new Date())
+            }
+            tasks.value.splice(idx, 1, updatedTask)
+            // 增量同步：只发这一条任务，不发全部
+            syncTaskToServer(updatedTask, 'PATCH').catch(err => {
+                console.error('[todo] 增量同步失败，回退到全量同步', err)
+                save()  // 增量失败回退全量
+            })
+            saveLocal()
+            showToast('任务已保存', 'success')
+        }
+        // 注意：不关闭 modal，保持 panel 打开
+    }
+
     // ========== Expose to Template ==========
     return {
         columns, tasks, activeTab, draggingTaskId, calendarDragOverDate,
         listNewTitle, listViewMode, collapsedGroups, listGroupedTasks, quadrantTasks,
         toggleTaskDone, listAddTask, toggleListGroup, toggleListView,
         showModal, isCreating, editingTask, editingMaxDate, closeModal,
+        handleModalKeydown,
 
         newTaskTitle, newTaskForDate, hasConflict, calTitle, weekDays, donePercent,
         todayStr, overdueCount, conflictDates,

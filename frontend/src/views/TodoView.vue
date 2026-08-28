@@ -195,7 +195,7 @@ export default {
             </div>
 
             <!-- Unified Task Modal (Create & Edit) -->
-            <div class="modal-mask" v-if="showModal" @click.self="closeModal">
+            <div class="modal-mask" v-if="showModal" @click.self="closeModal" @keydown="handleModalKeydown" tabindex="-1">
                 <div class="modal-content">
                     <div class="modal-header">
                         <h3>{{ isCreating ? '创建任务' : '编辑任务' }}</h3>

@@ -34,8 +34,7 @@ for f in "$BUILD_DIR"/"$BINARY_NAME"-"$VERSION"-*; do
         *)     cp "$f" "$pkgdir/$BINARY_NAME" && chmod +x "$pkgdir/$BINARY_NAME" ;;
     esac
 
-    # 复制静态文件和配置
-    cp static/index.html static/todo.html "$pkgdir/static/"
+    # 复制配置和文档（前端已嵌入二进制，无需额外静态文件）
     cp config.yaml README.md "$pkgdir/"
 
     # 打包

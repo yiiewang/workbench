@@ -63,15 +63,14 @@ test:
 check: vet lint test
 
 # ============================================================
-# 跨平台构建 + 打包（需要 xgo + Docker）
+# 跨平台构建 + 打包（使用 xgo + Docker）
 # ============================================================
 .PHONY: build-all
-build-all:
+build-all: frontend
 	@mkdir -p $(OUT_DIR)
 	go install src.techknowlogick.com/xgo@latest
 	xgo -ldflags="$(LDFLAGS)" \
-		--targets=linux/*,windows/amd64,darwin/arm64 \
-		-image techknowlogick/xgo:go-1.22.0 \
+		--targets=linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64 \
 		-out $(OUT_DIR)/$(BINARY)-$(VERSION) ./cmd/workbench/
 	@cd $(OUT_DIR) && for f in $(BINARY)-$(VERSION)-*; do \
 		newname=$$(echo "$$f" | sed 's/darwin-[0-9.]*-/darwin-/g; s/windows-[0-9.]*-/win-/g; s/amd64/x86_64/g'); \

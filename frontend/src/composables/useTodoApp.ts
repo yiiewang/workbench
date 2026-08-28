@@ -1710,7 +1710,7 @@ export function setupTodoApp() {
         activeTaskId.value = null
     }
 
-    // Modal 键盘快捷键处理：Ctrl+S 自动保存（不关闭 panel），Ctrl+W 关闭 panel
+    // Modal 键盘快捷键处理：Ctrl+S 自动保存（不关闭 panel），Escape 关闭 panel
     function handleModalKeydown(e: KeyboardEvent) {
         // 检测 Ctrl+S (Windows/Linux) 或 Cmd+S (Mac) - 保存
         if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -1725,8 +1725,9 @@ export function setupTodoApp() {
             }
             return
         }
-        // 检测 Ctrl+W (Windows/Linux) 或 Cmd+W (Mac) - 关闭 panel
-        if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+        // 检测 Escape - 关闭 panel
+        // 注意：Ctrl+W 无法拦截（浏览器安全策略），使用 Escape 替代
+        if (e.key === 'Escape') {
             e.preventDefault()
             e.stopPropagation()
             closeModal()

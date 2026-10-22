@@ -3,13 +3,15 @@
 // 仅包裹需要应用界面的路由；/login 等独立页面不走此布局。
 import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { dsMode, shareRootPath } from '../stores/indexStore'
+import { dsMode, shareRootPath, resetIdentityScopedState } from '../stores/indexStore'
 import {
   loggedIn, currentUser, canManageUsers, clearAuth,
   orgs, currentOrgId, switchOrg, hasFeature,
 } from '../stores/auth'
 import { useSidebarResize } from '../composables/useSidebarResize'
 import { useSidebarHeader } from '../composables/useSidebarHeader'
+import FileContextMenu from '../components/menu/FileContextMenu.vue'
+import PromptModal from '../components/modal/PromptModal.vue'
 
 const {
   sidebarWidth, collapsed, resizerActive,
@@ -34,12 +36,19 @@ const sidebarTitle = computed(() => {
   return (route.meta.sidebarTitle as string) || ''
 })
 
+const isHomeActive = computed(() => route.path === '/')
 const isExplorerActive = computed(() =>
-  route.path === '/' || route.path.startsWith('/s/')
+  route.path === '/file' || route.path.startsWith('/s/')
 )
 const isSharesActive = computed(() => route.path === '/shares')
 const isTodoActive = computed(() => route.path === '/todo')
 const isAdminActive = computed(() => route.path === '/admin')
+
+// 首页（/）无侧栏：隐藏 sidebar/resizer/toggle，主区域占满
+const hideSidebar = computed(() => route.meta.hideSidebar === true)
+const sidebarHidden = computed(() =>
+  hideSidebar.value || (dsMode.value === 'share' && !shareRootPath.value)
+)
 
 // 折叠按钮 left 位置：activity-bar(48px) + sidebar 宽度 - 按钮一半宽度(6px)。
 // 分享模式无 activity-bar，偏移 0；折叠态 sidebar 宽度算 0。
@@ -51,7 +60,8 @@ const toggleBtnLeft = computed(() => {
   return activityBarW + sidebarW - TOGGLE_BTN_HALF
 })
 
-function handleExplorerClick() { router.push('/') }
+function handleHomeClick() { router.push('/') }
+function handleExplorerClick() { router.push('/file') }
 function handleShareClick() { router.push('/shares') }
 function handleTodoClick() { router.push('/todo') }
 function handleAdminClick() { router.push('/admin') }
@@ -72,20 +82,27 @@ function onUserClick() {
 function doLogout() {
   showUserMenu.value = false
   clearAuth()
+  // 清理上一身份的内存单例（树缓存/tab/todo），防止换账号登录后残留
+  resetIdentityScopedState()
   router.push('/login')
 }
 
 // 切换组织：更新本地组织上下文 + 功能集合
 async function onSwitchOrg(orgId: number) {
   await switchOrg(orgId)
-  // 组织切换后回到文件浏览器首页（新组织的文件树需重新加载）
-  if (route.path !== '/') router.push('/')
+  // 组织切换 = 身份上下文变化：清理旧组织的树缓存/todo 状态
+  resetIdentityScopedState()
+  // 组织切换后回到文件浏览器（新组织的文件树需重新加载）
+  if (route.path !== '/file') router.push('/file')
 }
 </script>
 
 <template>
 <!-- Activity Bar -->
 <div v-show="dsMode !== 'share'" class="activity-bar">
+  <div class="activity-item" :class="{ active: isHomeActive }" title="功能首页" @click="handleHomeClick">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+  </div>
   <div v-if="hasFeature('file')" class="activity-item" :class="{ active: isExplorerActive }" title="文件浏览器" @click="handleExplorerClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
   </div>
@@ -110,7 +127,7 @@ async function onSwitchOrg(orgId: number) {
   </div>
 </div>
 
-<div class="sidebar" :style="{ width: sidebarWidth + 'px' }" :class="{ collapsed: collapsed, resizing: resizerActive }" v-show="!(dsMode === 'share' && !shareRootPath)">
+<div class="sidebar" :style="{ width: sidebarWidth + 'px' }" :class="{ collapsed: collapsed, resizing: resizerActive }" v-show="!sidebarHidden">
   <div class="sidebar-header">
     <span class="sidebar-title">{{ sidebarTitle }}</span>
     <span v-if="header.badge" class="sidebar-badge">{{ header.badge }}</span>
@@ -120,7 +137,7 @@ async function onSwitchOrg(orgId: number) {
   </div>
 </div>
 <div
-  v-if="!collapsed && !(dsMode === 'share' && !shareRootPath)"
+  v-if="!collapsed && !sidebarHidden"
   class="resizer"
   :class="{ active: resizerActive }"
   @mousedown="onResizerMouseDown"
@@ -128,7 +145,7 @@ async function onSwitchOrg(orgId: number) {
 <!-- 悬浮折叠/展开按钮：作为 #app 子元素绝对定位，避免被 sidebar overflow:hidden 裁剪。
      left = sidebar 宽度（折叠态 0）+ activity-bar 偏移（48px，分享模式无 activity-bar 为 0） -->
 <button
-  v-if="!(dsMode === 'share' && !shareRootPath)"
+  v-if="!sidebarHidden"
   class="sidebar-toggle"
   :class="{ collapsed: collapsed }"
   :style="{ left: toggleBtnLeft + 'px' }"
@@ -189,6 +206,10 @@ async function onSwitchOrg(orgId: number) {
     </div>
   </div>
 </div>
+
+<!-- 文件树右键菜单 + 新建/重命名输入弹窗（全局单例，浏览器与分享模式共用挂载点；分享模式不触发） -->
+<FileContextMenu />
+<PromptModal />
 </template>
 
 <style scoped>

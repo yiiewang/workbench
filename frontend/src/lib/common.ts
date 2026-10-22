@@ -74,6 +74,14 @@ export function clearAuthState() {
   localStorage.removeItem(STORAGE_KEY_USER);
   localStorage.removeItem(STORAGE_KEY_ORG);
   localStorage.removeItem(STORAGE_KEY_FEATURES);
+  // 分享密码缓存（share_pwd_<token>，创建分享时明文暂存）与登录身份无关，
+  // 但登出时一并清掉，避免残留
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('share_pwd_')) localStorage.removeItem(k);
+    }
+  } catch (_) { /* localStorage 不可用时忽略 */ }
 }
 
 /** 持久化登录态 */

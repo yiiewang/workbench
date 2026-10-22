@@ -420,20 +420,21 @@ func (s *Server) handleShareData(ctx iris.Context) {
 				continue
 			}
 			isDir := e.IsDir()
-			if !isDir && e.Type()&os.ModeSymlink != 0 {
+			isLink := e.Type()&os.ModeSymlink != 0
+			if isLink && !isDir {
 				if info, err := os.Stat(filepath.Join(fsPath, e.Name())); err == nil {
 					isDir = info.IsDir()
 				}
 			}
 			if isDir {
-				dirs = append(dirs, treeItem{Name: e.Name(), IsDir: true})
+				dirs = append(dirs, treeItem{Name: e.Name(), IsDir: true, IsLink: isLink})
 			} else {
 				fi, _ := e.Info()
 				size := int64(0)
 				if fi != nil {
 					size = fi.Size()
 				}
-				files = append(files, treeItem{Name: e.Name(), IsDir: false, Size: size})
+				files = append(files, treeItem{Name: e.Name(), IsDir: false, Size: size, IsLink: isLink})
 			}
 		}
 		sort.Slice(dirs, func(i, j int) bool { return naturalLess(dirs[i].Name, dirs[j].Name) })

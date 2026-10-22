@@ -23,7 +23,7 @@ setupIndexApp()
 watch(() => route.path, (path) => {
   if (dsMode.value === 'share' && !path.startsWith('/s/')) {
     exitShareMode()
-    if (path === '/' && storeAuthToken.value) {
+    if (path === '/file' && storeAuthToken.value) {
       treeStore.loadDir('/').catch(() => {})
     }
     return

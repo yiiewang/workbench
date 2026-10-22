@@ -8,7 +8,7 @@ import {
     conflictChoices, showConfirmSummary, confirmSummary, filterSeverity,
     orgTasks, activeTaskId,
 } from '../stores/todoStore'
-import { checkAuth } from '../stores/indexStore'
+import { checkAuth, registerTodoAppReset } from '../stores/indexStore'
 import * as taskApi from '../api/tasks'
 import { ElNotification } from 'element-plus'
 import { marked, Renderer } from 'marked'
@@ -212,6 +212,10 @@ export function setupTodoApp() {
         _tasksJsonCache = null;
         _tasksJsonCacheTime = 0;
     }
+
+    // 身份切换（登出/换账号/切换组织）时由 resetIdentityScopedState 调用：
+    // 清空 /api/tasks 请求缓存，防止新身份读到旧身份组织的数据（3 秒 TTL 内尤其危险）
+    registerTodoAppReset(invalidateTasksJsonCache);
 
     // --- Auto Status Update ---
     // 只计算延期天数，不自动修改状态（状态由用户手动管理）
@@ -1674,19 +1678,19 @@ export function setupTodoApp() {
             return;
         }
         // 加载其他成员的日程（只读）
+        // 注意：GET /api/tasks 只返回当前用户自己的任务（RBAC 收紧），
+        // 查看成员须走专用端点 /api/tasks/user/{id}，且不走 3 秒缓存（每次现拉）
         const { orgId } = currentUser.value;
         const memberNameText = memberName(newMemberId);
         try {
-            const data = await fetchTasksJSON();
-            if (data) {
-                const org = (data.orgs || {})[orgId];
-                if (org && org[newMemberId] && Array.isArray(org[newMemberId].tasks)) {
-                    tasks.value = org[newMemberId].tasks;
-                    showToast(`正在查看 ${memberNameText} 的日程（只读）`, 'success');
-                } else {
-                    tasks.value = [];
-                    showToast(`${memberNameText} 暂无任务`, 'warning');
-                }
+            const data = await taskApi.getMemberTasks(newMemberId);
+            const org = (data.orgs || {})[orgId];
+            if (org && org[newMemberId] && Array.isArray(org[newMemberId].tasks)) {
+                tasks.value = org[newMemberId].tasks;
+                showToast(`正在查看 ${memberNameText} 的日程（只读）`, 'success');
+            } else {
+                tasks.value = [];
+                showToast(`${memberNameText} 暂无任务`, 'warning');
             }
         } catch (e) {
             tasks.value = [];

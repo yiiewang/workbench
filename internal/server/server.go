@@ -93,12 +93,21 @@ func (s *Server) App() *iris.Application {
 	api.Get("/org-members", auth, s.handleOrgMembers)
 	api.Get("/tasks", auth, s.getTasksJSON)
 	api.Put("/tasks", auth, s.putTasksJSON)
+	// 查看同组织成员的任务（只读，TodoView"查看成员日程"）
+	api.Get("/tasks/user/{id}", auth, s.getMemberTasks)
 	// 增量任务接口：单条增删改，避免全量 PUT 的带宽浪费和并发风险
 	api.Patch("/tasks/{id}", auth, s.patchTask)
 	api.Post("/tasks/{id}", auth, s.postTask)
 	api.Delete("/tasks/{id}", auth, s.deleteTask)
 
 	api.Get("/file", auth, s.handleServeFile)
+	// 文件上传（沙箱限定在当前用户根目录内）
+	api.Post("/upload", auth, s.handleUpload)
+	// 文件管理（沙箱同上）：新建目录 / 删除 / 重命名 / 移动
+	api.Post("/mkdir", auth, s.handleMkdir)
+	api.Delete("/file", auth, s.handleDeleteFile)
+	api.Post("/rename", auth, s.handleRename)
+	api.Post("/move", auth, s.handleMove)
 
 	// 分享管理 API（需鉴权）
 	api.Get("/share", auth, s.handleListShares)
@@ -483,6 +492,45 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 }
 
 // ============================================================
+// GET /api/tasks/user/{id} — 查看同组织成员的任务（只读）
+// ============================================================
+
+// getMemberTasks 返回指定成员的任务数据（TodoView"查看成员日程"功能）。
+// GET /api/tasks 只返回当前登录用户自己的任务（RBAC 收紧后），查看他人日程
+// 需专用端点：先校验目标成员与当前用户同 org 且关系 active（防跨 org 拉取），
+// 再复用 GetTasksJSONByOwner 按目标成员过滤，返回结构与 GET /api/tasks 一致。
+func (s *Server) getMemberTasks(ctx iris.Context) {
+	memberID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	if err != nil || memberID <= 0 {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		return
+	}
+	orgID := currentOrgID(ctx)
+	if orgID == 0 {
+		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
+		return
+	}
+	// 校验成员归属：目标用户必须与当前登录用户同 org 且关系 active
+	_, _, _, _, exists, err := s.db.GetUserOrgIdentity(ctx.Request().Context(), memberID, orgID)
+	if err != nil {
+		serverError(ctx, "check member org failed", err, "member", memberID)
+		return
+	}
+	if !exists {
+		writeFail(ctx, iris.StatusForbidden, CodeForbidden)
+		return
+	}
+
+	data, err := s.db.GetTasksJSONByOwner(ctx.Request().Context(), orgID, memberID)
+	if err != nil {
+		serverError(ctx, "get member tasks failed", err, "member", memberID)
+		return
+	}
+	ctx.Header("Cache-Control", "no-cache")
+	writeOK(ctx, data)
+}
+
+// ============================================================
 // 增量任务接口：PATCH/POST/DELETE /api/tasks/{id}
 // 避免全量 PUT 的带宽浪费（改一条任务不发全部 23 条）
 // ============================================================
@@ -590,6 +638,9 @@ type treeItem struct {
 	Name  string `json:"name"`
 	IsDir bool   `json:"isDir"`
 	Size  int64  `json:"size,omitempty"`
+	// IsDir 之外的链接标记：条目为符号链接时为 true（前端据此加角标；
+	// 浏览/预览仍跟随链接展示真实内容，fsops 的移动/重命名/删除只作用于链接本身）
+	IsLink bool `json:"isLink,omitempty"`
 }
 
 func (s *Server) handleTree(ctx iris.Context) {
@@ -622,21 +673,22 @@ func (s *Server) handleTree(ctx iris.Context) {
 			continue
 		}
 		isDir := e.IsDir()
+		isLink := e.Type()&os.ModeSymlink != 0
 		// 软链接目录：e.IsDir() 返回 false，需要 stat 跟随链接后判断
-		if !isDir && e.Type()&os.ModeSymlink != 0 {
+		if isLink && !isDir {
 			if info, err := os.Stat(filepath.Join(fsPath, e.Name())); err == nil {
 				isDir = info.IsDir()
 			}
 		}
 		if isDir {
-			dirs = append(dirs, treeItem{Name: e.Name(), IsDir: true})
+			dirs = append(dirs, treeItem{Name: e.Name(), IsDir: true, IsLink: isLink})
 		} else {
 			info, _ := e.Info()
 			size := int64(0)
 			if info != nil {
 				size = info.Size()
 			}
-			files = append(files, treeItem{Name: e.Name(), IsDir: false, Size: size})
+			files = append(files, treeItem{Name: e.Name(), IsDir: false, Size: size, IsLink: isLink})
 		}
 	}
 	sort.Slice(dirs, func(i, j int) bool { return naturalLess(dirs[i].Name, dirs[j].Name) })

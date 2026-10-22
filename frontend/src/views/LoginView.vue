@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { setAuth, checkAuth, loggedIn } from '../stores/auth'
+import { resetIdentityScopedState } from '../stores/indexStore'
 import * as authApi from '../api/auth'
 
 const router = useRouter()
@@ -31,6 +32,8 @@ async function doLogin() {
       orgName: data.user.orgName,
       role: data.user.role || 'user',
     })
+    // 登录成功 = 身份切换：清上一身份的树缓存/tab/todo，防止残留（SPA 内登出后换账号、token 过期重登均走此路径）
+    resetIdentityScopedState()
     // 登录后立即拉取完整组织上下文（orgs / features / 默认组织），供组织切换器与动态菜单使用
     await checkAuth()
     const redirect = (route.query.redirect as string) || '/'

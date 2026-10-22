@@ -190,7 +190,8 @@ workbench/
 ### Version Bump
 
 1. Update version in code if needed (optional, version is auto-detected from git tag)
-2. Commit all changes and ensure working tree is clean
+2. Move `[Unreleased]` entries in `CHANGELOG.md` to the new version section with date
+3. Commit all changes and ensure working tree is clean
 
 ### Create Release
 

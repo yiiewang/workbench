@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // Recursive tree node component — replaces renderTree / expandNode DOM manipulation
 import { computed } from 'vue'
-import { activeTabPath, dsMode, updateHash, openTabFn } from '../../stores/indexStore'
+import { dsMode, updateHash, openTabFn } from '../../stores/indexStore'
 import { treeStore } from '../../composables/useTreeStore'
+import { openFileContextMenu } from '../../composables/useContextMenu'
 import type { TreeItem } from '../../composables/useTreeStore'
 
 const props = defineProps<{ path: string; depth: number }>()
@@ -43,6 +44,10 @@ const EXT_SVG_KEYS = new Set(['html','htm','css','js','ts','json','md','markdown
 
 function getExt(name: string) { return ((name || '').split('.').pop() || '').toLowerCase() }
 
+// 符号链接徽章：accent 圆底 + 白色外链箭头，叠加在图标右下角。
+// 尺寸/定位/颜色全部内联：全局 .tree-icon svg{16px} 与 .dir svg path{颜色覆盖} 会被内联样式压过。
+const LINK_BADGE = `<svg viewBox="0 0 16 16" style="width:8px;height:8px;position:absolute;right:-3px;bottom:-2px;"><circle cx="8" cy="8" r="8" style="fill:var(--accent,#007acc)"/><path d="M5 11l6-6M7 4.8h4.6v4.6" style="stroke:#fff;stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round"/></svg>`
+
 function fileIcon(ext: string, name: string): string {
   if (EXT_SVG_KEYS.has(ext)) return (ICONS[ext] || ICONS._file)
   if (name.startsWith('.')) return ICONS._lock
@@ -79,14 +84,10 @@ function onFileClick(path: string, item: TreeItem) {
   if (openTabFn) openTabFn(path, item.name, getExt(item.name), item.size || 0)
 }
 
-function onContextmenu(path: string, item: TreeItem) {
+function onContextmenu(path: string, item: TreeItem, e: MouseEvent) {
   if (dsMode.value === 'share') return
   treeStore.activePath.value = path
-  activeTabPath.value = path
-  const type = item.isDir ? 'dir' : 'file'
-  if (typeof (window as any).openShareModal === 'function') {
-    (window as any).openShareModal(type)
-  }
+  openFileContextMenu(path, item.name, item.isDir, e.clientX, e.clientY)
 }
 </script>
 
@@ -98,7 +99,7 @@ function onContextmenu(path: string, item: TreeItem) {
       :class="{ active: treeStore.activePath.value === childPath(item.name) }"
       :style="{ paddingLeft: `${depth * 16}px` }"
       @click="item.isDir ? onDirClick(childPath(item.name)) : onFileClick(childPath(item.name), item)"
-      @contextmenu.prevent="onContextmenu(childPath(item.name), item)"
+      @contextmenu.prevent="onContextmenu(childPath(item.name), item, $event)"
     >
       <span
         v-if="item.isDir"
@@ -109,10 +110,10 @@ function onContextmenu(path: string, item: TreeItem) {
       <span v-else class="tree-icon"></span>
       <span
         class="tree-icon"
-        :class="item.isDir ? 'dir' : 'file'"
-        v-html="iconHtml(item)"
+        :class="[item.isDir ? 'dir' : 'file', { link: item.isLink }]"
+        v-html="item.isLink ? iconHtml(item) + LINK_BADGE : iconHtml(item)"
       ></span>
-      <span class="tree-name" :title="item.name">{{ item.name }}</span>
+      <span class="tree-name" :title="item.isLink ? `${item.name} (symlink)` : item.name">{{ item.name }}</span>
     </div>
 
     <div v-if="item.isDir && isExpanded(childPath(item.name))" class="tree-children open">
@@ -121,3 +122,8 @@ function onContextmenu(path: string, item: TreeItem) {
   </div>
   </template>
 </template>
+
+<style scoped>
+/* 符号链接徽章（LINK_BADGE SVG）绝对定位的基准 */
+.tree-icon { position: relative; }
+</style>

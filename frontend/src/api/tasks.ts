@@ -17,9 +17,15 @@ export interface Task {
   sortOrder: number
 }
 
-// 全量同步：获取所有任务（GET /api/tasks）
+// 全量同步：获取所有任务（GET /api/tasks）— 仅返回当前登录用户自己的任务
 export async function getTasks() {
   return apiCall('/api/tasks')
+}
+
+// 查看同组织成员的任务（只读）— GET /api/tasks/user/{userId}
+// 服务端校验目标成员与当前用户同 org 且关系 active，返回结构与 getTasks 一致
+export async function getMemberTasks(userId: number | string) {
+  return apiCall(`/api/tasks/user/${encodeURIComponent(String(userId))}`)
 }
 
 // 全量同步：替换所有任务（PUT /api/tasks）

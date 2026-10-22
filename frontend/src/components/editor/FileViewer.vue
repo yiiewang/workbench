@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // File viewer component — replaces renderToContainer / showWelcome innerHTML manipulation
-import { ref, watch, onUnmounted } from 'vue'
+import { ref, watch, nextTick, onUnmounted } from 'vue'
 import { dataSource } from '../../composables/useEditor'
 import { isBinaryExt, isImageExt, formatSize, API_CODE } from '../../lib/common'
 import { showSharePasswordModal } from '../../lib/sharePasswordModal'
@@ -54,6 +54,8 @@ async function loadFile() {
       textContent.value = await file.text() || ''
     }
     loading.value = false
+    // mermaid must run after loading is cleared and the container is mounted (avoids Vue DOM-update race)
+    if (['md', 'markdown'].includes(ext)) renderMermaid()
   } catch (err: any) {
     if (err.code === API_CODE.PASSWORD_REQUIRED || err.code === API_CODE.INVALID_SHARE_PWD) {
       const pwd = await showSharePasswordModal(err.msg)
@@ -73,33 +75,47 @@ async function loadFile() {
 
 // ---- Markdown render ----
 const markdownHtml = ref('')
-let mermaidScript: HTMLScriptElement | null = null
+const markdownContainer = ref<HTMLElement | null>(null)
 
 async function renderMarkdown() {
   try {
     await Promise.all([ensureMarked(), ensurePurify()])
     const { marked, DOMPurify } = window as any
     markdownHtml.value = DOMPurify.sanitize(marked.parse(textContent.value))
-    ensureMermaid().then(() => {
-      try { (window as any).mermaid.run({ querySelector: '.markdown-body .language-mermaid' }) } catch {}
-    })
   } catch {}
 }
 
-function ensureScript(src: string, readyKey: string): Promise<void> {
+// Runs after loading=false so the container is mounted; waits for the v-html patch before rendering diagrams
+async function renderMermaid() {
+  if (!markdownHtml.value.includes('language-mermaid')) return
+  const ok = await ensureMermaid()
+  if (!ok) return
+  await nextTick()
+  const container = markdownContainer.value
+  if (!container) return
+  const nodes = container.querySelectorAll('.language-mermaid')
+  if (!nodes.length) return
+  try { await (window as any).mermaid.run({ nodes, suppressErrors: true }) } catch {}
+}
+
+function ensureScript(src: string, readyKey: string): Promise<boolean> {
   return new Promise(resolve => {
-    if ((window as any)[readyKey]) return resolve()
+    if ((window as any)[readyKey]) return resolve(true)
     const s = document.createElement('script')
     s.src = src; s.crossOrigin = 'anonymous'
-    s.onload = () => { (window as any)[readyKey] = true; resolve() }
-    s.onerror = () => resolve()
+    s.onload = () => { (window as any)[readyKey] = true; resolve(true) }
+    s.onerror = () => resolve(false)
     document.head.appendChild(s)
   })
 }
 const ensureMarked = () => ensureScript('https://cdn.jsdelivr.net/npm/marked@12/marked.min.js', '_markedLoaded')
 const ensurePurify = () => ensureScript('https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js', '_purifyLoaded')
-const ensureMermaid = () => ensureScript('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js', '_mermaidLoaded')
-  .then(() => { (window as any).mermaid?.initialize?.({ startOnLoad: false, theme: 'default' }) })
+const ensureMermaid = async (): Promise<boolean> => {
+  const ok = await ensureScript('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js', '_mermaidLoaded')
+  if (ok) (window as any).mermaid?.initialize?.({ startOnLoad: false, theme: 'default' })
+  else console.warn('[FileViewer] Failed to load mermaid script; mermaid blocks will render as plain code')
+  return ok
+}
 </script>
 
 <template>
@@ -138,7 +154,7 @@ const ensureMermaid = () => ensureScript('https://cdn.jsdelivr.net/npm/mermaid@1
     <XmlViewer v-else-if="['xml'].includes(ext)" :text="xmlText" />
 
     <!-- Markdown -->
-    <div v-else-if="['md','markdown'].includes(ext)" class="markdown-body" v-html="markdownHtml" />
+    <div v-else-if="['md','markdown'].includes(ext)" ref="markdownContainer" class="markdown-body" v-html="markdownHtml" />
 
     <!-- Text / Code -->
     <pre v-else class="text-preview">{{ textContent }}</pre>

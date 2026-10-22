@@ -7,7 +7,8 @@ import SharesSidebar from '../components/sidebar/SharesSidebar.vue'
 // SPA 路由（嵌套布局）：
 //   /login              → 独立页面（无布局），公开
 //   /s/:token           → 分享预览（无布局守卫），公开
-//   /  /shares  /todo   → 应用界面（DefaultLayout 包裹），需登录
+//   /                   → 功能首页（各功能入口卡片，无侧栏）
+//   /file  /shares  /todo  /admin → 应用界面（DefaultLayout 包裹），需登录
 //
 // 命名视图：default=主区域, sidebar=侧栏面板（在 DefaultLayout 中渲染）
 //
@@ -29,7 +30,13 @@ const router = createRouter({
       component: () => import('../layouts/DefaultLayout.vue'),
       children: [
         {
+          // 功能首页：入口卡片聚合页，无侧栏（hideSidebar 由 DefaultLayout 识别）
           path: '',
+          component: () => import('../views/HomeView.vue'),
+          meta: { hideSidebar: true },
+        },
+        {
+          path: 'file',
           components: { default: IndexView, sidebar: ExplorerSidebar },
           meta: { sidebarTitle: 'EXPLORER' },
         },

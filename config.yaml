@@ -26,6 +26,8 @@ routes:
   "/todo": "__spa__"
   "/shares": "__spa__"
   "/login": "__spa__"
+  "/file": "__spa__"
+  "/admin": "__spa__"
   "/index": "__listdir__"
   "/todo.html": "Todo Board"
 

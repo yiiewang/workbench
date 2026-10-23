@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-10-23
+
 ### Added
 
 - **移动端适配**（≤768px 断点）：侧栏变抽屉（transform 滑入滑出，`collapsed` 类驱动显隐），遮罩点击关闭、抽屉头关闭按钮、打开文件自动收起；隐藏 resizer，移动端默认收起不影响桌面宽度偏好；PromptModal 加 max-width 防小屏溢出

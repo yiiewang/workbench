@@ -756,29 +756,16 @@
     color: var(--text);
 }
 #todo-app .md-editor-wrapper .md-editor textarea:focus { border-color: var(--accent); outline: none; }
-#todo-app .md-editor-wrapper .md-preview-body {
+/* 预览区：统一使用 MarkdownPreview 组件（.markdown-body），这里只管容器尺寸与滚动 */
+#todo-app .md-editor-wrapper .md-preview .markdown-body {
     flex: 1; min-height: 0;
-    padding: 12px 16px;
     border: 1px solid var(--border); border-radius: 4px;
     background: var(--code-bg);
     overflow-y: auto;
-    font-size: 13px; line-height: 1.7;
     box-sizing: border-box;
 }
-#todo-app .md-editor-wrapper .md-preview-body h1 { font-size: 18px; margin: 10px 0 6px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
-#todo-app .md-editor-wrapper .md-preview-body h2 { font-size: 16px; margin: 8px 0 4px; }
-#todo-app .md-editor-wrapper .md-preview-body h3 { font-size: 14px; margin: 6px 0 4px; }
-#todo-app .md-editor-wrapper .md-preview-body p { margin: 6px 0; }
-#todo-app .md-editor-wrapper .md-preview-body ul,
-#todo-app .md-editor-wrapper .md-preview-body ol { padding-left: 20px; margin: 6px 0; }
-#todo-app .md-editor-wrapper .md-preview-body code { background: var(--code-bg); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
-#todo-app .md-editor-wrapper .md-preview-body pre { background: var(--code-bg); padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 12px; }
-#todo-app .md-editor-wrapper .md-preview-body blockquote { border-left: 3px solid var(--accent); padding-left: 10px; color: var(--text-dim); margin: 6px 0; }
-#todo-app .md-editor-wrapper .md-preview-body table { border-collapse: collapse; margin: 6px 0; width: 100%; }
-#todo-app .md-editor-wrapper .md-preview-body th,
-#todo-app .md-editor-wrapper .md-preview-body td { border: 1px solid var(--border); padding: 4px 8px; font-size: 12px; }
-#todo-app .md-editor-wrapper .md-preview-body th { background: var(--header-bg); }
-#todo-app .md-editor-wrapper .md-preview-body a { color: var(--accent); }
+/* 预览框自身就是滚动容器，表格不再限高（表头 sticky 相对预览框生效） */
+#todo-app .md-editor-wrapper .md-preview .markdown-body-compact .md-table-scroll { max-height: none; }
 
 /* ---- Conflict Resolution ---- */
 #todo-app .conflict-option {

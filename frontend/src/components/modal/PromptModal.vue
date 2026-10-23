@@ -33,7 +33,7 @@ function submit() {
 
 <template>
   <div class="modal-mask" v-if="visible" @click.self="close">
-    <div class="modal-content" style="width: 380px;">
+    <div class="modal-content" style="width: 380px; max-width: 92vw;">
       <div class="modal-header">{{ title }}</div>
       <div class="modal-body">
         <el-input ref="inputEl" v-model="value" @keyup.enter="submit"></el-input>

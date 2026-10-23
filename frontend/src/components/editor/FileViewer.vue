@@ -1,11 +1,38 @@
 <script setup lang="ts">
 // File viewer component — replaces renderToContainer / showWelcome innerHTML manipulation
-import { ref, watch, nextTick, onUnmounted } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { dataSource } from '../../composables/useEditor'
 import { isBinaryExt, isImageExt, formatSize, API_CODE } from '../../lib/common'
 import { showSharePasswordModal } from '../../lib/sharePasswordModal'
 import JsonViewer from './JsonViewer.vue'
 import XmlViewer from './XmlViewer.vue'
+import MarkdownPreview from '../markdown/MarkdownPreview.vue'
+
+// srcdoc 文档中 href="#id" 会被解析成导航到 about:srcdoc#id，触发整页重载（表现为点了没反应）。
+// 注入这段脚本把页内锚点点击改成 scrollIntoView。sandbox 不含 allow-same-origin，
+// 该脚本运行在独立源里，访问不到父页面（DOM / localStorage）。
+const ANCHOR_HOOK = `<script>
+(function(){
+  document.addEventListener('click', function(e){
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (href.charAt(0) !== '#') return;
+    var id = decodeURIComponent(href.slice(1));
+    if (!id) return;
+    var t = document.getElementById(id) || document.getElementsByName(id)[0];
+    if (!t) return;
+    e.preventDefault();
+    t.scrollIntoView();
+  }, false);
+})();
+<\/script>`
+
+function withAnchorHook(html: string): string {
+  if (!html) return html
+  const i = html.lastIndexOf('</body>')
+  return i === -1 ? html + ANCHOR_HOOK : html.slice(0, i) + ANCHOR_HOOK + html.slice(i)
+}
 
 const props = defineProps<{ path: string; name: string; ext: string; size: number }>()
 const emit = defineEmits<{ passwordRequired: [] }>()
@@ -14,13 +41,12 @@ const loading = ref(true)
 const error = ref('')
 const blobUrl = ref('')
 const textContent = ref('')
-const iframeSrc = ref('')
+const htmlText = ref('')
 const jsonText = ref('')
 const xmlText = ref('')
 
 onUnmounted(() => {
   if (blobUrl.value) URL.revokeObjectURL(blobUrl.value)
-  if (iframeSrc.value) URL.revokeObjectURL(iframeSrc.value)
 })
 
 watch(() => props.path, loadFile, { immediate: true })
@@ -28,7 +54,7 @@ watch(() => props.path, loadFile, { immediate: true })
 async function loadFile() {
   if (!props.path) return
   loading.value = true; error.value = ''
-  blobUrl.value = ''; textContent.value = ''; iframeSrc.value = ''; jsonText.value = ''; xmlText.value = ''
+  blobUrl.value = ''; textContent.value = ''; htmlText.value = ''; jsonText.value = ''; xmlText.value = ''
 
   try {
     const file = await dataSource.getFile(props.path)
@@ -41,21 +67,19 @@ async function loadFile() {
       const blob = await file.blob()
       blobUrl.value = URL.createObjectURL(blob)
     } else if (['html', 'htm'].includes(ext)) {
-      const blob = await file.blob()
-      iframeSrc.value = URL.createObjectURL(blob)
+      // 用 srcdoc 内联渲染：blob: URL 在无 allow-same-origin 的 sandbox iframe 里
+      // 会被 Chrome 拒绝（Not allowed to load local resource），锚点完全不可用
+      htmlText.value = withAnchorHook(await file.text() || '')
     } else if (ext === 'json') {
       jsonText.value = await file.text() || ''
     } else if (ext === 'xml') {
       xmlText.value = await file.text() || ''
     } else if (['md', 'markdown'].includes(ext)) {
       textContent.value = await file.text() || ''
-      await renderMarkdown()
     } else {
       textContent.value = await file.text() || ''
     }
     loading.value = false
-    // mermaid must run after loading is cleared and the container is mounted (avoids Vue DOM-update race)
-    if (['md', 'markdown'].includes(ext)) renderMermaid()
   } catch (err: any) {
     if (err.code === API_CODE.PASSWORD_REQUIRED || err.code === API_CODE.INVALID_SHARE_PWD) {
       const pwd = await showSharePasswordModal(err.msg)
@@ -73,49 +97,6 @@ async function loadFile() {
   }
 }
 
-// ---- Markdown render ----
-const markdownHtml = ref('')
-const markdownContainer = ref<HTMLElement | null>(null)
-
-async function renderMarkdown() {
-  try {
-    await Promise.all([ensureMarked(), ensurePurify()])
-    const { marked, DOMPurify } = window as any
-    markdownHtml.value = DOMPurify.sanitize(marked.parse(textContent.value))
-  } catch {}
-}
-
-// Runs after loading=false so the container is mounted; waits for the v-html patch before rendering diagrams
-async function renderMermaid() {
-  if (!markdownHtml.value.includes('language-mermaid')) return
-  const ok = await ensureMermaid()
-  if (!ok) return
-  await nextTick()
-  const container = markdownContainer.value
-  if (!container) return
-  const nodes = container.querySelectorAll('.language-mermaid')
-  if (!nodes.length) return
-  try { await (window as any).mermaid.run({ nodes, suppressErrors: true }) } catch {}
-}
-
-function ensureScript(src: string, readyKey: string): Promise<boolean> {
-  return new Promise(resolve => {
-    if ((window as any)[readyKey]) return resolve(true)
-    const s = document.createElement('script')
-    s.src = src; s.crossOrigin = 'anonymous'
-    s.onload = () => { (window as any)[readyKey] = true; resolve(true) }
-    s.onerror = () => resolve(false)
-    document.head.appendChild(s)
-  })
-}
-const ensureMarked = () => ensureScript('https://cdn.jsdelivr.net/npm/marked@12/marked.min.js', '_markedLoaded')
-const ensurePurify = () => ensureScript('https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js', '_purifyLoaded')
-const ensureMermaid = async (): Promise<boolean> => {
-  const ok = await ensureScript('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js', '_mermaidLoaded')
-  if (ok) (window as any).mermaid?.initialize?.({ startOnLoad: false, theme: 'default' })
-  else console.warn('[FileViewer] Failed to load mermaid script; mermaid blocks will render as plain code')
-  return ok
-}
 </script>
 
 <template>
@@ -142,9 +123,9 @@ const ensureMermaid = async (): Promise<boolean> => {
     <img v-else-if="isImageExt(ext) && blobUrl" :src="blobUrl"
       style="max-width:100%;max-height:100%;display:block;margin:auto;object-fit:contain;" />
 
-    <!-- HTML iframe -->
-    <iframe v-else-if="['html','htm'].includes(ext) && iframeSrc" :src="iframeSrc"
-      sandbox="allow-scripts allow-forms allow-popups"
+    <!-- HTML：srcdoc 内联渲染，sandbox 不含 allow-same-origin（不可访问父页面存储） -->
+    <iframe v-else-if="['html','htm'].includes(ext) && htmlText" :srcdoc="htmlText"
+      sandbox="allow-scripts allow-popups"
       style="width:100%;height:100%;border:none;background:#fff;" />
 
     <!-- JSON -->
@@ -154,7 +135,7 @@ const ensureMermaid = async (): Promise<boolean> => {
     <XmlViewer v-else-if="['xml'].includes(ext)" :text="xmlText" />
 
     <!-- Markdown -->
-    <div v-else-if="['md','markdown'].includes(ext)" ref="markdownContainer" class="markdown-body" v-html="markdownHtml" />
+    <MarkdownPreview v-else-if="['md','markdown'].includes(ext)" :content="textContent" />
 
     <!-- Text / Code -->
     <pre v-else class="text-preview">{{ textContent }}</pre>

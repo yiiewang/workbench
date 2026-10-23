@@ -278,18 +278,16 @@ body {
   position: relative;
 }
 
-/* Tab bar */
+/* Tab bar：tab 区（可横向滚动）+ 右侧操作组（固定宽度） */
 .tab-bar {
+  flex: 1;
+  min-width: 0;
   display: flex;
   background: var(--header-bg);
-  border-bottom: 1px solid var(--tab-border);
   height: 35px;
   align-items: flex-end;
   overflow-x: auto;
   overflow-y: hidden;
-  flex-shrink: 0;
-  padding-right: 150px;
-  /* 给 download + share 按钮留位置 */
   scrollbar-width: thin;
   scrollbar-color: #ccc transparent;
 }
@@ -313,9 +311,6 @@ body {
 
 .tab-share,
 .tab-download {
-  position: absolute;
-  top: 0;
-  z-index: 10;
   padding: 0 14px;
   height: 35px;
   display: flex;
@@ -327,14 +322,6 @@ body {
   background: var(--header-bg);
   border-left: 1px solid var(--tab-border);
   white-space: nowrap;
-}
-
-.tab-share {
-  right: 0;
-}
-
-.tab-download {
-  right: 76px;
 }
 
 .tab-share:hover,
@@ -514,12 +501,22 @@ body {
 
 /* Markdown content */
 .markdown-body {
-  padding: 32px 48px;
-  max-width: 860px;
-  margin: 0 auto;
+  padding: 24px 32px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0;
   line-height: 1.75;
   color: #24292f;
   font-size: 15px;
+  word-wrap: break-word;
+}
+
+/* 紧凑模式：todo 编辑器内的分栏预览（小字号 + 小内边距） */
+.markdown-body-compact {
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 .markdown-body h1 {
@@ -574,10 +571,112 @@ body {
   margin: 4px 0;
 }
 
+/* 与 VSCode 一致：宽表格在容器内左右滚动，不撑破布局（未套滚动容器时的回退） */
 .markdown-body table {
+  display: block;
   border-collapse: collapse;
   margin: 0 0 16px;
-  width: 100%;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* 表格滚动容器（由 wrapMarkdownTables 注入）：
+   - max-height 让超高表格内部滚动，thead 才能 sticky 常驻
+   - 左右渐变阴影提示"还能横向滚动"（纯 CSS：local 遮罩随内容滚，scroll 阴影固定） */
+.markdown-body .md-table-scroll {
+  max-width: 100%;
+  max-height: 70vh;
+  overflow: auto;
+  margin: 0 0 16px;
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(to right, var(--bg) 30%, transparent),
+    linear-gradient(to left, var(--bg) 30%, transparent),
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.18), transparent),
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.18), transparent);
+  background-repeat: no-repeat;
+  background-position: left center, right center, left center, right center;
+  background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+
+.markdown-body .md-table-scroll table {
+  display: table;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  overflow: visible;
+}
+
+/* 表头常驻（纵向滚动时） */
+.markdown-body .md-table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* 首列常驻（横向滚动时），需不透明背景避免内容透叠 */
+.markdown-body .md-table-scroll tbody th:first-child,
+.markdown-body .md-table-scroll td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg);
+}
+
+/* 左上角交叉单元格层级最高，且保留表头底色 */
+.markdown-body .md-table-scroll thead th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: #f5f5f5;
+}
+
+/* 观感：GitHub 风细横线 + 表头底色 + 斑马纹 + 行 hover + 圆角卡片 */
+.markdown-body .md-table-scroll {
+  border: 1px solid #e5e5e5;
+  border-radius: 6px;
+}
+
+.markdown-body .md-table-scroll th,
+.markdown-body .md-table-scroll td {
+  border: 0;
+  border-bottom: 1px solid #ebebeb;
+}
+
+.markdown-body .md-table-scroll thead th {
+  background: #f5f5f5;
+  border-bottom: 2px solid #dcdcdc;
+}
+
+.markdown-body .md-table-scroll tbody tr:last-child td,
+.markdown-body .md-table-scroll tbody tr:last-child th {
+  border-bottom: 0;
+}
+
+.markdown-body .md-table-scroll tbody tr:nth-child(even) {
+  background: #fafafa;
+}
+
+.markdown-body .md-table-scroll tbody tr:hover {
+  background: #eff4fa;
+}
+
+/* 首列 sticky 需不透明背景，逐态跟随所在行，避免盖掉斑马纹/hover */
+.markdown-body .md-table-scroll tbody tr:nth-child(even) th:first-child,
+.markdown-body .md-table-scroll tbody tr:nth-child(even) td:first-child {
+  background: #fafafa;
+}
+
+.markdown-body .md-table-scroll tbody tr:hover th:first-child,
+.markdown-body .md-table-scroll tbody tr:hover td:first-child {
+  background: #eff4fa;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .markdown-body th,
@@ -854,3 +953,71 @@ body {
   font-size: 13px;
 }
 
+
+/* ============================================================
+   移动端适配（≤768px）：sidebar 抽屉化 + 隐藏 resizer
+   - sidebar 变 fixed 覆盖层：从 activity-bar(48px) 右缘滑出、全高、带阴影
+   - resizer 隐藏（触屏拖拽体验差，宽度固定 280px）
+   - sidebar-toggle 贴 activity-bar 右缘（left 由 inline style 控制，
+     折叠态计算值 42px 恰好贴边，展开抽屉时隐藏按钮避免遮挡树）
+   - 断点值与 useSidebarResize.ts MOBILE_QUERY、DefaultLayout isMobileLayout 保持一致
+   ============================================================ */
+.sidebar-mask {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 48px;
+    width: 280px !important; /* 抽屉宽度固定，忽略 JS 拖拽保存的宽度 */
+    max-width: calc(100vw - 48px);
+    z-index: 900;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.25);
+    /* collapsed 态完全滑出屏幕。显隐只由 .collapsed 类驱动（transform），
+       不依赖内联 width —— 修复 width !important 覆盖折叠态 inline width:0
+       导致抽屉无法收起的问题 */
+    transform: translateX(calc(-100% - 48px));
+    transition: transform 0.2s ease;
+  }
+
+  /* 展开态（非 collapsed）：滑入 */
+  .sidebar:not(.collapsed) {
+    transform: translateX(0);
+  }
+
+  /* 分享模式无 activity-bar，抽屉贴左缘 */
+  .sidebar-mask {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 899;
+    background: rgba(0, 0, 0, 0.35);
+  }
+
+  /* 触屏不显示拖拽条 */
+  .resizer {
+    display: none;
+  }
+
+  /* 抽屉展开时隐藏悬浮 toggle（点遮罩收起），折叠态保留（贴 activity-bar 右缘） */
+  .sidebar-toggle:not(.collapsed) {
+    display: none;
+  }
+
+  /* tab 文件名收紧，多 tab 时靠滚动而非压缩 */
+  .tab-name {
+    max-width: 110px;
+  }
+
+  .main {
+    width: 100%;
+  }
+
+  /* 窄屏收紧 markdown 内边距，宽表格仍可左右滚动 */
+  .markdown-body {
+    padding: 16px;
+  }
+}

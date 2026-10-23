@@ -14,6 +14,14 @@ function save(w: number, c: boolean) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ width: w, collapsed: c })) } catch {}
 }
 
+// 移动端断点（与 style.css 的 @media (max-width: 768px) 保持一致）
+const MOBILE_QUERY = '(max-width: 768px)'
+
+function isMobileViewport(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    && window.matchMedia(MOBILE_QUERY).matches
+}
+
 export function useSidebarResize() {
   const sidebarWidth = ref(saved.width)
   const collapsed = ref(saved.collapsed)
@@ -21,7 +29,9 @@ export function useSidebarResize() {
   const resizerActive = ref(false)
 
   // apply saved state on init
-  sidebarWidth.value = saved.collapsed ? 0 : Math.max(180, Math.min(saved.width, 600))
+  // 移动端强制收起（抽屉模式，见 style.css media query）；桌面端按保存的偏好恢复
+  sidebarWidth.value = saved.collapsed || isMobileViewport() ? 0 : Math.max(180, Math.min(saved.width, 600))
+  if (isMobileViewport()) collapsed.value = true
 
   function onResizerMouseDown() {
     resizing.value = true

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // 应用外壳布局：activity-bar + sidebar + resizer + main。
 // 仅包裹需要应用界面的路由；/login 等独立页面不走此布局。
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { dsMode, shareRootPath, resetIdentityScopedState } from '../stores/indexStore'
+import { dsMode, shareRootPath, activeTabPath, resetIdentityScopedState } from '../stores/indexStore'
 import {
   loggedIn, currentUser, canManageUsers, clearAuth,
   orgs, currentOrgId, switchOrg, hasFeature,
@@ -58,6 +58,29 @@ const toggleBtnLeft = computed(() => {
   const activityBarW = dsMode.value === 'share' ? 0 : ACTIVITY_BAR_W
   const sidebarW = collapsed.value ? 0 : sidebarWidth.value
   return activityBarW + sidebarW - TOGGLE_BTN_HALF
+})
+
+// 移动端抽屉侧栏（≤768px，见 style.css media query）：打开时显示遮罩，点遮罩收起。
+// 桌面端不受影响（isMobileLayout false 时遮罩不渲染）。
+const isMobileLayout = ref(false)
+let mobileMq: MediaQueryList | null = null
+function onMobileMqChange() {
+  isMobileLayout.value = !!mobileMq?.matches
+}
+onMounted(() => {
+  if (typeof window.matchMedia === 'function') {
+    mobileMq = window.matchMedia('(max-width: 768px)')
+    onMobileMqChange()
+    mobileMq.addEventListener('change', onMobileMqChange)
+  }
+})
+onUnmounted(() => {
+  mobileMq?.removeEventListener('change', onMobileMqChange)
+})
+
+// 选中文件（打开 tab）时收起移动端抽屉，让内容区可见
+watch(activeTabPath, (p) => {
+  if (isMobileLayout.value && p && !collapsed.value) toggleSidebar()
 })
 
 function handleHomeClick() { router.push('/') }
@@ -127,10 +150,19 @@ async function onSwitchOrg(orgId: number) {
   </div>
 </div>
 
+<!-- 移动端抽屉遮罩：≤768px 且抽屉展开时显示，点击收起（桌面端 isMobileLayout=false 不渲染） -->
+<div
+  v-if="isMobileLayout && !collapsed && !sidebarHidden"
+  class="sidebar-mask"
+  @click="toggleSidebar"
+></div>
+
 <div class="sidebar" :style="{ width: sidebarWidth + 'px' }" :class="{ collapsed: collapsed, resizing: resizerActive }" v-show="!sidebarHidden">
   <div class="sidebar-header">
     <span class="sidebar-title">{{ sidebarTitle }}</span>
     <span v-if="header.badge" class="sidebar-badge">{{ header.badge }}</span>
+    <!-- 移动端抽屉关闭按钮：桌面隐藏（桌面用悬浮 toggle），仅抽屉展开时显示 -->
+    <button class="sidebar-close" title="Close sidebar" @click="toggleSidebar">&times;</button>
   </div>
   <div class="sidebar-body">
     <RouterView name="sidebar" />
@@ -241,6 +273,23 @@ async function onSwitchOrg(orgId: number) {
   padding: 0 6px;
   line-height: 1.6;
   flex-shrink: 0;
+}
+/* 移动端抽屉关闭按钮：桌面隐藏；≤768px 抽屉展开时显示在 header 右侧 */
+.sidebar-close {
+  display: none;
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.sidebar-close:hover { background: var(--hover, #f2f3f5); color: var(--text); }
+@media (max-width: 768px) {
+  .sidebar:not(.collapsed) .sidebar-close { display: inline-flex; }
 }
 .sidebar-body {
   flex: 1;

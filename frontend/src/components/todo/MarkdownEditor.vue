@@ -1,7 +1,7 @@
 <script setup>
 // MarkdownEditor SFC — 从 todo-app.ts 内联组件迁移，自包含（props modelValue + emit）
-import { ref, computed, nextTick } from 'vue'
-import { marked } from 'marked'
+import { ref, nextTick } from 'vue'
+import MarkdownPreview from '../markdown/MarkdownPreview.vue'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -11,21 +11,14 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue'])
 
 const mdEditor = ref(null)
-const mdPreviewBody = ref(null)
-
-const previewHtml = computed(() => {
-  if (!props.modelValue) return ''
-  if (typeof marked !== 'undefined' && marked.parse) {
-    return marked.parse(props.modelValue)
-  }
-  return props.modelValue
-})
+// MarkdownPreview 组件实例；组件 expose 了根元素 el 用于滚动同步
+const mdPreviewRef = ref(null)
 
 let isSyncing = false
 function onEditorScroll(e) {
   if (isSyncing) return
   const el = e.target
-  const preview = mdPreviewBody.value
+  const preview = mdPreviewRef.value?.el
   if (!preview || !el.scrollHeight) return
   isSyncing = true
   const ratio = el.scrollTop / (el.scrollHeight - el.clientHeight)
@@ -117,7 +110,7 @@ function insertSyntax(type) {
           @scroll="onEditorScroll" ref="mdEditor"></textarea>
       </div>
       <div class="md-preview">
-        <div class="md-preview-body" ref="mdPreviewBody" v-html="previewHtml"></div>
+        <MarkdownPreview ref="mdPreviewRef" :content="modelValue" compact />
       </div>
     </div>
   </div>

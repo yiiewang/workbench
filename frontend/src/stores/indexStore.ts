@@ -1,6 +1,5 @@
 // Shared state for file explorer — reactive store replacing global function pointers
 import { ref, reactive } from 'vue'
-import { extFromPath } from '../lib/common'
 import * as fileApi from '../api/files'
 import * as shareApi from '../api/share'
 
@@ -22,7 +21,7 @@ export {
 // ============================================================
 export const openTabs = reactive(new Map<string, { name: string; ext: string; size: number }>())
 export const activeTabPath = ref('')
-export const currentInnerHash = ref('')
+const currentInnerHash = ref('')
 
 function isValidTabPath(p: unknown): p is string {
   return typeof p === 'string' && p.length > 0
@@ -43,7 +42,6 @@ export function storeRemoveTab(path: string): void { openTabs.delete(path); }
 export function storeHasTab(path: string): boolean { return openTabs.has(path); }
 export function storeGetTab(path: string) { return openTabs.get(path); }
 export function storeSetActiveTab(path: string): void { activeTabPath.value = path; }
-export function storeTabCount(): number { return openTabs.size; }
 
 // ============================================================
 // Identity-scoped state reset（登录/登出/切换组织/换账号时调用）
@@ -118,24 +116,6 @@ export async function dsListDir(p: string): Promise<any> {
   return fileApi.getTree(p)
 }
 
-// dsGetFile 加载文件内容：
-//   - 浏览器模式：调 /api/file?path=<p>（需鉴权）
-//   - 分享模式：token 已唯一确定 share.ResourcePath，
-//     文件分享场景下 p 就是分享根本身 → 不传 path
-//     目录分享场景下 p 是分享根内的子文件 → 传 path
-export async function dsGetFile(p: string): Promise<{ content: string; ext: string }> {
-  if (dsMode.value === 'share') {
-    const root = shareRootPath.value
-    // 文件分享（root 为空，p 是唯一文件）或 p 等于分享根 → 不传 path
-    const subPath = (!root || p === root) ? undefined : p
-    const data: any = await shareApi.getShareData(dsToken.value, subPath)
-    return { content: data.content, ext: extFromPath(p) }
-  }
-  const resp = await fileApi.getFile(p)
-  const text = await resp.text()
-  return { content: text, ext: extFromPath(p) }
-}
-
 // ============================================================
 // Hash routing
 // ============================================================
@@ -148,9 +128,4 @@ export function updateHash(p: string) {
   }
 }
 
-// ============================================================
-// Helpers
-// ============================================================
-export function b64(b: string): string {
-  try { return atob(b) } catch { return b }
-}
+

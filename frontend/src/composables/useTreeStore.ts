@@ -1,6 +1,6 @@
 // Reactive tree store: replaces renderTree/expandNode/findTreeNode/findTreeRow DOM manipulation
 import { reactive, ref } from 'vue'
-import { dsListDir, dsMode } from '../stores/indexStore'
+import { dsListDir } from '../stores/indexStore'
 
 export interface TreeItem {
   name: string

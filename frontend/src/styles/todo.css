@@ -764,7 +764,8 @@
     overflow-y: auto;
     box-sizing: border-box;
 }
-/* 预览框自身就是滚动容器，表格不再限高（表头 sticky 相对预览框生效） */
+/* 预览框自身就是滚动容器，表格不再限高（覆盖 style.css 的 max-height: 70vh，
+   表头 sticky 改为相对预览框生效） */
 #todo-app .md-editor-wrapper .md-preview .markdown-body-compact .md-table-scroll { max-height: none; }
 
 /* ---- Conflict Resolution ---- */

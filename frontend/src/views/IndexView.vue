@@ -34,5 +34,5 @@ watch(() => route.path, (path) => {
   <!-- Tab 栏（含右上角 Share / Download 操作组） -->
   <TabBar />
 
-  <EditorArea @password-required="() => {}" />
+  <EditorArea />
 </template>

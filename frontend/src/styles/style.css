@@ -330,10 +330,6 @@ body {
   background: var(--hover);
 }
 
-.tab-share.copied {
-  color: #1a7f37;
-}
-
 /* Toast 提示 */
 .toast {
   position: fixed;
@@ -519,6 +515,60 @@ body {
   line-height: 1.7;
 }
 
+/* 标题折叠（VSCode 式：折父标题时子标题与内容一并隐藏） */
+.markdown-body .md-foldable {
+  position: relative;
+}
+
+.markdown-body .md-fold-btn {
+  position: absolute;
+  left: -18px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.markdown-body .md-foldable:hover .md-fold-btn,
+.markdown-body .md-foldable.md-folded .md-fold-btn {
+  opacity: 1;
+}
+
+.markdown-body .md-fold-btn:hover {
+  background: var(--hover, #e8e8e8);
+  color: var(--text);
+}
+
+.markdown-body .md-fold-hidden {
+  display: none;
+}
+
+/* 折叠态标题弱化，提示"里面有内容" */
+.markdown-body .md-foldable.md-folded {
+  opacity: 0.75;
+}
+
+/* 紧凑模式内边距更小，按钮相应收窄避免被容器裁掉 */
+.markdown-body-compact .md-fold-btn {
+  left: -12px;
+  width: 12px;
+  height: 12px;
+  font-size: 10px;
+}
+
 .markdown-body h1 {
   font-size: 1.8em;
   margin: 0 0 16px;
@@ -571,7 +621,8 @@ body {
   margin: 4px 0;
 }
 
-/* 与 VSCode 一致：宽表格在容器内左右滚动，不撑破布局（未套滚动容器时的回退） */
+/* 表格基础样式（与 VSCode 一致：宽表格左右滚动不撑破布局）
+   仅作为未套滚动容器时的回退——正常路径由 wrapMarkdownTables 注入 .md-table-scroll */
 .markdown-body table {
   display: block;
   border-collapse: collapse;
@@ -582,13 +633,16 @@ body {
 }
 
 /* 表格滚动容器（由 wrapMarkdownTables 注入）：
-   - max-height 让超高表格内部滚动，thead 才能 sticky 常驻
-   - 左右渐变阴影提示"还能横向滚动"（纯 CSS：local 遮罩随内容滚，scroll 阴影固定） */
+   - max-height 让超高表格内部纵向滚动，thead 才能 sticky 常驻
+   - 左右渐变阴影提示"还能横向滚动"（纯 CSS：local 遮罩随内容滚，scroll 阴影固定）
+   - 观感：细横线 + 表头底色 + 斑马纹 + 行 hover + 圆角卡片 */
 .markdown-body .md-table-scroll {
   max-width: 100%;
   max-height: 70vh;
   overflow: auto;
   margin: 0 0 16px;
+  border: 1px solid #e5e5e5;
+  border-radius: 6px;
   background-color: var(--bg);
   background-image:
     linear-gradient(to right, var(--bg) 30%, transparent),
@@ -609,14 +663,28 @@ body {
   overflow: visible;
 }
 
-/* 表头常驻（纵向滚动时） */
+/* 单元格：细横线，最后一行收边 */
+.markdown-body .md-table-scroll th,
+.markdown-body .md-table-scroll td {
+  border: 0;
+  border-bottom: 1px solid #ebebeb;
+}
+
+.markdown-body .md-table-scroll tbody tr:last-child td,
+.markdown-body .md-table-scroll tbody tr:last-child th {
+  border-bottom: 0;
+}
+
+/* 表头 sticky 常驻 + 底色 + 加粗分隔线 */
 .markdown-body .md-table-scroll thead th {
   position: sticky;
   top: 0;
   z-index: 2;
+  background: #f5f5f5;
+  border-bottom: 2px solid #dcdcdc;
 }
 
-/* 首列常驻（横向滚动时），需不透明背景避免内容透叠 */
+/* 首列 sticky 常驻（横向滚动时），需不透明背景避免内容透叠 */
 .markdown-body .md-table-scroll tbody th:first-child,
 .markdown-body .md-table-scroll td:first-child {
   position: sticky;
@@ -625,36 +693,13 @@ body {
   background: var(--bg);
 }
 
-/* 左上角交叉单元格层级最高，且保留表头底色 */
+/* 左上角交叉单元格：层级最高，保留表头底色 */
 .markdown-body .md-table-scroll thead th:first-child {
-  position: sticky;
-  left: 0;
   z-index: 3;
   background: #f5f5f5;
 }
 
-/* 观感：GitHub 风细横线 + 表头底色 + 斑马纹 + 行 hover + 圆角卡片 */
-.markdown-body .md-table-scroll {
-  border: 1px solid #e5e5e5;
-  border-radius: 6px;
-}
-
-.markdown-body .md-table-scroll th,
-.markdown-body .md-table-scroll td {
-  border: 0;
-  border-bottom: 1px solid #ebebeb;
-}
-
-.markdown-body .md-table-scroll thead th {
-  background: #f5f5f5;
-  border-bottom: 2px solid #dcdcdc;
-}
-
-.markdown-body .md-table-scroll tbody tr:last-child td,
-.markdown-body .md-table-scroll tbody tr:last-child th {
-  border-bottom: 0;
-}
-
+/* 斑马纹 + 行 hover */
 .markdown-body .md-table-scroll tbody tr:nth-child(even) {
   background: #fafafa;
 }
@@ -663,7 +708,7 @@ body {
   background: #eff4fa;
 }
 
-/* 首列 sticky 需不透明背景，逐态跟随所在行，避免盖掉斑马纹/hover */
+/* 首列 sticky 背景需逐态跟随所在行，否则会盖掉斑马纹/hover */
 .markdown-body .md-table-scroll tbody tr:nth-child(even) th:first-child,
 .markdown-body .md-table-scroll tbody tr:nth-child(even) td:first-child {
   background: #fafafa;

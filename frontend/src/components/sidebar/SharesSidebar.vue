@@ -2,10 +2,9 @@
 // Shares sidebar: reactive list of shares, no DOM manipulation
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { injectSidebarHeader } from '../../composables/useSidebarHeader'
-import { authToken, setLoadSharesFn, dsMode, currentUser } from '../../stores/indexStore'
+import { authToken, setLoadSharesFn } from '../../stores/indexStore'
 import { showToast, copyToClipboard } from '../../lib/common'
 import * as shareApi from '../../api/share'
-import { openShareModal } from '../../lib/shareModal'
 
 interface Share {
   id: string
@@ -87,9 +86,6 @@ onUnmounted(() => {
 })
 
 defineExpose({ loadShares })
-
-// expose openShareModal to window for context menu use
-;(window as any).openShareModal = openShareModal
 </script>
 
 <template>

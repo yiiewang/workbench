@@ -6,6 +6,8 @@ import { ref, watch, nextTick } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { wrapMarkdownTables } from '../../lib/markdownTable'
+import { setupHeadingFold, scrollToId, type MdHeading } from '../../lib/markdownFold'
+import MarkdownToc from './MarkdownToc.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -14,15 +16,30 @@ const props = withDefaults(
     compact?: boolean
     // 是否渲染 mermaid 代码块（CDN 懒加载，内容里没有 mermaid 时不加载）
     mermaid?: boolean
+    // 右下角悬浮目录（todo 分栏预览空间小，默认不启用）
+    toc?: boolean
   }>(),
-  { compact: false, mermaid: true }
+  { compact: false, mermaid: true, toc: false }
 )
 
 const root = ref<HTMLElement | null>(null)
 const html = ref('')
+// 大纲（由 setupHeadingFold 产出）：文件预览用它渲染目录面板
+const outline = ref<MdHeading[]>([])
 
-function render() {
+// marked 定制（代码高亮 + ==高亮==）带 highlight.js，体积不小；
+// 用动态 import 拆包，只在真正要渲染 markdown 时才加载（首屏不付这个成本）
+let markedConfigured: Promise<void> | null = null
+function configureMarkedOnce(): Promise<void> {
+  if (!markedConfigured) {
+    markedConfigured = import('../../lib/markdownRenderer').then((m) => m.configureMarked())
+  }
+  return markedConfigured
+}
+
+async function render() {
   try {
+    await configureMarkedOnce()
     const raw = marked.parse(props.content || '', { async: false }) as string
     html.value = DOMPurify.sanitize(raw)
   } catch (e) {
@@ -70,11 +87,23 @@ async function runMermaid() {
 watch(html, async () => {
   await nextTick()
   wrapMarkdownTables(root.value)
+  outline.value = setupHeadingFold(root.value)
   if (props.mermaid && html.value.includes('language-mermaid')) runMermaid()
 }, { flush: 'post', immediate: true })
 
-// 供外部做滚动同步（todo 编辑器：编辑区滚动时同步预览区）
-defineExpose({ el: root })
+// 正文里手写的站内锚点（如 [跳转](#标题)）：改走 scrollToId，
+// 避免往浏览器历史塞 hash、且目标被折叠时自动展开
+function onAnchorClick(e: MouseEvent) {
+  const el = e.target as HTMLElement | null
+  const a = el?.closest?.('a[href]') as HTMLAnchorElement | null
+  if (!a || !root.value?.contains(a)) return
+  const href = a.getAttribute('href') || ''
+  if (href.length < 2 || href[0] !== '#') return
+  if (scrollToId(root.value, decodeURIComponent(href.slice(1)))) e.preventDefault()
+}
+
+// 供外部做滚动同步（todo 编辑器：编辑区滚动时同步预览区）与目录渲染
+defineExpose({ el: root, outline })
 </script>
 
 <template>
@@ -83,5 +112,8 @@ defineExpose({ el: root })
     class="markdown-body"
     :class="{ 'markdown-body-compact': compact }"
     v-html="html"
+    @click="onAnchorClick"
   />
+
+  <MarkdownToc v-if="toc" :outline="outline" :root="root" />
 </template>

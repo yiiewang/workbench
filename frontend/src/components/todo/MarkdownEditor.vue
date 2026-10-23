@@ -110,7 +110,8 @@ function insertSyntax(type) {
           @scroll="onEditorScroll" ref="mdEditor"></textarea>
       </div>
       <div class="md-preview">
-        <MarkdownPreview ref="mdPreviewRef" :content="modelValue" compact />
+        <!-- 分栏预览空间小，不渲染 mermaid（避免每次输入都拉 CDN） -->
+        <MarkdownPreview ref="mdPreviewRef" :content="modelValue" compact :mermaid="false" />
       </div>
     </div>
   </div>

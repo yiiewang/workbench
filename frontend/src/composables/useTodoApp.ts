@@ -11,36 +11,7 @@ import {
 import { checkAuth, registerTodoAppReset } from '../stores/indexStore'
 import * as taskApi from '../api/tasks'
 import { ElNotification } from 'element-plus'
-import { marked, Renderer } from 'marked'
 import SparkMD5 from 'spark-md5'
-import hljs from 'highlight.js/lib/core'
-import 'highlight.js/styles/github.css'
-import bash from 'highlight.js/lib/languages/bash'
-import javascript from 'highlight.js/lib/languages/javascript'
-import typescript from 'highlight.js/lib/languages/typescript'
-import json from 'highlight.js/lib/languages/json'
-import python from 'highlight.js/lib/languages/python'
-import go from 'highlight.js/lib/languages/go'
-import markdown from 'highlight.js/lib/languages/markdown'
-import xml from 'highlight.js/lib/languages/xml'
-import cssLang from 'highlight.js/lib/languages/css'
-import yaml from 'highlight.js/lib/languages/yaml'
-import sql from 'highlight.js/lib/languages/sql'
-import shell from 'highlight.js/lib/languages/shell'
-
-// 注册常用语言（highlightAuto 仅在已注册语言中检测，按需注册大幅缩小体积）
-hljs.registerLanguage('bash', bash)
-hljs.registerLanguage('javascript', javascript)
-hljs.registerLanguage('typescript', typescript)
-hljs.registerLanguage('json', json)
-hljs.registerLanguage('python', python)
-hljs.registerLanguage('go', go)
-hljs.registerLanguage('markdown', markdown)
-hljs.registerLanguage('xml', xml)
-hljs.registerLanguage('css', cssLang)
-hljs.registerLanguage('yaml', yaml)
-hljs.registerLanguage('sql', sql)
-hljs.registerLanguage('shell', shell)
 
 // API 调用统一走 ../api/ 模块（tasks/files/share/auth），不再在此重复定义 apiCall。
 // 原有的 API_CODE 常量也移至 api 模块内部。
@@ -1379,47 +1350,8 @@ export function setupTodoApp() {
         showToast('已添加', 'success');
     }
 
-    // --- Markdown 编辑 ---
-    // 扩展 marked：支持 ==高亮== 语法 + highlight.js 代码块高亮
-    if (typeof marked !== 'undefined') {
-        const renderer = new Renderer();
-        // 代码块高亮
-        renderer.code = function (code, language) {
-            let highlighted = '';
-            if (typeof hljs !== 'undefined' && language && hljs.getLanguage(language)) {
-                highlighted = hljs.highlight(code, { language: language }).value;
-            } else if (typeof hljs !== 'undefined') {
-                highlighted = hljs.highlightAuto(code).value;
-            } else {
-                highlighted = code;
-            }
-            const langClass = language ? 'language-' + language : '';
-            return '<pre><code class="hljs ' + langClass + '">' + highlighted + '</code></pre>';
-        };
-        // ==高亮== 语法
-        marked.use({
-            extensions: [{
-                name: 'mark',
-                level: 'inline',
-                start(src) { return src.indexOf('=='); },
-                tokenizer(src) {
-                    const rule = /^==(.+?)==/;
-                    const match = rule.exec(src);
-                    if (match) {
-                        return {
-                            type: 'mark',
-                            raw: match[0],
-                            text: match[1],
-                        };
-                    }
-                },
-                renderer(token) {
-                    return '<mark>' + token.text + '</mark>';
-                }
-            }],
-            renderer: renderer
-        });
-    }
+    // Markdown 渲染配置（==高亮== / 代码高亮）已收敛到 lib/markdownRenderer.ts，
+    // 由 MarkdownPreview 统一装配，这里不再做全局 marked 定制。
 
     function toggleListGroup(key) {
         collapsedGroups[key] = !collapsedGroups[key];

@@ -19,9 +19,8 @@ import {
   clearAuthState,
   restoreUser,
   authHeaders,
-  API_CODE,
 } from '../lib/common'
-import { fetchUserInfo, fetchFeatures, switchOrg as apiSwitchOrg, type OrgInfo } from '../api/auth'
+import { fetchFeatures, switchOrg as apiSwitchOrg, type OrgInfo } from '../api/auth'
 
 // ============================================================
 // State — 模块加载时从 localStorage 恢复，避免刷新闪烁

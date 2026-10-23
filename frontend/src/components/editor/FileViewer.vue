@@ -35,7 +35,6 @@ function withAnchorHook(html: string): string {
 }
 
 const props = defineProps<{ path: string; name: string; ext: string; size: number }>()
-const emit = defineEmits<{ passwordRequired: [] }>()
 
 const loading = ref(true)
 const error = ref('')
@@ -135,7 +134,7 @@ async function loadFile() {
     <XmlViewer v-else-if="['xml'].includes(ext)" :text="xmlText" />
 
     <!-- Markdown -->
-    <MarkdownPreview v-else-if="['md','markdown'].includes(ext)" :content="textContent" />
+    <MarkdownPreview v-else-if="['md','markdown'].includes(ext)" :content="textContent" toc />
 
     <!-- Text / Code -->
     <pre v-else class="text-preview">{{ textContent }}</pre>

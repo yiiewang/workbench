@@ -52,12 +52,13 @@ const sidebarHidden = computed(() =>
 
 // 折叠按钮 left 位置：activity-bar(48px) + sidebar 宽度 - 按钮一半宽度(6px)。
 // 分享模式无 activity-bar，偏移 0；折叠态 sidebar 宽度算 0。
+// 下限钳制 0：分享模式折叠时算出 -6px，按钮左半边会被视口左缘裁掉。
 const ACTIVITY_BAR_W = 48
 const TOGGLE_BTN_HALF = 6
 const toggleBtnLeft = computed(() => {
   const activityBarW = dsMode.value === 'share' ? 0 : ACTIVITY_BAR_W
   const sidebarW = collapsed.value ? 0 : sidebarWidth.value
-  return activityBarW + sidebarW - TOGGLE_BTN_HALF
+  return Math.max(0, activityBarW + sidebarW - TOGGLE_BTN_HALF)
 })
 
 // 移动端抽屉侧栏（≤768px，见 style.css media query）：打开时显示遮罩，点遮罩收起。

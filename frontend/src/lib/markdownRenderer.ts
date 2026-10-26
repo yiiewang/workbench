@@ -33,6 +33,12 @@ hljs.registerLanguage('shell', shell)
 
 let configured = false
 
+// 只转义 & < >：mermaid.run() 读的是节点 innerHTML，随后会做 entityDecode 还原成原字符，
+// 所以按实体输出即可保证拿到的是原文（不能多做转义，否则会变成 %xx 之类的字面量）
+function escapeHtml(src: string): string {
+  return src.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 export function configureMarked(): void {
   if (configured) return
   configured = true
@@ -58,6 +64,11 @@ export function configureMarked(): void {
     ],
     renderer: {
       code(code: string, language?: string) {
+        // mermaid 必须原样输出：mermaid.run() 用节点 innerHTML 作为源码，
+        // 一旦被 hljs（highlightAuto）插进 <span>，这些标签就会变成源码文本 → "Syntax error in text"
+        if (language === 'mermaid') {
+          return `<pre class="mermaid-source"><code class="language-mermaid">${escapeHtml(code)}</code></pre>`
+        }
         const highlighted = language && hljs.getLanguage(language)
           ? hljs.highlight(code, { language }).value
           : hljs.highlightAuto(code).value

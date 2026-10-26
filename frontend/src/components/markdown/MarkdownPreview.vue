@@ -2,7 +2,7 @@
 // 统一的 Markdown 预览组件：文件预览（FileViewer）与 todo 编辑器预览（MarkdownEditor）共用
 // 渲染链路：marked(npm) → DOMPurify(npm) → v-html
 // v-html 落地后再做两件事：给 table 套滚动容器（sticky 表头 + 边缘滚动提示）、按需渲染 mermaid
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { wrapMarkdownTables } from '../../lib/markdownTable'
@@ -83,12 +83,27 @@ async function runMermaid() {
   } catch {}
 }
 
+// 边输入边渲染时每个按键都会重排一次图，成本较高：300ms 防抖，
+// 连续输入只在停手后渲染最后一次（mermaid.run 本身已按 data-processed 跳过已渲染节点）
+let mermaidTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleMermaid() {
+  if (mermaidTimer) clearTimeout(mermaidTimer)
+  mermaidTimer = setTimeout(() => {
+    mermaidTimer = null
+    runMermaid()
+  }, 300)
+}
+onBeforeUnmount(() => {
+  if (mermaidTimer) clearTimeout(mermaidTimer)
+  mermaidTimer = null
+})
+
 // v-html patch 之后再增强，否则拿不到真实 DOM
 watch(html, async () => {
   await nextTick()
   wrapMarkdownTables(root.value)
   outline.value = setupHeadingFold(root.value)
-  if (props.mermaid && html.value.includes('language-mermaid')) runMermaid()
+  if (props.mermaid && html.value.includes('language-mermaid')) scheduleMermaid()
 }, { flush: 'post', immediate: true })
 
 // 正文里手写的站内锚点（如 [跳转](#标题)）：改走 scrollToId，

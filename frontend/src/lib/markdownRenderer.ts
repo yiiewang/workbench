@@ -3,33 +3,8 @@
 //   - 支持 ==高亮== 语法
 // 原先这套配置写在 useTodoApp 的 setup 里，会隐式影响文件预览；现在收敛到统一渲染层。
 import { marked } from 'marked'
-import hljs from 'highlight.js/lib/core'
-import 'highlight.js/styles/github.css'
-import bash from 'highlight.js/lib/languages/bash'
-import javascript from 'highlight.js/lib/languages/javascript'
-import typescript from 'highlight.js/lib/languages/typescript'
-import json from 'highlight.js/lib/languages/json'
-import python from 'highlight.js/lib/languages/python'
-import go from 'highlight.js/lib/languages/go'
-import markdown from 'highlight.js/lib/languages/markdown'
-import xml from 'highlight.js/lib/languages/xml'
-import cssLang from 'highlight.js/lib/languages/css'
-import yaml from 'highlight.js/lib/languages/yaml'
-import sql from 'highlight.js/lib/languages/sql'
-import shell from 'highlight.js/lib/languages/shell'
-
-hljs.registerLanguage('bash', bash)
-hljs.registerLanguage('javascript', javascript)
-hljs.registerLanguage('typescript', typescript)
-hljs.registerLanguage('json', json)
-hljs.registerLanguage('python', python)
-hljs.registerLanguage('go', go)
-hljs.registerLanguage('markdown', markdown)
-hljs.registerLanguage('xml', xml)
-hljs.registerLanguage('css', cssLang)
-hljs.registerLanguage('yaml', yaml)
-hljs.registerLanguage('sql', sql)
-hljs.registerLanguage('shell', shell)
+// hljs 实例与语言注册统一在 highlighter.ts（与 CodePreview 文件预览共用一份）
+import { hljs } from './highlighter'
 
 let configured = false
 

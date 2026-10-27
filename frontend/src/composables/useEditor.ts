@@ -1,4 +1,4 @@
-import { base64ToBytes, isBinaryExt } from '../lib/common'
+import { base64ToBytes, isBinaryExt, extFromPath } from '../lib/common'
 import { shareRootPath } from '../stores/indexStore'
 import * as fileApi from '../api/files'
 import * as shareApi from '../api/share'
@@ -41,7 +41,7 @@ export const dataSource = {
     }
     const safePath = String(path || '')
     const name = safePath.split('/').pop() || 'file'
-    const ext = (name.split('.').pop() || '').toLowerCase()
+    const ext = extFromPath(name)
     return {
       name, ext, size: 0, isBinary: isBinaryExt(ext),
       text: () => fileApi.getFile(safePath).then(r => r.text()),

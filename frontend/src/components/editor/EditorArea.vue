@@ -13,9 +13,11 @@ const tabInfo = computed(() => {
 function onEditorClick(e: MouseEvent) {
   const a = (e.target as HTMLElement).closest('a')
   if (!a) return
+  // 下载链接（二进制/压缩包卡片）不是 markdown 内链，不能被下面的跳转逻辑 preventDefault 掉
+  if (a.hasAttribute('download')) return
   const href = a.getAttribute('href')
   if (!href) return
-  if (/^(https?:|mailto:|tel:|#)/i.test(href)) return
+  if (/^(https?:|mailto:|tel:|#|blob:|data:)/i.test(href)) return
 
   e.preventDefault()
   const [linkPath, linkAnchor] = href.split('#')

@@ -2,10 +2,12 @@
 // File viewer component — replaces renderToContainer / showWelcome innerHTML manipulation
 import { ref, watch, onUnmounted } from 'vue'
 import { dataSource } from '../../composables/useEditor'
-import { isBinaryExt, isImageExt, formatSize, API_CODE } from '../../lib/common'
+import { isBinaryExt, isImageExt, looksBinary, formatSize, showToast, API_CODE } from '../../lib/common'
+import { isCodeExt } from '../../lib/highlighter'
 import { showSharePasswordModal } from '../../lib/sharePasswordModal'
 import JsonViewer from './JsonViewer.vue'
 import XmlViewer from './XmlViewer.vue'
+import CodePreview from './CodePreview.vue'
 import MarkdownPreview from '../markdown/MarkdownPreview.vue'
 
 // srcdoc 文档中 href="#id" 会被解析成导航到 about:srcdoc#id，触发整页重载（表现为点了没反应）。
@@ -43,6 +45,11 @@ const textContent = ref('')
 const htmlText = ref('')
 const jsonText = ref('')
 const xmlText = ref('')
+// 实际扩展名（来自后端/文件名解析，无扩展名为 ''）
+const fileExt = ref('')
+// 最终判定为二进制：扩展名命中，或内容嗅探命中（无扩展名的 ELF/PE 等）
+const isBinary = ref(false)
+const fileSize = ref(0)
 
 onUnmounted(() => {
   if (blobUrl.value) URL.revokeObjectURL(blobUrl.value)
@@ -50,17 +57,45 @@ onUnmounted(() => {
 
 watch(() => props.path, loadFile, { immediate: true })
 
+// 下载：/api/file 带鉴权（Authorization 头），不能直接用裸 <a href> 指向它（会 401），
+// 所以走带 token 的请求取字节流再落盘。二进制卡片已持有 blobUrl 时直接复用，避免二次请求。
+async function onDownload() {
+  let tempUrl = false
+  try {
+    let url = blobUrl.value
+    if (!url) {
+      const file = await dataSource.getFile(props.path)
+      url = URL.createObjectURL(await file.blob())
+      tempUrl = true
+    }
+    const a = document.createElement('a')
+    a.href = url
+    a.download = props.name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    if (tempUrl) setTimeout(() => URL.revokeObjectURL(url), 5000)
+  } catch (err: any) {
+    showToast('Download failed: ' + (err.msg || err.message || 'unknown'))
+  }
+}
+
 async function loadFile() {
   if (!props.path) return
   loading.value = true; error.value = ''
   blobUrl.value = ''; textContent.value = ''; htmlText.value = ''; jsonText.value = ''; xmlText.value = ''
+  isBinary.value = false; fileExt.value = ''; fileSize.value = 0
 
   try {
     const file = await dataSource.getFile(props.path)
-    const ext = file.ext
+    const ext = file.ext || props.ext || ''
+    fileExt.value = ext
+    isBinary.value = isBinaryExt(ext) || !!file.isBinary
 
-    if (isBinaryExt(ext)) {
+    if (isBinary.value) {
+      // 二进制（含压缩包）：只展示信息卡片 + 下载，绝不当文本解码
       const blob = await file.blob()
+      fileSize.value = blob.size
       blobUrl.value = URL.createObjectURL(blob)
     } else if (isImageExt(ext)) {
       const blob = await file.blob()
@@ -76,7 +111,16 @@ async function loadFile() {
     } else if (['md', 'markdown'].includes(ext)) {
       textContent.value = await file.text() || ''
     } else {
-      textContent.value = await file.text() || ''
+      // 未知/无扩展名：先取字节做内容嗅探，二进制则走下载卡片，避免把乱码当文本渲染
+      const blob = await file.blob()
+      const head = new Uint8Array(await blob.slice(0, 8192).arrayBuffer())
+      if (looksBinary(head)) {
+        isBinary.value = true
+        fileSize.value = blob.size
+        blobUrl.value = URL.createObjectURL(blob)
+      } else {
+        textContent.value = await blob.text()
+      }
     }
     loading.value = false
   } catch (err: any) {
@@ -106,37 +150,40 @@ async function loadFile() {
     <!-- Error -->
     <div v-else-if="error" class="viewer-error">Failed to load: {{ error }}</div>
 
-    <!-- Binary -->
-    <div v-else-if="isBinaryExt(ext)" class="file-detail">
+    <!-- Binary（含无扩展名但内容为二进制的文件）：不预览内容，只给信息 + 下载 -->
+    <div v-else-if="isBinary" class="file-detail">
       <div class="name">{{ name }}</div>
       <table>
         <tbody>
-          <tr><td>Type</td><td>{{ ext.toUpperCase() }}</td></tr>
-          <tr><td>Size</td><td>{{ formatSize(size || 0) }}</td></tr>
+          <tr><td>Type</td><td>{{ fileExt ? fileExt.toUpperCase() : 'Binary' }}</td></tr>
+          <tr><td>Size</td><td>{{ formatSize(fileSize || size || 0) }}</td></tr>
         </tbody>
       </table>
-      <a v-if="blobUrl" :href="blobUrl" :download="name" class="btn-download">Download</a>
+      <a v-if="blobUrl" :href="blobUrl" :download="name" class="btn-download" @click.prevent="onDownload">Download</a>
     </div>
 
     <!-- Image -->
-    <img v-else-if="isImageExt(ext) && blobUrl" :src="blobUrl"
+    <img v-else-if="isImageExt(fileExt) && blobUrl" :src="blobUrl"
       style="max-width:100%;max-height:100%;display:block;margin:auto;object-fit:contain;" />
 
     <!-- HTML：srcdoc 内联渲染，sandbox 不含 allow-same-origin（不可访问父页面存储） -->
-    <iframe v-else-if="['html','htm'].includes(ext) && htmlText" :srcdoc="htmlText"
+    <iframe v-else-if="['html','htm'].includes(fileExt) && htmlText" :srcdoc="htmlText"
       sandbox="allow-scripts allow-popups"
       style="width:100%;height:100%;border:none;background:#fff;" />
 
     <!-- JSON -->
-    <JsonViewer v-else-if="ext === 'json'" :text="jsonText" />
+    <JsonViewer v-else-if="fileExt === 'json'" :text="jsonText" />
 
     <!-- XML -->
-    <XmlViewer v-else-if="['xml'].includes(ext)" :text="xmlText" />
+    <XmlViewer v-else-if="['xml'].includes(fileExt)" :text="xmlText" />
 
     <!-- Markdown -->
-    <MarkdownPreview v-else-if="['md','markdown'].includes(ext)" :content="textContent" toc />
+    <MarkdownPreview v-else-if="['md','markdown'].includes(fileExt)" :content="textContent" toc />
 
-    <!-- Text / Code -->
+    <!-- Code：行号 + 语法高亮 + 折叠（超大文件在组件内降级为纯文本） -->
+    <CodePreview v-else-if="isCodeExt(fileExt)" :text="textContent" :ext="fileExt" />
+
+    <!-- Text -->
     <pre v-else class="text-preview">{{ textContent }}</pre>
   </div>
 </template>

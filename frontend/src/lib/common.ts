@@ -212,10 +212,48 @@ export function base64ToText(b64: string) {
   return new TextDecoder().decode(base64ToBytes(b64));
 }
 
-/** 判断扩展名是否为二进制文件 */
+// 图片不走二进制卡片（有独立预览分支），不要加入此表
+const BINARY_EXTS = [
+  // 压缩包 / 打包产物
+  'zip','tar','gz','tgz','rar','7z','bz2','xz','zst','lz4','cab','iso','dmg','jar','war','apk','ipa',
+  // 可执行 / 库 / 目标文件
+  'exe','dll','so','dylib','bin','elf','o','obj','a','lib','class','pyc','pyo','wasm','node','pdb','msi',
+  // 字体
+  'ttf','otf','woff','woff2','eot',
+  // 二进制文档 / 媒体 / 数据库
+  'pdf','doc','docx','xls','xlsx','ppt','pptx','odt','ods',
+  'mp3','wav','flac','ogg','m4a','aac','mp4','mov','avi','mkv','webm',
+  'db','sqlite','sqlite3','dat','pkl','npy','npz','onnx',
+];
+
+/** 判断扩展名是否为二进制文件（无扩展名的二进制靠内容嗅探，见 looksBinary） */
 export function isBinaryExt(ext: string) {
-  const binaryExts = ['zip','tar','gz','tgz','rar','7z','bz2','xz','exe','dll','so','dylib','bin','ttf','otf','woff','woff2'];
-  return binaryExts.includes(ext);
+  return BINARY_EXTS.includes(String(ext || '').toLowerCase());
+}
+
+/**
+ * 内容嗅探：判断一段字节是否为二进制（用于无扩展名 / 未知扩展名的文件）。
+ * 规则（只看前 8KB，避免大文件全量读取）：
+ *   1. 出现 NUL 字节 → 二进制（ELF/PE 等可执行文件特征）
+ *   2. 控制字符占比 > 2% → 二进制
+ *   3. 不是合法 UTF-8（stream 模式，忽略末尾被截断的多字节字符）→ 二进制
+ */
+export function looksBinary(bytes: Uint8Array) {
+  if (!bytes || bytes.length === 0) return false;
+  const sample = bytes.length > 8192 ? bytes.subarray(0, 8192) : bytes;
+  let control = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const b = sample[i];
+    if (b === 0) return true;
+    if (b < 0x20 && b !== 0x09 && b !== 0x0a && b !== 0x0d && b !== 0x0c) control++;
+  }
+  if (control / sample.length > 0.02) return true;
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(sample, { stream: true });
+  } catch {
+    return true;
+  }
+  return false;
 }
 
 /** 判断扩展名是否为图片 */
@@ -223,9 +261,12 @@ export function isImageExt(ext: string) {
   return ['png','jpg','jpeg','gif','svg','webp','ico'].includes(ext);
 }
 
-/** 从文件路径提取扩展名（不含点号，小写） */
+/** 从文件路径提取扩展名（不含点号，小写）；无扩展名返回 ''（不会把整个文件名当扩展名） */
 export function extFromPath(path: string) {
-  return ((String(path || '')).split('.').pop() || '').toLowerCase();
+  const name = baseName(path);
+  const i = name.lastIndexOf('.');
+  if (i <= 0) return '';
+  return name.slice(i + 1).toLowerCase();
 }
 
 /** 从文件路径提取文件名 */

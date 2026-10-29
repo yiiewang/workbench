@@ -23,6 +23,13 @@ export const dataSource = {
     return fileApi.getTree(path)
   },
 
+  // 媒体流式播放地址（短时效 ticket）+ 文件大小。分享模式没有对应端点，返回 null，
+  // 由 FileViewer 回退到 blob 播放（整文件入内存）。
+  async getMediaTicket(path: string): Promise<{ url: string; size: number } | null> {
+    if (this.mode === 'share') return null
+    return fileApi.getMediaTicket(path)
+  },
+
   async getFile(path: string) {
     if (this.mode === 'share') {
       // token 已唯一确定 share.ResourcePath：

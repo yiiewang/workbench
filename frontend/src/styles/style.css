@@ -799,18 +799,35 @@ body {
   color: var(--text-dim);
 }
 
-.file-detail .btn-download {
-  display: inline-block;
-  padding: 8px 20px;
+/* 下载按钮：全局类（二进制卡片、媒体顶栏共用）。
+   原来是 .file-detail .btn-download，出了 .file-detail 就退化成裸超链接 */
+.btn-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
   background: var(--accent);
   color: #fff;
   text-decoration: none;
   border-radius: 3px;
   font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
-.file-detail .btn-download:hover {
+.btn-download svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.btn-download:hover {
   background: #005a9e;
+}
+
+.btn-download:active {
+  background: #004c86;
 }
 
 /* Resizer */

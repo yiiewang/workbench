@@ -101,6 +101,9 @@ func (s *Server) App() *iris.Application {
 	api.Delete("/tasks/{id}", auth, s.deleteTask)
 
 	api.Get("/file", auth, s.handleServeFile)
+	// 媒体流式播放：ticket 需鉴权；/api/media 本身靠 ticket 鉴权（<video> 请求带不上 header）
+	api.Get("/media/ticket", auth, s.handleMediaTicket)
+	api.Get("/media", s.handleServeMedia)
 	// 文件上传（沙箱限定在当前用户根目录内）
 	api.Post("/upload", auth, s.handleUpload)
 	// 文件管理（沙箱同上）：新建目录 / 删除 / 重命名 / 移动
@@ -1160,7 +1163,11 @@ func (s *Server) listDirectory(ctx iris.Context, dirPath string) {
 
 func (s *Server) loggingMiddleware() iris.Handler {
 	return func(ctx iris.Context) {
-		ctx.Record()
+		// /api/media 必须跳过 Record：ResponseRecorder 会把整个响应体攒在内存里、
+		// 请求结束才 flush，那样就不是流式了（大视频直接吃满内存且无法边下边播）。
+		if ctx.Path() != "/api/media" {
+			ctx.Record()
+		}
 		ctx.Next()
 
 		statusCode := ctx.GetStatusCode()

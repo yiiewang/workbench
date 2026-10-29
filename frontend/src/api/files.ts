@@ -13,6 +13,20 @@ export async function getFile(path: string) {
   return resp
 }
 
+// 获取媒体播放地址（GET /api/media/ticket?path=...）— 换取带短时效 ticket 的 URL + 文件大小。
+// <video>/<audio> 的 src 请求由浏览器直接发起，带不上 Authorization 头，所以不能直接
+// 指向 /api/file；ticket URL 自带凭证，且后端支持 Range，可拖动进度条、不必整文件入内存。
+// 失败（非媒体 / 无权限 / 分享模式）返回 null，调用方需回退到 blob 播放。
+export async function getMediaTicket(path: string): Promise<{ url: string; size: number } | null> {
+  try {
+    const data: any = await apiCall(`/api/media/ticket?path=${encodeURIComponent(path)}`)
+    if (!data || !data.url) return null
+    return { url: String(data.url), size: Number(data.size) || 0 }
+  } catch {
+    return null
+  }
+}
+
 // 上传文件（POST /api/upload）— multipart: path(目标目录) + files(多文件)
 // FormData 由浏览器自动设置 Content-Type（含 boundary），勿手动覆盖
 export async function uploadFiles(dirPath: string, files: File[]) {

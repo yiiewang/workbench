@@ -261,6 +261,34 @@ export function isImageExt(ext: string) {
   return ['png','jpg','jpeg','gif','svg','webp','ico'].includes(ext);
 }
 
+// 可在浏览器内直接播放的媒体类型 → 标准 MIME。
+// 后端 contentType() 对媒体扩展名一律返回 application/octet-stream，而 <video>/<audio>
+// 是严格按 MIME 判定能否播放的（不像 <img> 会嗅探字节），所以前端必须自己带上正确类型。
+const MEDIA_MIME: Record<string, string> = {
+  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime',
+  webm: 'video/webm', ogv: 'video/ogg', mkv: 'video/x-matroska',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac',
+  wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', flac: 'audio/flac',
+};
+
+const VIDEO_EXTS = ['mp4','m4v','mov','webm','ogv','mkv'];
+const AUDIO_EXTS = ['mp3','m4a','aac','wav','ogg','oga','flac'];
+
+/** 判断扩展名是否为可直接播放的视频 */
+export function isVideoExt(ext: string) {
+  return VIDEO_EXTS.includes(String(ext || '').toLowerCase());
+}
+
+/** 判断扩展名是否为可直接播放的音频 */
+export function isAudioExt(ext: string) {
+  return AUDIO_EXTS.includes(String(ext || '').toLowerCase());
+}
+
+/** 媒体扩展名 → MIME；非媒体返回 '' */
+export function mediaMime(ext: string) {
+  return MEDIA_MIME[String(ext || '').toLowerCase()] || '';
+}
+
 /** 从文件路径提取扩展名（不含点号，小写）；无扩展名返回 ''（不会把整个文件名当扩展名） */
 export function extFromPath(path: string) {
   const name = baseName(path);

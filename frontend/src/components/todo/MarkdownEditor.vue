@@ -10,6 +10,17 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue'])
 
+// 视图模式：split 分屏 / edit 仅编辑 / preview 仅预览
+const VIEW_MODES = [
+  { value: 'split', label: '分屏', title: '分屏预览（点击切换：仅编辑 → 仅预览）' },
+  { value: 'edit', label: '仅编辑', title: '仅编辑（点击切换：仅预览）' },
+  { value: 'preview', label: '仅预览', title: '仅预览（点击切换：分屏）' },
+]
+const viewModeIndex = ref(0)
+function cycleViewMode() {
+  viewModeIndex.value = (viewModeIndex.value + 1) % VIEW_MODES.length
+}
+
 const mdEditor = ref(null)
 // MarkdownPreview 组件实例；组件 expose 了根元素 el 用于滚动同步
 const mdPreviewRef = ref(null)
@@ -102,14 +113,15 @@ function insertSyntax(type) {
       <button @click="insertSyntax('quote')" title="引用">&#x201D;</button>
       <button @click="insertSyntax('todolist')" title="待办列表">&#x2611;</button>
       <button @click="insertSyntax('hr')" title="分隔线">&mdash;</button>
+      <button class="md-view-toggle" @click="cycleViewMode" :title="VIEW_MODES[viewModeIndex].title">{{ VIEW_MODES[viewModeIndex].label }}</button>
     </div>
     <div class="md-split">
-      <div class="md-editor">
+      <div v-show="VIEW_MODES[viewModeIndex].value !== 'preview'" class="md-editor">
         <textarea :value="modelValue" @input="$emit('update:modelValue', $event.target.value)"
           :placeholder="placeholder"
           @scroll="onEditorScroll" ref="mdEditor"></textarea>
       </div>
-      <div class="md-preview">
+      <div v-show="VIEW_MODES[viewModeIndex].value !== 'edit'" class="md-preview">
         <!-- mermaid 与文件预览一致渲染；防抖在 MarkdownPreview 内部，避免每个按键都重绘 -->
         <MarkdownPreview ref="mdPreviewRef" :content="modelValue" compact />
       </div>

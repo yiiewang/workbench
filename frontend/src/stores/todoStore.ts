@@ -1,6 +1,6 @@
 // Shared reactive state for TodoApp — allows TodoSidebar and TodoView to share a single data source.
 // useTodoApp imports from here instead of declaring local refs; TodoSidebar imports directly.
-import { ref, reactive } from 'vue'
+import { ref } from 'vue'
 import type { Member } from '../api/tasks'
 
 // ============================================================
@@ -38,15 +38,6 @@ export const editingTask = ref<Record<string, any>>({})
 export const editingDateRange = ref<string[]>([])
 
 // ============================================================
-// Conflict Resolution
+// Task Conflict Card（409 任务级冲突：本地 vs 服务端对比）
 // ============================================================
-export const showConflictModal = ref(false)
-export const conflictInfo = ref<any>(null)
-export const conflictTaskList = ref<any[]>([])
-export const showManualResolve = ref(false)
-export const conflictChoices = reactive<Record<string, any>>({})
-export const showConfirmSummary = ref(false)
-export const confirmSummary = reactive({
-  localCount: 0, serverCount: 0, fieldCount: 0, dropCount: 0,
-})
-export const filterSeverity = ref<'all' | 'high' | 'medium' | 'low'>('all')
+export const conflictCard = ref<any>(null)

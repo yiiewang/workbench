@@ -14,16 +14,20 @@ const tasks = ref<Task[]>([])
 const loading = ref(true)
 const loadError = ref('')
 const selected = ref<Task | null>(null)
+// 服务端权威版本号（乐观锁基准）：加载时从 getTasks 响应取，写入后更新
+let lastRevision = 0
 
 async function load() {
   loading.value = true
   loadError.value = ''
   try {
     const data: any = await getTasks()
-    // 响应结构：orgs.{orgId}.{userId}.tasks（后端按登录用户过滤）
+    // 响应结构：orgs.{orgId}.{userId} = {revision, tasks}
     const orgKey = String(currentUser.value?.orgId)
     const userKey = String(currentUser.value?.userId)
-    tasks.value = data?.orgs?.[orgKey]?.[userKey]?.tasks || []
+    const u = data?.orgs?.[orgKey]?.[userKey]
+    tasks.value = (u?.tasks || []) as Task[]
+    lastRevision = Number(u?.revision) || 0
   } catch (e: any) {
     loadError.value = e?.message || '加载失败'
   } finally {
@@ -47,18 +51,24 @@ const groups = computed(() => {
 
 const priorityLabel: Record<string, string> = { high: '高', medium: '中', low: '低' }
 
-// 轻编辑：状态切换（PATCH 全量，失败回滚）
+// 轻编辑：状态切换（乐观锁 PATCH，失败回滚；409 冲突重拉后提示）
 async function setStatus(t: Task, status: string) {
   if (t.status === status) return
   const prev = t.status
   t.status = status
   if (status === 'done') t.progress = 100
   try {
-    await updateTask({ ...t, status })
+    const data: any = await updateTask({ ...t, status }, lastRevision)
+    if (typeof data?.revision === 'number') lastRevision = data.revision
     showToast('已更新')
-  } catch {
+  } catch (e: any) {
     t.status = prev
-    showToast('更新失败')
+    if (e?.code === 40901) {
+      showToast('任务被其他设备修改，已刷新')
+      load()
+    } else {
+      showToast('更新失败')
+    }
   }
 }
 

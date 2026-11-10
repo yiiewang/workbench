@@ -42,48 +42,53 @@ export async function getOpenTasks(): Promise<{ tasks: Task[] }> {
   return apiCall('/api/tasks/open')
 }
 
-// 全量同步：替换所有任务（PUT /api/tasks）
-// body: { orgs: { cm: { userId: { tasks: [...], version: {...} } } } }
-export async function putTasks(body: any) {
-  return apiCall('/api/tasks', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+// 轻量版本号端点（GET /api/tasks/revision）：多设备轮询对账用
+export async function getTaskRevision(): Promise<{ revision: number }> {
+  return apiCall('/api/tasks/revision')
+}
+
+// 增量写入统一解析：成功返回 {revision}；409（code 40901）抛带 serverTask/serverRevision 的错误
+function parseMutationResponse(r: Response) {
+  return r.json().then((body: any) => {
+    if (r.ok && body?.code === 0) return body?.data || {}
+    // 乐观锁冲突：服务端任务副本与当前 revision 附在错误对象上
+    if (body?.code === 40901) {
+      throw Object.assign(new Error(body?.msg || 'task conflict'), {
+        code: 40901,
+        serverTask: body?.data?.task,
+        serverRevision: body?.data?.revision,
+      })
+    }
+    throw Object.assign(new Error(body?.msg || `HTTP ${r.status}`), { code: body?.code, status: r.status })
   })
 }
 
-// 增量更新单条任务（PATCH /api/tasks/{id}）
-export async function updateTask(task: Task) {
-  return authFetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
+// 增量更新单条任务（PATCH /api/tasks/{id}，baseRevision 必填乐观锁）
+export async function updateTask(task: Task, baseRevision: number) {
+  const r = await authFetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task }),
-  }).then(r => {
-    if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status })
-    return r.json()
+    body: JSON.stringify({ task, baseRevision }),
   })
+  return parseMutationResponse(r)
 }
 
-// 增量新增单条任务（POST /api/tasks/{id}）
-export async function addTask(task: Task) {
-  return authFetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
+// 增量新增单条任务（POST /api/tasks/{id}，baseRevision 必填）
+export async function addTask(task: Task, baseRevision: number) {
+  const r = await authFetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task }),
-  }).then(r => {
-    if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status })
-    return r.json()
+    body: JSON.stringify({ task, baseRevision }),
   })
+  return parseMutationResponse(r)
 }
 
-// 增量删除单条任务（DELETE /api/tasks/{id}）
-export async function deleteTask(taskId: string) {
-  return authFetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
+// 增量删除单条任务（DELETE /api/tasks/{id}?baseRevision=，必填）
+export async function deleteTask(taskId: string, baseRevision: number) {
+  const r = await authFetch(`/api/tasks/${encodeURIComponent(taskId)}?baseRevision=${baseRevision}`, {
     method: 'DELETE',
-  }).then(r => {
-    if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status })
-    return r.json()
   })
+  return parseMutationResponse(r)
 }
 
 // 组织成员（对应后端 db.Member：整数 id + 业务 name）

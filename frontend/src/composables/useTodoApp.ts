@@ -4,8 +4,6 @@ import {
     tasks, showModal, isCreating, editingTask, editingDateRange,
     currentUser, authToken,
     viewingMember, orgMembers, syncStatus, lastSyncError,
-    showConflictModal, conflictInfo, conflictTaskList, showManualResolve,
-    conflictChoices, showConfirmSummary, confirmSummary, filterSeverity,
     orgTasks, activeTaskId,
 } from '../stores/todoStore'
 import { checkAuth, registerTodoAppReset, openTabFn } from '../stores/indexStore'
@@ -34,7 +32,7 @@ export function setupTodoApp() {
         { key: 'done', label: '已完成', icon: '✅' },
     ];
     const priorityLabelMap = { high: '高', medium: '中', low: '低' };
-    const statusIconMap = { todo: '🔴', progress: '🟡', done: '✅', conflict: '⚠️' };
+    const statusIconMap = { todo: '🔴', progress: '🟡', done: '✅' };
 
     // --- Reactive State ---
     // tasks, auth/user, modal, viewingMember, syncStatus → imported from todoStore
@@ -57,110 +55,7 @@ export function setupTodoApp() {
     const newTaskForDate = ref({});
     const currentWeekStart = ref(getWeekStart(new Date()));
 
-    // ========== Version Control Utilities ==========
-    const STORAGE_KEY_DEVICE = 'todo-device-id';
-
-    // 获取/生成设备唯一 ID（持久化到 localStorage）
-    function getDeviceId() {
-        let id = localStorage.getItem(STORAGE_KEY_DEVICE);
-        if (!id) {
-            id = 'dev-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
-            localStorage.setItem(STORAGE_KEY_DEVICE, id);
-        }
-        return id;
-    }
-
-    // 计算任务数据的 MD5 哈希值（与服务端 internal/db/tasks.go md5Hex 算法保持一致）。
-    // 必须用真正的 MD5（128 位、32 hex 字符），否则与服务端 crypto/md5 永远不匹配，
-    // 导致 checkConflict 误判为冲突。
-    async function calcTasksMd5(tasks) {
-        const text = JSON.stringify(tasks);
-        return SparkMD5.hash(text);
-    }
-
-    // 构建版本信息对象
-    async function buildVersion(tasks, baseVersion = null) {
-        const md5 = await calcTasksMd5(tasks);
-        return {
-            md5,
-            timestamp: Date.now(),
-            deviceId: getDeviceId(),
-            // 保留原始 baseMd5：本地编辑时不更新 baseMd5，仅同步时更新
-            // baseVersion.baseMd5 存在时沿用（跨多次本地编辑保持不变）
-            baseMd5: baseVersion ? (baseVersion.baseMd5 || baseVersion.md5) : md5,
-            baseTimestamp: baseVersion ? (baseVersion.baseTimestamp || baseVersion.timestamp) : Date.now(),
-        };
-    }
-
-    // ========== Conflict Detection & Resolution ==========
-    // 冲突检测：比较本地版本和服务器版本
-    function checkConflict(localVersion, serverVersion) {
-        // 双方都无版本信息
-        if (!localVersion && !serverVersion) {
-            return { hasConflict: false, action: 'none' };
-        }
-        // 只有服务器有数据
-        if (!localVersion) {
-            return { hasConflict: false, action: 'download' };
-        }
-        // 只有本地有数据
-        if (!serverVersion) {
-            return { hasConflict: false, action: 'upload' };
-        }
-        // 数据完全一致
-        if (localVersion.md5 === serverVersion.md5) {
-            return { hasConflict: false, action: 'none' };
-        }
-
-        // 迁移：baseMd5 为旧占位符 "init"，无法正确判断冲突，强制下载
-        if (localVersion.baseMd5 === 'init') {
-            return { hasConflict: false, action: 'download' };
-        }
-
-        // 判断本地是否有修改（当前 md5 != 基准 md5）
-        const localModified = localVersion.md5 !== localVersion.baseMd5;
-        // 判断服务器是否有修改（服务器当前 md5 != 本地基准 md5）
-        const serverModified = serverVersion.md5 !== localVersion.baseMd5;
-
-        if (localModified && serverModified) {
-            // 双方都有修改，冲突！
-            return { hasConflict: true, action: 'merge' };
-        }
-        if (localModified && !serverModified) {
-            return { hasConflict: false, action: 'upload' };
-        }
-        if (!localModified && serverModified) {
-            return { hasConflict: false, action: 'download' };
-        }
-        if (!localModified && !serverModified) {
-            // 双方都没修改（但 md5 不一致，可能数据损坏）
-            return { hasConflict: false, action: 'none' };
-        }
-    }
-
-    // 包装任务数据：附加版本信息
-    async function wrapData(tasks, baseVersion = null) {
-        const version = await buildVersion(tasks, baseVersion);
-        return { version, tasks };
-    }
-
-    // 解析存储数据：新格式 {version, tasks}
-    function unwrapData(data) {
-        if (!data) return { version: null, tasks: [] };
-        if (data.version && Array.isArray(data.tasks)) {
-            const v = data.version;
-            // 迁移：旧版本用 simpleHash（1-8 hex 字符），与新 SparkMD5（32 hex 字符）不兼容。
-            // 丢弃 version（保留 tasks）以强制从服务器重新同步，避免首次升级时误报冲突。
-            if (typeof v.md5 === 'string' && v.md5.length < 32) {
-                return { version: null, tasks: data.tasks };
-            }
-            return { version: v, tasks: data.tasks };
-        }
-        // 无法识别的格式
-        return { version: null, tasks: [] };
-    }
-
-    // 归一化任务列表的 assignee：历史脏数据可能残留 number（主键改造中间态），
+        // 归一化任务列表的 assignee：历史脏数据可能残留 number（主键改造中间态），
     // 统一转字符串化 id。否则前端 JSON.stringify(number) 与后端 json.Marshal(string)
     // 的 md5 永远不一致，导致持续误报冲突。
     function normalizeAssignees(list) {
@@ -203,7 +98,7 @@ export function setupTodoApp() {
         const today = formatDate(new Date());
         const todayDt = new Date(today + 'T00:00:00');
         for (const task of tasks.value) {
-            if (task.status === 'done' || task.status === 'conflict') continue;
+            if (task.status === 'done') continue;
             if (!task.due) continue;
             // 计算实际延期天数：today - due（只有 today > due 才 > 0）
             const dueDt = new Date(task.due + 'T00:00:00');
@@ -225,413 +120,39 @@ export function setupTodoApp() {
         const { userId, orgId } = currentUser.value;
         const userKey = STORAGE_KEY_USER + '_' + userId;
 
-        // 1. 从 localStorage 加载（解析新格式，自动迁移旧格式）
-        let localVersion = null;
+        // 1. 本地离线缓存（无版本信息，服务器是唯一事实源；兼容读旧格式的 .tasks）
         let localTasks = [];
-        const saved = localStorage.getItem(userKey);
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved);
-                const unwrapped = unwrapData(parsed);
-                localVersion = unwrapped.version;
-                localTasks = normalizeAssignees(unwrapped.tasks);
-            } catch (e) {
-                localTasks = [];
-            }
-        }
+        try {
+            const saved = JSON.parse(localStorage.getItem(userKey) || 'null');
+            localTasks = normalizeAssignees(saved?.tasks || []);
+        } catch (e) { localTasks = []; }
 
-        // 2. 从服务器同步（如果可用）
-        let serverVersion = null;
-        let serverTasks = null;
+        // 2. 从服务器加载（revision = 乐观锁基准）
         try {
             const data = await fetchTasksJSON();
-            if (data) {
-                const org = (data.orgs || {})[orgId];
-                if (org && org[userId]) {
-                    const unwrapped = unwrapData(org[userId]);
-                    serverVersion = unwrapped.version;
-                    serverTasks = normalizeAssignees(unwrapped.tasks);
+            const u = data?.orgs?.[orgId]?.[userId];
+            if (u && Array.isArray(u.tasks)) {
+                lastRevision = Number(u.revision) || 0;
+                tasks.value = normalizeAssignees(u.tasks);
+                saveLocal();
+            } else {
+                // 服务器无数据：用本地缓存并逐条上传
+                tasks.value = localTasks;
+                for (const tsk of localTasks) {
+                    await applyMutation('POST', tsk, []);
                 }
             }
-        } catch (e) { /* 离线模式，使用本地缓存 */ }
-
-        // 3. 冲突检测
-        const conflict = checkConflict(localVersion, serverVersion);
-
-        if (conflict.hasConflict) {
-            // 有冲突，弹出冲突处理 UI
-            conflictInfo.value = {
-                local: { version: localVersion, tasks: localTasks },
-                server: { version: serverVersion, tasks: serverTasks },
-                resolution: null,
-            };
-            showConflictModal.value = true;
-            // 暂时使用本地数据
+        } catch (e) {
+            // 离线：使用本地缓存
             tasks.value = localTasks;
-        } else {
-            // 无冲突，自动同步
-            // 优先使用服务器数据（如果服务器有数据）
-            if (serverTasks && serverTasks.length > 0) {
-                tasks.value = serverTasks;
-                // 更新 localStorage（包含版本信息）
-                // 直接使用服务器 version，不重算哈希，确保 md5 与服务器一致
-                // 修正 baseMd5 = md5，标记客户端与服务器已同步
-                const syncedVersion = { ...serverVersion, baseMd5: serverVersion.md5, baseTimestamp: serverVersion.timestamp };
-                const wrapped = { version: syncedVersion, tasks: serverTasks };
-                localStorage.setItem(userKey, JSON.stringify(wrapped));
-            } else if (localTasks && localTasks.length > 0) {
-                // 服务器无数据，使用本地数据
-                tasks.value = localTasks;
-                // 异步上传到服务器
-                syncToServer(userId, orgId);
-            }
-            // 双方都无数据，保持 tasks.value 为空
         }
 
-        // 4. 加载组织成员列表
+        // 3. 加载组织成员列表
         await loadOrgMembers();
 
         if (tasks.value.length > 0) {
             autoUpdateStatus();
         }
-    }
-
-    // --- Conflict Resolution ---
-    async function resolveConflict(action) {
-        if (!conflictInfo.value) return;
-        const { local, server } = conflictInfo.value;
-        const { userId, orgId } = currentUser.value;
-        const userKey = STORAGE_KEY_USER + '_' + userId;
-
-        if (action === 'local') {
-            // 保留本地版本
-            tasks.value = local.tasks;
-            const wrapped = await wrapData(local.tasks, server ? server.version : null);
-            localStorage.setItem(userKey, JSON.stringify(wrapped));
-            syncToServer(userId, orgId);
-        } else if (action === 'server') {
-            // 保留服务器版本
-            tasks.value = server.tasks;
-            const wrapped = await wrapData(server.tasks, server.version);
-            localStorage.setItem(userKey, JSON.stringify(wrapped));
-        } else if (action === 'merge') {
-            // 智能合并：基于任务级 lastModified 时间戳（暂未实现，默认保留本地）
-            showToast('智能合并功能开发中，暂使用本地版本', 'warning');
-            tasks.value = local.tasks;
-            const wrapped = await wrapData(local.tasks, server ? server.version : null);
-            localStorage.setItem(userKey, JSON.stringify(wrapped));
-            syncToServer(userId, orgId);
-        }
-
-        showConflictModal.value = false;
-        conflictInfo.value = null;
-        showToast('冲突已解决', 'success');
-    }
-
-    // --- Manual Conflict Resolution ---
-    // --- 任务比对工具 ---
-    const DIFF_FIELDS = ['title', 'status', 'priority', 'progress', 'due', 'scheduled', 'content', 'assignee', 'postponedCount', 'confirmedDate', 'files'];
-    const FIELD_LABELS = {
-        title: '标题', status: '状态', priority: '优先级', progress: '进度',
-        due: '截止', scheduled: '计划', content: '内容', assignee: '负责人',
-        postponedCount: '延期次数', confirmedDate: '确认日期', files: '关联文件'
-    };
-    const HIGH_SEVERITY_FIELDS = new Set(['status', 'priority']);
-    const MEDIUM_SEVERITY_FIELDS = new Set(['due', 'scheduled', 'confirmedDate']);
-
-    // 字段中文名
-    function fieldLabel(f) { return FIELD_LABELS[f] || f; }
-
-    // 格式化字段值用于展示
-    function formatField(task, f) {
-        if (!task) return '—';
-        if (f === 'status') return getStatusLabel(task[f]);
-        if (f === 'priority') return priorityLabel(task[f]);
-        if (f === 'progress') return (task[f] || 0) + '%';
-        return task[f] ?? '—';
-    }
-
-    // 差异字段的严重度（用于 tag 颜色）
-    function diffSeverity(f) {
-        if (HIGH_SEVERITY_FIELDS.has(f)) return 'high';
-        if (MEDIUM_SEVERITY_FIELDS.has(f)) return 'medium';
-        return 'low';
-    }
-
-    // 计算任务冲突严重度
-    function getSeverity(diffs) {
-        if (diffs.some(f => HIGH_SEVERITY_FIELDS.has(f))) return 'high';
-        if (diffs.some(f => MEDIUM_SEVERITY_FIELDS.has(f))) return 'medium';
-        return 'low';
-    }
-
-    // 冲突类型中文标签
-    function typeLabel(row) {
-        if (row.type === 'local-only') return '仅本地';
-        if (row.type === 'server-only') return '仅服务器';
-        return '两端均有';
-    }
-
-    // 展示字段列表：both 类型只显示差异字段 + 核心字段
-    function showFields(row) {
-        if (row.type === 'both' && row.diffs.length) {
-            const seen = new Set(row.diffs);
-            for (const f of ['title', 'status', 'priority']) {
-                if (!seen.has(f)) seen.add(f);
-            }
-            return [...seen].slice(0, 6);
-        }
-        return ['title', 'status', 'priority', 'due', 'scheduled', 'progress'].slice(0, 6);
-    }
-
-    // diff 字段分类：changed / none
-    function diffClass(row, f) {
-        return row.diffs.includes(f) ? 'changed' : 'none';
-    }
-
-    // 按严重度筛选后的列表
-    const filteredConflictList = computed(() => {
-        if (filterSeverity.value === 'all') return conflictTaskList.value;
-        return conflictTaskList.value.filter(t => t.severity === filterSeverity.value);
-    });
-
-    // 计算确认汇总
-    function buildConfirmSummary() {
-        let localCount = 0, serverCount = 0, fieldCount = 0, dropCount = 0;
-        for (const item of conflictTaskList.value) {
-            const c = conflictChoices[item.id];
-            if (!c) { dropCount++; continue; }
-            if (c._mode === 'drop') { dropCount++; }
-            else if (c._mode === 'local') { localCount++; }
-            else if (c._mode === 'server') { serverCount++; }
-            else if (c._mode === 'field') { fieldCount++; }
-        }
-        confirmSummary.localCount = localCount;
-        confirmSummary.serverCount = serverCount;
-        confirmSummary.fieldCount = fieldCount;
-        confirmSummary.dropCount = dropCount;
-    }
-
-    // 计算单个任务的 MD5（同步，使用 SparkMD5）
-    function taskMD5(task) {
-        const obj = {};
-        for (const f of DIFF_FIELDS) {
-            obj[f] = task[f] === undefined ? null : task[f];
-        }
-        return SparkMD5.hash(JSON.stringify(obj));
-    }
-
-    // 返回差异字段列表（用于高亮）
-    function getDiffFields(lt, st) {
-        const diffs = [];
-        for (const f of DIFF_FIELDS) {
-            const va = lt[f] === undefined ? null : lt[f];
-            const vb = st[f] === undefined ? null : st[f];
-            if (va !== vb) diffs.push(f);
-        }
-        return diffs;
-    }
-
-    function openManualResolve() {
-        if (!conflictInfo.value) return;
-        const { local, server } = conflictInfo.value;
-        const localMap = {};
-        (local.tasks || []).forEach(t => { localMap[t.id] = t; });
-        const serverMap = {};
-        (server.tasks || []).forEach(t => { serverMap[t.id] = t; });
-
-        const list = [];
-        const allIds = new Set([
-            ...(local.tasks || []).map(t => t.id),
-            ...(server.tasks || []).map(t => t.id)
-        ]);
-
-        for (const id of allIds) {
-            const lt = localMap[id];
-            const st = serverMap[id];
-
-            // 只在本地存在
-            if (lt && !st) {
-                list.push({ id, title: lt.title, local: { ...lt }, server: null, diffs: [], type: 'local-only', severity: 'low' });
-                conflictChoices[id] = { _mode: 'local' };
-                continue;
-            }
-            // 只在服务器存在
-            if (!lt && st) {
-                list.push({ id, title: st.title, local: null, server: { ...st }, diffs: [], type: 'server-only', severity: 'low' });
-                conflictChoices[id] = { _mode: 'server' };
-                continue;
-            }
-            // 双方都存在：用 MD5 快速判断
-            if (lt && st) {
-                const md5Local = taskMD5(lt);
-                const md5Server = taskMD5(st);
-                if (md5Local !== md5Server) {
-                    const diffs = getDiffFields(lt, st);
-                    const severity = getSeverity(diffs);
-                    list.push({ id, title: lt.title || st.title, local: { ...lt }, server: { ...st }, diffs, type: 'both', severity });
-                    const localNewer = (local.version?.timestamp || 0) >= (server.version?.timestamp || 0);
-                    // 初始化 conflictChoices：默认整条取较新的一端，同时初始化各字段选择
-                    const choice = { _mode: localNewer ? 'local' : 'server' };
-                    for (const f of diffs) { choice[f] = localNewer ? 'local' : 'server'; }
-                    conflictChoices[id] = choice;
-                }
-            }
-        }
-
-        // fallback：若逐条比对无差异，但整体 md5 不一致（可能差异仅在非 DIFF_FIELDS 字段），
-        // 按 id 差异推入列表，标记为 metadata-only 差异
-        if (list.length === 0) {
-            const localIds = new Set((local.tasks || []).map(t => t.id));
-            const serverIds = new Set((server.tasks || []).map(t => t.id));
-            // 只在本地存在的任务
-            for (const id of localIds) {
-                if (!serverIds.has(id)) {
-                    const lt = localMap[id];
-                    list.push({ id, title: lt?.title || '(无标题)', local: { ...lt }, server: null, diffs: [], type: 'local-only', severity: 'low' });
-                    conflictChoices[id] = { _mode: 'local' };
-                }
-            }
-            // 只在服务器存在的任务
-            for (const id of serverIds) {
-                if (!localIds.has(id)) {
-                    const st = serverMap[id];
-                    list.push({ id, title: st?.title || '(无标题)', local: null, server: { ...st }, diffs: [], type: 'server-only', severity: 'low' });
-                    conflictChoices[id] = { _mode: 'server' };
-                }
-            }
-            // 双方都存在但逐条 MD5 一致 → 仅在非比对字段有差异（如 id 本身、autoPostponed 等）
-            for (const id of localIds) {
-                if (serverIds.has(id)) {
-                    const lt = localMap[id], st = serverMap[id];
-                    if (!list.find(t => t.id === id)) {
-                        list.push({ id, title: lt?.title || st?.title || '(无标题)', local: { ...lt }, server: { ...st }, diffs: [], type: 'both', severity: 'low' });
-                        const localNewer = (local.version?.timestamp || 0) >= (server.version?.timestamp || 0);
-                        conflictChoices[id] = { _mode: localNewer ? 'local' : 'server' };
-                    }
-                }
-            }
-        }
-
-        if (list.length === 0) {
-            // 冲突检测通过但逐任务比对无差异，无需处理
-        }
-
-        conflictTaskList.value = list;
-        filterSeverity.value = 'all';
-        showManualResolve.value = true;
-    }
-
-    function selectAllLocal() {
-        for (const item of conflictTaskList.value) {
-            if (item.type === 'server-only') {
-                // 无本地版本，全选本地 = 丢弃服务器独有任务
-                conflictChoices[item.id] = { _mode: 'drop' };
-            } else {
-                conflictChoices[item.id] = { _mode: 'local' };
-                if (item.type === 'both') {
-                    for (const f of item.diffs) { conflictChoices[item.id][f] = 'local'; }
-                }
-            }
-        }
-    }
-
-    function selectAllServer() {
-        for (const item of conflictTaskList.value) {
-            if (item.type === 'local-only') {
-                // 无服务器版本，全选服务器 = 丢弃本地独有任务
-                conflictChoices[item.id] = { _mode: 'drop' };
-            } else {
-                conflictChoices[item.id] = { _mode: 'server' };
-                if (item.type === 'both') {
-                    for (const f of item.diffs) { conflictChoices[item.id][f] = 'server'; }
-                }
-            }
-        }
-    }
-
-    // 点「确认合并」：先弹汇总
-    function confirmManualResolve() {
-        if (!conflictInfo.value) return;
-        buildConfirmSummary();
-        showConfirmSummary.value = true;
-    }
-
-    // 汇总弹窗点「确认执行合并」
-    async function executeMerge() {
-        if (!conflictInfo.value) return;
-        const { local, server } = conflictInfo.value;
-        const { userId, orgId } = currentUser.value;
-        const userKey = STORAGE_KEY_USER + '_' + userId;
-
-        const localMap = {};
-        (local.tasks || []).forEach(t => { localMap[t.id] = t; });
-        const serverMap = {};
-        (server.tasks || []).forEach(t => { serverMap[t.id] = t; });
-
-        // 构建合并结果：以本地完整列表为基底，按用户选择覆盖冲突项
-        const mergedMap = {};
-        for (const t of (local.tasks || [])) { mergedMap[t.id] = { ...t }; }
-
-        // 服务器独有的任务（本地不存在）默认保留
-        for (const t of (server.tasks || [])) {
-            if (!mergedMap[t.id]) mergedMap[t.id] = { ...t };
-        }
-
-        // 对冲突项按用户选择覆盖
-        for (const item of conflictTaskList.value) {
-            const c = conflictChoices[item.id];
-            if (!c) continue;
-
-            if (c._mode === 'drop') {
-                delete mergedMap[item.id];
-            } else if (c._mode === 'local') {
-                mergedMap[item.id] = { ...item.local };
-            } else if (c._mode === 'server') {
-                mergedMap[item.id] = { ...item.server };
-            } else if (c._mode === 'field') {
-                const base = { ...item.local };
-                for (const f of item.diffs) {
-                    if (c[f] === 'server' && item.server) {
-                        base[f] = item.server[f];
-                    }
-                }
-                mergedMap[item.id] = base;
-            }
-        }
-
-        const merged = Object.values(mergedMap);
-
-        tasks.value = merged;
-        const wrapped = await wrapData(merged, server ? server.version : null);
-        localStorage.setItem(userKey, JSON.stringify(wrapped));
-
-        // 直接上传，绕过 syncToServer 的二次冲突检测。
-        // executeMerge 已是用户决策的最终结果（手动合并完成），无需再做冲突检测；
-        // syncToServer 内部会再次 fetch 服务端并 checkConflict，
-        // 但此时服务端可能因其他客户端写入导致 serverVersion 与 wrapped.version.baseMd5 不匹配，
-        // 触发误报冲突 → return → 不发 PUT。改为直接 PUT 与 localStorage 同步。
-        try {
-            const all = (await fetchTasksJSON()) || { orgs: {}, lastUpdated: '' };
-            if (!all.orgs) all.orgs = {};
-            if (!all.orgs[orgId]) all.orgs[orgId] = {};
-            all.orgs[orgId][userId] = wrapped;
-            all.lastUpdated = new Date().toISOString();
-            await taskApi.putTasks(all);
-            invalidateTasksJsonCache();
-            localStorage.setItem(userKey, JSON.stringify({ version: wrapped.version, tasks: tasks.value }));
-            syncStatus.value = 'idle';
-        } catch (err) {
-            syncStatus.value = 'error';
-            lastSyncError.value = err.message || '未知错误';
-            showToast('合并结果上传失败', 'error');
-        }
-
-        showConfirmSummary.value = false;
-        showManualResolve.value = false;
-        showConflictModal.value = false;
-        conflictInfo.value = null;
-        showToast('冲突已手动解决，合并 ' + merged.length + ' 条任务', 'success');
     }
 
     // --- Load org members ---
@@ -655,154 +176,115 @@ export function setupTodoApp() {
         return m ? m.name : key;
     }
 
-    // ========== Sync & Auth ==========
+    // ========== Sync：服务端权威 revision + 任务级乐观锁 ==========
     const syncStatus = ref('idle');  // 'idle' | 'syncing' | 'error'
     const lastSyncError = ref('');
+    // 服务端权威版本号（乐观锁基准）：loadUserTasks 拉取，每次增量写成功后更新
+    let lastRevision = 0;
 
-    async function save() {
+    // 本地离线缓存（服务器是唯一事实源，缓存仅供离线兜底）
+    function saveLocal() {
         if (!currentUser.value) return;
-        const { userId, orgId } = currentUser.value;
-        // 如果正在查看其他成员，禁止保存
-        if (viewingMember.value) {
-            showToast('查看他人日程时不可编辑', 'warning');
-            return;
-        }
-
-        // 0. 先从 localStorage 读取当前版本信息
-        const userKey = STORAGE_KEY_USER + '_' + userId;
-        let localVersion = null;
-        const saved = localStorage.getItem(userKey);
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved);
-                localVersion = parsed.version || null;
-            } catch (e) { /* ignore */ }
-        }
-
-        // 1. 保存到 localStorage（包含版本信息）
         try {
-            const wrapped = await wrapData(tasks.value, localVersion);
-            localStorage.setItem(userKey, JSON.stringify(wrapped));
-        } catch (e) {
-            showToast('本地存储失败，请检查浏览器存储设置', 'error');
-            return;
-        }
-
-        // 2. 异步同步到服务器（包含冲突检测）
-        await syncToServer(userId, orgId);
+            const userKey = STORAGE_KEY_USER + '_' + currentUser.value.userId;
+            localStorage.setItem(userKey, JSON.stringify({ tasks: tasks.value }));
+        } catch (e) { /* ignore */ }
     }
 
-    // saveLocal 只保存到 localStorage（不发请求），供增量同步后更新本地缓存。
-    // 保留 wrapData 重算 MD5 以检测本地修改（localModified = md5 !== baseMd5）。
-    // syncTaskToServer 完成后会用服务端返回的 version 覆盖此处的客户端 version。
-    async function saveLocal() {
-        if (!currentUser.value) return;
-        const userId = currentUser.value.userId;
-        const userKey = STORAGE_KEY_USER + '_' + userId;
-        let localVersion = null;
-        const saved = localStorage.getItem(userKey);
-        if (saved) {
-            try { localVersion = JSON.parse(saved).version || null; } catch { /* ignore */ }
-        }
+    // 强制从服务器重拉（冲突兜底 / 401 外的错误恢复）
+    async function reloadFromServer() {
         try {
-            const wrapped = await wrapData(tasks.value, localVersion);
-            localStorage.setItem(userKey, JSON.stringify(wrapped));
-        } catch { /* ignore */ }
+            const { orgId, userId } = currentUser.value;
+            const data = await taskApi.getTasks();
+            const u = data?.orgs?.[orgId]?.[userId];
+            if (u && Array.isArray(u.tasks)) {
+                lastRevision = Number(u.revision) || 0;
+                tasks.value = normalizeAssignees(u.tasks);
+                saveLocal();
+                syncStatus.value = 'idle';
+                lastSyncError.value = '';
+            }
+        } catch (e) { /* 离线忽略 */ }
     }
 
-    // 增量同步：只发单条任务到服务器，避免全量 PUT 的带宽浪费
-    // method: 'PATCH' 更新 | 'POST' 新增 | 'DELETE' 删除
-    async function syncTaskToServer(task, method) {
-        if (!authToken.value) return null;
+    // --- 任务级冲突（409）：同字段碰撞才弹单任务对比卡 ---
+    const conflictCard = ref(null); // { localTask, serverTask, changedFields, serverRevision }
+
+    // 增量写统一入口：带 baseRevision 乐观锁；成功更新 lastRevision；
+    // 409 → 冲突处理；其他错误 → 状态标记（本地修改保留，不回滚）
+    async function applyMutation(method, task, changedFields) {
+        const base = lastRevision;
         try {
             let data;
-            if (method === 'PATCH') {
-                data = await taskApi.updateTask(task);
-            } else if (method === 'POST') {
-                data = await taskApi.addTask(task);
-            } else if (method === 'DELETE') {
-                data = await taskApi.deleteTask(task.id);
-            }
-            // 更新本地 version（服务端重新计算的）
-            if (data && data.data && data.data.version) {
-                const userId = currentUser.value.userId;
-                const userKey = STORAGE_KEY_USER + '_' + userId;
-                const saved = localStorage.getItem(userKey);
-                if (saved) {
-                    try {
-                        const parsed = JSON.parse(saved);
-                        parsed.version = data.data.version;
-                        localStorage.setItem(userKey, JSON.stringify(parsed));
-                    } catch { /* ignore */ }
-                }
-            }
-            return data ? data.data : null;
+            if (method === 'PATCH') data = await taskApi.updateTask(task, base);
+            else if (method === 'POST') data = await taskApi.addTask(task, base);
+            else data = await taskApi.deleteTask(task.id, base);
+            if (data && typeof data.revision === 'number') lastRevision = data.revision;
+            syncStatus.value = 'idle';
+            lastSyncError.value = '';
+            saveLocal();
+            return true;
         } catch (err) {
-            console.error('[todo] 增量同步 HTTP 错误', err);
-            throw err;
+            if (err && err.code === 40901) {
+                return handleMutationConflict(method, task, changedFields, err.serverTask, err.serverRevision);
+            }
+            console.error('[todo] 增量同步失败', err);
+            syncStatus.value = 'error';
+            lastSyncError.value = err.message || '同步失败';
+            showToast('同步失败，本地修改已保留', 'warning');
+            return false;
         }
     }
 
-    async function syncToServer(userId, orgId) {
-        if (!userId || !orgId) return;
-        syncStatus.value = 'syncing';
-        lastSyncError.value = '';
-
-        try {
-            // 1. 先从服务器拉取最新数据（用于冲突检测，强制刷新跳过缓存）
-            let data = { orgs: {} };
-            let serverVersion = null;
-            const fetched = await fetchTasksJSON(true);
-            if (fetched) {
-                data = fetched;
-                const org = (data.orgs || {})[orgId];
-                if (org && org[userId]) {
-                    const unwrapped = unwrapData(org[userId]);
-                    serverVersion = unwrapped.version;
-                }
+    // 409 处理：PATCH 且服务端同字段值一致 → 静默接受服务端（他端做了相同修改或改了别处）；
+    // 同字段不同值 → 弹对比卡；POST/DELETE 冲突 → 重拉服务端
+    function handleMutationConflict(method, task, changedFields, serverTask, serverRevision) {
+        if (method === 'PATCH' && serverTask) {
+            const clashing = changedFields.filter(f => serverTask[f] !== task[f]);
+            if (!clashing.length) {
+                const local = tasks.value.find(t => String(t.id) === String(task.id));
+                if (local) Object.assign(local, serverTask);
+                lastRevision = serverRevision;
+                saveLocal();
+                return true;
             }
-
-            // 2. 从 localStorage 读取本地版本信息
-            const userKey = STORAGE_KEY_USER + '_' + userId;
-            let localVersion = null;
-            const saved = localStorage.getItem(userKey);
-            if (saved) {
-                try {
-                    const parsed = JSON.parse(saved);
-                    localVersion = parsed.version || null;
-                } catch (e) { /* ignore */ }
-            }
-
-            // 3. 冲突检测
-            const conflict = checkConflict(localVersion, serverVersion);
-            if (conflict.hasConflict) {
-                // 有冲突，需要用户处理
-                syncStatus.value = 'error';
-                lastSyncError.value = '数据冲突，请先解决冲突';
-                showToast('数据冲突，请刷新页面解决冲突', 'error');
-                return;
-            }
-
-            // 4. 无冲突，上传数据（包含版本信息）
-            if (!data.orgs) data.orgs = {};
-            if (!data.orgs[orgId]) data.orgs[orgId] = {};
-            const wrapped = await wrapData(tasks.value, serverVersion);
-            data.orgs[orgId][userId] = wrapped;
-            data.lastUpdated = new Date().toISOString();
-
-            await taskApi.putTasks(data);
-            invalidateTasksJsonCache();
-            // 上传成功后更新 localStorage version。
-            // 直接用刚才上传的 wrapped.version（服务端 PUT 不重算 MD5，原样存储），而不是
-            // buildVersion 客户端重算 — 客户端 JSON.stringify 的 key 顺序与服务端
-            // json.Marshal 不同，重算会导致下次刷新时 localStorage md5 与服务端 md5 不匹配。
-            localStorage.setItem(STORAGE_KEY_USER + '_' + userId, JSON.stringify({ version: wrapped.version, tasks: tasks.value }));
-            syncStatus.value = 'idle';
-        } catch (err) {
-            syncStatus.value = 'error';
-            lastSyncError.value = err.message || '未知错误';
-            showToast('远程同步失败，数据已保存在本地', 'error');
+            conflictCard.value = { localTask: task, serverTask, changedFields, serverRevision };
+            showToast('任务被其他设备修改，请确认', 'warning');
+            return false;
         }
+        // 新增/删除冲突：以服务端为准重拉
+        reloadFromServer();
+        return true;
+    }
+
+    // 冲突卡用户裁决：choice = { field: 'local' | 'server' }，未列字段取服务端
+    async function resolveConflictCard(choice) {
+        const cc = conflictCard.value;
+        if (!cc) return;
+        conflictCard.value = null;
+        const merged = { ...cc.serverTask };
+        const replayFields = [];
+        for (const f of cc.changedFields) {
+            if (choice[f] !== 'server') {
+                merged[f] = cc.localTask[f];
+                replayFields.push(f);
+            }
+        }
+        const local = tasks.value.find(t => String(t.id) === String(cc.localTask.id));
+        if (local) Object.assign(local, merged);
+        lastRevision = cc.serverRevision;
+        await applyMutation('PATCH', merged, replayFields);
+    }
+
+    // 放弃本地修改：整条采用服务端
+    function discardConflictCard() {
+        const cc = conflictCard.value;
+        if (!cc) return;
+        const local = tasks.value.find(t => String(t.id) === String(cc.localTask.id));
+        if (local) Object.assign(local, cc.serverTask);
+        lastRevision = cc.serverRevision;
+        conflictCard.value = null;
+        saveLocal();
     }
 
     // --- User init ---
@@ -837,28 +319,6 @@ export function setupTodoApp() {
 
     // ========== Computed Properties ==========
     const hasConflict = computed(() => conflictDates.value.length > 0);
-
-    // 冲突处理 UI 辅助 computed
-    const conflictLocalTime = computed(() => {
-        if (!conflictInfo.value || !conflictInfo.value.local) return '未知';
-        const ts = conflictInfo.value.local.version?.timestamp;
-        if (!ts) return '未知';
-        return new Date(ts).toLocaleString('zh-CN');
-    });
-    const conflictServerTime = computed(() => {
-        if (!conflictInfo.value || !conflictInfo.value.server) return '未知';
-        const ts = conflictInfo.value.server.version?.timestamp;
-        if (!ts) return '未知';
-        return new Date(ts).toLocaleString('zh-CN');
-    });
-    const conflictLocalTasks = computed(() => {
-        if (!conflictInfo.value || !conflictInfo.value.local) return [];
-        return conflictInfo.value.local.tasks || [];
-    });
-    const conflictServerTasks = computed(() => {
-        if (!conflictInfo.value || !conflictInfo.value.server) return [];
-        return conflictInfo.value.server.tasks || [];
-    });
 
     // 列表视图：按状态分组
     const listGroupedTasks = computed(() => {
@@ -954,7 +414,7 @@ export function setupTodoApp() {
     });
 
     const overdueCount = computed(() => {
-        return tasks.value.filter(t => t.status !== 'done' && t.status !== 'conflict' && isOverdue(t)).length;
+        return tasks.value.filter(t => t.status !== 'done' && isOverdue(t)).length;
     });
 
     const postponedCount = computed(() => {
@@ -966,7 +426,6 @@ export function setupTodoApp() {
         const dailyTasks = {};
         const taskList = tasks.value;
         for (const t of taskList) {
-            if (t.status === 'conflict') continue;
             if (t.scheduled) {
                 if (!dailyTasks[t.scheduled]) dailyTasks[t.scheduled] = [];
                 dailyTasks[t.scheduled].push(t);
@@ -989,7 +448,6 @@ export function setupTodoApp() {
         const wsStr = formatDate(ws);
         const weStr = formatDate(we);
         return tasks.value.filter(t => {
-            if (t.status === 'conflict') return false;
             if (!t.scheduled) return false;
             const end = t.due || t.scheduled;
             // 只显示与当前周有实际重叠的任务
@@ -1095,7 +553,7 @@ export function setupTodoApp() {
     }
     function getTasksForDate(dateStr) {
         return tasks.value.filter(t => {
-            if (t.status === 'done' || t.status === 'conflict') return false;
+            if (t.status === 'done') return false;
             if (!t.scheduled) return false;
             const start = t.scheduled;
             const end = t.due || t.scheduled;
@@ -1177,12 +635,8 @@ export function setupTodoApp() {
             if (targetStatus === 'done') {
                 task.progress = 100;
             }
-            // 增量同步：拖拽改状态只发这一条任务
-            syncTaskToServer(task, 'PATCH').catch(err => {
-                console.error('[todo] 拖拽同步失败，回退到全量同步', err);
-                save();
-            });
-            saveLocal();
+            // 增量同步：拖拽改状态只发这一条任务（乐观锁，409 弹对比卡）
+            applyMutation('PATCH', task, ['status', 'scheduled', 'due', 'progress']);
             showToast(`已移动到 ${getStatusLabel(targetStatus)}`, 'success');
         }
         draggingTaskId.value = null;
@@ -1224,7 +678,7 @@ export function setupTodoApp() {
                 task.confirmedDate = null;
                 task.autoPostponed = false;
             }
-            save();
+            saveLocal();
             showToast(`已安排到 ${dateStr}`, 'success');
         }
         calendarDragOverDate.value = null;
@@ -1246,7 +700,7 @@ export function setupTodoApp() {
             task.postponedFrom = null;
             task.postponedCount = 0;
             task.autoPostponed = false;
-            save();
+            saveLocal();
             showToast('任务已确认完成', 'success');
         }
     }
@@ -1287,7 +741,7 @@ export function setupTodoApp() {
         };
         tasks.value.push(task);
         newTaskForDate.value[dateStr] = '';
-        save();
+        saveLocal();
         showToast('任务已添加到日历', 'success');
     }
 
@@ -1301,12 +755,7 @@ export function setupTodoApp() {
             task.status = 'done';
             task.progress = 100;
         }
-        // 增量同步：只发这一条任务
-        syncTaskToServer(task, 'PATCH').catch(err => {
-            console.error('[todo] 增量同步失败，回退到全量同步', err);
-            save();
-        });
-        saveLocal();
+        applyMutation('PATCH', task, ['status', 'progress']);
     }
 
     // 状态变更时同步进度（newStatus 由 @change 传入，避免 v-model 更新时序问题）
@@ -1387,7 +836,7 @@ export function setupTodoApp() {
         };
         tasks.value.push(task);
         listNewTitle.value = '';
-        save();
+        saveLocal();
         showToast('已添加', 'success');
     }
 
@@ -1478,12 +927,7 @@ export function setupTodoApp() {
         tasks.value.push(task);
         newTaskTitle.value[editingTask.value.status] = '';
         showModal.value = false;
-        // 增量同步：POST 单条新任务
-        syncTaskToServer(task, 'POST').catch(err => {
-            console.error('[todo] 新增同步失败，回退到全量同步', err);
-            save();
-        });
-        saveLocal();
+        applyMutation('POST', task, []);
         showToast('任务已创建', 'success');
     }
 
@@ -1528,16 +972,12 @@ export function setupTodoApp() {
         }
         const idx = tasks.value.findIndex(t => t.id === updatedTask.id);
         if (idx !== -1) {
-            if (updatedTask.status === 'done' || updatedTask.status === 'conflict') {
+            if (updatedTask.status === 'done' ) {
                 updatedTask.confirmedDate = formatDate(new Date());
             }
             tasks.value.splice(idx, 1, updatedTask);
-            // 增量同步：只发这一条任务，不发全部
-            syncTaskToServer(updatedTask, 'PATCH').catch(err => {
-                console.error('[todo] 增量同步失败，回退到全量同步', err);
-                save();  // 增量失败回退全量
-            });
-            saveLocal();
+            // 增量同步：只发这一条任务（编辑保存字段多，冲突时对比卡全字段展示）
+            applyMutation('PATCH', updatedTask, ['title', 'content', 'status', 'priority', 'scheduled', 'due', 'progress', 'assignee', 'postponedCount', 'autoPostponed', 'sortOrder', 'files']);
             showToast('任务已更新', 'success');
         }
         showModal.value = false;
@@ -1552,12 +992,7 @@ export function setupTodoApp() {
             return;
         }
         tasks.value = tasks.value.filter(t => t.id !== id);
-        // 增量同步：DELETE 单条任务
-        syncTaskToServer({ id }, 'DELETE').catch(err => {
-            console.error('[todo] 删除同步失败，回退到全量同步', err);
-            save();
-        });
-        saveLocal();
+        applyMutation('DELETE', { id }, []);
         showModal.value = false;
         showToast('任务已删除', 'warning');
     }
@@ -1593,7 +1028,7 @@ export function setupTodoApp() {
                     const data = JSON.parse(ev.target.result);
                     const unwrapped = unwrapData(data);
                     tasks.value = unwrapped.tasks;
-                    save();
+                    saveLocal();
                     showToast('导入成功', 'success');
                 } catch (err) {
                     showToast('导入失败: ' + err.message, 'error');
@@ -1605,7 +1040,7 @@ export function setupTodoApp() {
     }
 
     function saveToFile() {
-        save();
+        saveLocal();
         exportJSON();
     }
 
@@ -1625,7 +1060,7 @@ export function setupTodoApp() {
         }
         if (!confirm(`确定要清空「${userName}」的所有任务（共 ${userTasks.length} 项）吗？此操作不可撤销！`)) return;
         tasks.value = tasks.value.filter(t => t.assignee !== userKey);
-        save();
+        saveLocal();
         showToast(`已清空「${userName}」的 ${userTasks.length} 项任务`, 'warning');
     }
 
@@ -1735,16 +1170,11 @@ export function setupTodoApp() {
         }
         const idx = tasks.value.findIndex(t => t.id === updatedTask.id)
         if (idx !== -1) {
-            if (updatedTask.status === 'done' || updatedTask.status === 'conflict') {
+            if (updatedTask.status === 'done' ) {
                 updatedTask.confirmedDate = formatDate(new Date())
             }
             tasks.value.splice(idx, 1, updatedTask)
-            // 增量同步：只发这一条任务，不发全部
-            syncTaskToServer(updatedTask, 'PATCH').catch(err => {
-                console.error('[todo] 增量同步失败，回退到全量同步', err)
-                save()  // 增量失败回退全量
-            })
-            saveLocal()
+            applyMutation('PATCH', updatedTask, ['status', 'scheduled', 'due', 'progress'])
             showToast('任务已保存', 'success')
         }
         // 注意：不关闭 modal，保持 panel 打开
@@ -1782,15 +1212,7 @@ export function setupTodoApp() {
         viewingMember, orgMembers, memberName,
         // Sync status
         syncStatus, lastSyncError,
-        // Conflict resolution
-        conflictInfo, showConflictModal, resolveConflict,
-        conflictLocalTime, conflictServerTime,
-        conflictLocalTasks, conflictServerTasks,
-        // Manual conflict resolution
-        showManualResolve, conflictTaskList, conflictChoices,
-        openManualResolve, confirmManualResolve,
-        selectAllLocal, selectAllServer,
-        filteredConflictList, fieldLabel, formatField, typeLabel, showFields, diffClass,
-        filterSeverity, showConfirmSummary, confirmSummary, executeMerge,
+        // 任务级冲突（409 对比卡）
+        conflictCard, resolveConflictCard, discardConflictCard,
     };
 }

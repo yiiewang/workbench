@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { activeTabPath as storeActiveTabPath, storeGetTab } from '../../stores/indexStore'
-import { getTasksByFile, getOpenTasks, updateTask, type Task } from '../../api/tasks'
+import { getTasksByFile, getOpenTasks, getTaskRevision, updateTask, type Task } from '../../api/tasks'
 import { showToast } from '../../lib/common'
 import FileViewer from './FileViewer.vue'
 import TaskPickerModal from '../modal/TaskPickerModal.vue'
@@ -66,17 +66,23 @@ async function refreshRelated() {
   } catch { /* 静默 */ }
 }
 
-// TaskPickerModal 确认后的落地：把当前文件追加到所选任务的 files（逐条 PATCH）
+// TaskPickerModal 确认后的落地：把当前文件追加到所选任务的 files（逐条 PATCH，乐观锁）
 async function onPicked(taskIds: string[]) {
   const path = storeActiveTabPath.value
   if (!path || !taskIds.length) return
   const { tasks: openList } = await getOpenTasks()
   const targets = (openList || []).filter(t => taskIds.includes(String(t.id)))
   let ok = 0
+  let revision = 0
+  try {
+    revision = (await getTaskRevision()).revision
+  } catch { /* 拿不到版本号则放弃 */ }
+  if (!revision) { showToast('关联失败，请重试'); return }
   for (const t of targets) {
     if ((t.files || []).includes(path)) { ok++; continue }
     try {
-      await updateTask({ ...t, files: [...(t.files || []), path] })
+      const data: any = await updateTask({ ...t, files: [...(t.files || []), path] }, revision)
+      if (typeof data?.revision === 'number') revision = data.revision
       ok++
     } catch (e) {
       console.error('[related] link task failed', e)

@@ -1,16 +1,22 @@
 // @ts-nocheck — 原生 JS 迁移代码，待 SFC 化时逐组件类型化（第3步）
-import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onActivated, onDeactivated, nextTick } from 'vue'
 import {
     tasks, showModal, isCreating, editingTask, editingDateRange,
     currentUser, authToken,
     viewingMember, orgMembers, syncStatus, lastSyncError,
-    orgTasks, activeTaskId,
+    orgTasks, activeTaskId, conflictCard,
 } from '../stores/todoStore'
 import { checkAuth, registerTodoAppReset, openTabFn } from '../stores/indexStore'
 import * as taskApi from '../api/tasks'
 import { ElNotification } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { baseName, extFromPath } from '../lib/common'
+import {
+    newTaskId, normalizeAssignees,
+    getWeekStart, getWeekNumber, formatDate, formatDateShort, dayOffset,
+    isOverdue, overdueDays, priorityLabel, statusIcon, getStatusLabel,
+} from '../lib/todoUtils'
+import { createTodoSync } from './todoSync'
 
 // API 调用统一走 ../api/ 模块（tasks/files/share/auth），不再在此重复定义 apiCall。
 // 原有的 API_CODE 常量也移至 api 模块内部。
@@ -19,19 +25,11 @@ export function setupTodoApp() {
     // --- Constants ---
     const STORAGE_KEY_USER = 'workbench-current-user';
 
-    // 新任务 id：UUID 替代 maxId+1 —— 多设备并发新建不再产生重复 id
-    // （历史任务 id 为数字字符串，后端 FlexString 两种形态均兼容）
-    function newTaskId() {
-        if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-        return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
-    }
     const columns = [
         { key: 'todo', label: '待办', icon: '🔴' },
         { key: 'progress', label: '进行中', icon: '🟡' },
         { key: 'done', label: '已完成', icon: '✅' },
     ];
-    const priorityLabelMap = { high: '高', medium: '中', low: '低' };
-    const statusIconMap = { todo: '🔴', progress: '🟡', done: '✅' };
 
     // --- Reactive State ---
     // tasks, auth/user, modal, viewingMember, syncStatus → imported from todoStore
@@ -54,43 +52,6 @@ export function setupTodoApp() {
     const newTaskForDate = ref({});
     const currentWeekStart = ref(getWeekStart(new Date()));
 
-        // 归一化任务列表的 assignee：历史脏数据可能残留 number（主键改造中间态），
-    // 统一转字符串化 id。否则前端 JSON.stringify(number) 与后端 json.Marshal(string)
-    // 的 md5 永远不一致，导致持续误报冲突。
-    function normalizeAssignees(list) {
-        return (list || []).map(t => t.assignee == null ? t : { ...t, assignee: String(t.assignee) });
-    }
-
-    // ========== /tasks.json 请求缓存层 ==========
-    // 多个函数都需要拉取 /tasks.json，缓存 3 秒避免重复请求
-    let _tasksJsonCache = null;
-    let _tasksJsonCacheTime = 0;
-    const TASKS_JSON_CACHE_TTL = 3000;
-
-    async function fetchTasksJSON(forceRefresh = false) {
-        const now = Date.now();
-        if (!forceRefresh && _tasksJsonCache && (now - _tasksJsonCacheTime) < TASKS_JSON_CACHE_TTL) {
-            return _tasksJsonCache;
-        }
-        try {
-            const data = await taskApi.getTasks();
-            _tasksJsonCache = data;
-            _tasksJsonCacheTime = now;
-            return data;
-        } catch (e) {
-            return null;
-        }
-    }
-
-    function invalidateTasksJsonCache() {
-        _tasksJsonCache = null;
-        _tasksJsonCacheTime = 0;
-    }
-
-    // 身份切换（登出/换账号/切换组织）时由 resetIdentityScopedState 调用：
-    // 清空 /api/tasks 请求缓存，防止新身份读到旧身份组织的数据（3 秒 TTL 内尤其危险）
-    registerTodoAppReset(invalidateTasksJsonCache);
-
     // --- Auto Status Update ---
     // 只计算延期天数，不自动修改状态（状态由用户手动管理）
     function autoUpdateStatus() {
@@ -111,48 +72,27 @@ export function setupTodoApp() {
         }
     }
 
+    // --- 同步层（服务端权威 revision + 乐观锁 + 轮询对账，见 todoSync.ts） ---
+    const sync = createTodoSync({
+        tasks, currentUser, authToken, syncStatus, lastSyncError,
+        viewingMember, showModal, conflictCard, orgMembers,
+        showToast, autoUpdateStatus, loadOrgMembers,
+    });
+    const {
+        loadUserTasks, saveLocal, reloadFromServer, applyMutation,
+        resolveConflictCard, discardConflictCard,
+        pollRevision, startRevisionPolling, stopRevisionPolling,
+    } = sync;
+
+    // 身份切换（登出/换账号/切换组织）时清空任务请求缓存（todoSync 内部 3 秒 TTL）
+    registerTodoAppReset(sync.invalidateCache);
+
+    // KeepAlive：TodoView 失活暂停轮询，激活恢复；页面切回前台立即对账一次
+    onActivated(startRevisionPolling);
+    onDeactivated(stopRevisionPolling);
+
     // --- Load tasks for current user ---
     // conflict state → imported from todoStore
-
-    async function loadUserTasks() {
-        if (!currentUser.value) return;
-        const { userId, orgId } = currentUser.value;
-        const userKey = STORAGE_KEY_USER + '_' + userId;
-
-        // 1. 本地离线缓存（无版本信息，服务器是唯一事实源；兼容读旧格式的 .tasks）
-        let localTasks = [];
-        try {
-            const saved = JSON.parse(localStorage.getItem(userKey) || 'null');
-            localTasks = normalizeAssignees(saved?.tasks || []);
-        } catch (e) { localTasks = []; }
-
-        // 2. 从服务器加载（revision = 乐观锁基准）
-        try {
-            const data = await fetchTasksJSON();
-            const u = data?.orgs?.[orgId]?.[userId];
-            if (u && Array.isArray(u.tasks)) {
-                lastRevision = Number(u.revision) || 0;
-                tasks.value = normalizeAssignees(u.tasks);
-                saveLocal();
-            } else {
-                // 服务器无数据：用本地缓存并逐条上传
-                tasks.value = localTasks;
-                for (const tsk of localTasks) {
-                    await applyMutation('POST', tsk, []);
-                }
-            }
-        } catch (e) {
-            // 离线：使用本地缓存
-            tasks.value = localTasks;
-        }
-
-        // 3. 加载组织成员列表
-        await loadOrgMembers();
-
-        if (tasks.value.length > 0) {
-            autoUpdateStatus();
-        }
-    }
 
     // --- Load org members ---
     // 数据源改为 GET /api/org-members（返回 [{id, name}]），不再从 tasks JSON 的 key 推导。
@@ -173,117 +113,6 @@ export function setupTodoApp() {
         const key = String(id);
         const m = orgMembers.value.find(m => String(m.id) === key);
         return m ? m.name : key;
-    }
-
-    // ========== Sync：服务端权威 revision + 任务级乐观锁 ==========
-    const syncStatus = ref('idle');  // 'idle' | 'syncing' | 'error'
-    const lastSyncError = ref('');
-    // 服务端权威版本号（乐观锁基准）：loadUserTasks 拉取，每次增量写成功后更新
-    let lastRevision = 0;
-
-    // 本地离线缓存（服务器是唯一事实源，缓存仅供离线兜底）
-    function saveLocal() {
-        if (!currentUser.value) return;
-        try {
-            const userKey = STORAGE_KEY_USER + '_' + currentUser.value.userId;
-            localStorage.setItem(userKey, JSON.stringify({ tasks: tasks.value }));
-        } catch (e) { /* ignore */ }
-    }
-
-    // 强制从服务器重拉（冲突兜底 / 401 外的错误恢复）
-    async function reloadFromServer() {
-        try {
-            const { orgId, userId } = currentUser.value;
-            const data = await taskApi.getTasks();
-            const u = data?.orgs?.[orgId]?.[userId];
-            if (u && Array.isArray(u.tasks)) {
-                lastRevision = Number(u.revision) || 0;
-                tasks.value = normalizeAssignees(u.tasks);
-                saveLocal();
-                syncStatus.value = 'idle';
-                lastSyncError.value = '';
-            }
-        } catch (e) { /* 离线忽略 */ }
-    }
-
-    // --- 任务级冲突（409）：同字段碰撞才弹单任务对比卡 ---
-    const conflictCard = ref(null); // { localTask, serverTask, changedFields, serverRevision }
-
-    // 增量写统一入口：带 baseRevision 乐观锁；成功更新 lastRevision；
-    // 409 → 冲突处理；其他错误 → 状态标记（本地修改保留，不回滚）
-    async function applyMutation(method, task, changedFields) {
-        const base = lastRevision;
-        try {
-            let data;
-            if (method === 'PATCH') data = await taskApi.updateTask(task, base);
-            else if (method === 'POST') data = await taskApi.addTask(task, base);
-            else data = await taskApi.deleteTask(task.id, base);
-            if (data && typeof data.revision === 'number') lastRevision = data.revision;
-            syncStatus.value = 'idle';
-            lastSyncError.value = '';
-            saveLocal();
-            return true;
-        } catch (err) {
-            if (err && err.code === 40901) {
-                return handleMutationConflict(method, task, changedFields, err.serverTask, err.serverRevision);
-            }
-            console.error('[todo] 增量同步失败', err);
-            syncStatus.value = 'error';
-            lastSyncError.value = err.message || '同步失败';
-            showToast('同步失败，本地修改已保留', 'warning');
-            return false;
-        }
-    }
-
-    // 409 处理：PATCH 且服务端同字段值一致 → 静默接受服务端（他端做了相同修改或改了别处）；
-    // 同字段不同值 → 弹对比卡；POST/DELETE 冲突 → 重拉服务端
-    function handleMutationConflict(method, task, changedFields, serverTask, serverRevision) {
-        if (method === 'PATCH' && serverTask) {
-            const clashing = changedFields.filter(f => serverTask[f] !== task[f]);
-            if (!clashing.length) {
-                const local = tasks.value.find(t => String(t.id) === String(task.id));
-                if (local) Object.assign(local, serverTask);
-                lastRevision = serverRevision;
-                saveLocal();
-                return true;
-            }
-            conflictCard.value = { localTask: task, serverTask, changedFields, serverRevision };
-            showToast('任务被其他设备修改，请确认', 'warning');
-            return false;
-        }
-        // 新增/删除冲突：以服务端为准重拉
-        reloadFromServer();
-        return true;
-    }
-
-    // 冲突卡用户裁决：choice = { field: 'local' | 'server' }，未列字段取服务端
-    async function resolveConflictCard(choice) {
-        const cc = conflictCard.value;
-        if (!cc) return;
-        conflictCard.value = null;
-        const merged = { ...cc.serverTask };
-        const replayFields = [];
-        for (const f of cc.changedFields) {
-            if (choice[f] !== 'server') {
-                merged[f] = cc.localTask[f];
-                replayFields.push(f);
-            }
-        }
-        const local = tasks.value.find(t => String(t.id) === String(cc.localTask.id));
-        if (local) Object.assign(local, merged);
-        lastRevision = cc.serverRevision;
-        await applyMutation('PATCH', merged, replayFields);
-    }
-
-    // 放弃本地修改：整条采用服务端
-    function discardConflictCard() {
-        const cc = conflictCard.value;
-        if (!cc) return;
-        const local = tasks.value.find(t => String(t.id) === String(cc.localTask.id));
-        if (local) Object.assign(local, cc.serverTask);
-        lastRevision = cc.serverRevision;
-        conflictCard.value = null;
-        saveLocal();
     }
 
     // --- User init ---
@@ -490,59 +319,6 @@ export function setupTodoApp() {
         return tracks.map(t => t.tasks);
     });
 
-    // ========== Calendar & Gantt Utilities ==========
-    function getWeekStart(date) {
-        const d = new Date(date);
-        const day = d.getDay();
-        const diff = day === 0 ? -6 : 1 - day;
-        d.setDate(d.getDate() + diff);
-        d.setHours(0, 0, 0, 0);
-        return d;
-    }
-
-    function getWeekNumber(date) {
-        const start = new Date(date.getFullYear(), 0, 1);
-        const ws = getWeekStart(date);
-        return Math.ceil(((ws - start) / 86400000 + start.getDay() + 1) / 7);
-    }
-
-    function formatDate(d) {
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        return `${y}-${m}-${day}`;
-    }
-
-    function isOverdue(task) {
-        if (!task.due) return false;
-        if (task.status === 'done') return false;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        return new Date(task.due + 'T00:00:00') < today && task.progress < 100;
-    }
-
-    // 计算逾期天数（向上取整）。未逾期返回 0。
-    function overdueDays(task) {
-        if (!isOverdue(task)) return 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const due = new Date(task.due + 'T00:00:00');
-        return Math.ceil((today.getTime() - due.getTime()) / 86400000);
-    }
-
-    function dayOffset(startStr, dateStr) {
-        const start = new Date(startStr + 'T00:00:00');
-        const d = new Date(dateStr + 'T00:00:00');
-        return Math.round((d - start) / 86400000);
-    }
-
-    function priorityLabel(p) { return priorityLabelMap[p] || '中'; }
-    function statusIcon(s) { return statusIconMap[s] || '❓'; }
-    function getStatusLabel(s) {
-        const col = columns.find(c => c.key === s);
-        return col ? col.label : s;
-    }
-
     // --- Task getters ---
     function getTasksByStatus(status) {
         return tasks.value.filter(t => t.status === status);
@@ -584,12 +360,6 @@ export function setupTodoApp() {
             width: widthPct.toFixed(1) + '%',
             maxWidth: (100 - leftPct).toFixed(1) + '%',
         };
-    }
-
-    function formatDateShort(d) {
-        if (!d) return '';
-        const dt = new Date(d + 'T00:00:00');
-        return (dt.getMonth() + 1) + '/' + dt.getDate();
     }
 
     // --- Tab ---

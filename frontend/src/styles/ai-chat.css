@@ -1,0 +1,168 @@
+/* AI 对话消息区公共样式：PC 浮动面板（AiChat.vue）与移动端全屏页（MAI.vue）共用。
+   类名两边模板保持一致；布局差异（面板/页面外壳、输入区）由各自 scoped 样式实现。 */
+
+/* 消息行 */
+.ai-msg { display: flex; gap: 8px; align-items: flex-start; position: relative; }
+.ai-msg.user { flex-direction: row-reverse; }
+
+/* hover/触屏工具条 */
+.ai-msg-actions {
+  position: absolute;
+  top: -6px;
+  right: 0;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity .15s;
+  z-index: 1;
+}
+.ai-msg:hover .ai-msg-actions { opacity: 1; }
+@media (hover: none) {
+  .ai-msg-actions { opacity: 1; } /* 触屏常显 */
+}
+.ai-act {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+}
+.ai-act:hover { color: var(--accent); border-color: var(--accent); }
+.ai-act svg { width: 11px; height: 11px; }
+
+/* 头像 */
+.ai-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+}
+.ai-avatar.user { background: var(--accent); color: #fff; }
+.ai-avatar.assistant { background: linear-gradient(135deg, #6f5fd3, #4d8de0); color: #fff; }
+.ai-avatar.assistant svg { width: 13px; height: 13px; }
+
+/* 气泡 */
+.ai-bubble {
+  min-width: 0;
+  max-width: calc(100% - 40px);
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-bubble.user {
+  background: var(--accent);
+  color: #fff;
+  border-top-right-radius: 4px;
+}
+.ai-bubble.assistant {
+  background: var(--code-bg);
+  color: var(--text);
+  border-top-left-radius: 4px;
+  white-space: normal;
+}
+.ai-cursor { animation: ai-blink 1s steps(2) infinite; }
+@keyframes ai-blink { 0% { opacity: 1; } 50% { opacity: 0; } }
+
+/* user 气泡内引用文件名 */
+.ai-msg-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, .3);
+}
+.ai-msg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  background: rgba(255, 255, 255, .18);
+  border-radius: 4px;
+  padding: 1px 6px;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 思考过程（推理模型） */
+.ai-reasoning { margin-bottom: 6px; }
+.ai-reasoning-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.ai-reasoning-toggle:hover { color: var(--accent); }
+.ai-reasoning-toggle svg { width: 12px; height: 12px; }
+.ai-reasoning-body {
+  margin-top: 4px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* assistant 气泡内 markdown（v-html） */
+.ai-md p { margin: 0 0 6px; }
+.ai-md p:last-child { margin-bottom: 0; }
+.ai-md ul, .ai-md ol { margin: 4px 0; padding-left: 20px; }
+.ai-md li { margin: 2px 0; }
+.ai-md h1, .ai-md h2, .ai-md h3, .ai-md h4 { margin: 8px 0 4px; font-size: 14px; font-weight: 600; }
+.ai-md code {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.ai-md pre {
+  margin: 6px 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.ai-md pre code { background: none; border: none; padding: 0; font-size: 12px; line-height: 1.5; }
+.ai-md blockquote {
+  margin: 6px 0;
+  padding: 2px 10px;
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
+}
+.ai-md table { border-collapse: collapse; margin: 6px 0; font-size: 12px; display: block; overflow-x: auto; }
+.ai-md th, .ai-md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.ai-md a { color: var(--accent); }
+.ai-md mark { background: #fff3a0; padding: 0 2px; border-radius: 2px; }
+.ai-md hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }

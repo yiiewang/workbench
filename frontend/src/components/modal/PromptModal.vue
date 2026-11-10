@@ -1,7 +1,9 @@
 <script setup lang="ts">
 // 通用输入弹窗：新建文件夹/重命名共用。
 // window.openPrompt 由 lib/promptModal.ts 包装（同 ShareModal 注册模式）。
+// 外壳（遮罩/层级/关闭）统一由 ModalShell 提供。
 import { ref, nextTick, watch } from 'vue'
+import ModalShell from '../ui/ModalShell.vue'
 
 const visible = ref(false)
 const title = ref('')
@@ -32,16 +34,11 @@ function submit() {
 </script>
 
 <template>
-  <div class="modal-mask" v-if="visible" @click.self="close">
-    <div class="modal-content" style="width: 380px; max-width: 92vw;">
-      <div class="modal-header">{{ title }}</div>
-      <div class="modal-body">
-        <el-input ref="inputEl" v-model="value" @keyup.enter="submit"></el-input>
-      </div>
-      <div class="modal-actions" style="display:flex;justify-content:flex-end;gap:8px;">
-        <el-button @click="close">Cancel</el-button>
-        <el-button type="primary" @click="submit">OK</el-button>
-      </div>
-    </div>
-  </div>
+  <ModalShell v-if="visible" :title="title" width="380px" @close="close">
+    <el-input ref="inputEl" v-model="value" @keyup.enter="submit"></el-input>
+    <template #actions>
+      <el-button @click="close">Cancel</el-button>
+      <el-button type="primary" @click="submit">OK</el-button>
+    </template>
+  </ModalShell>
 </template>

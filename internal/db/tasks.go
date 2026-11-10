@@ -16,6 +16,32 @@ func md5Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// encodeTaskFiles 序列化任务关联文件列表为 JSON 数组字符串（SQLite TEXT 列）。
+// 空列表存 '[]'（与列默认值一致）。
+func encodeTaskFiles(files []string) string {
+	if len(files) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(files)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// decodeTaskFiles 反序列化关联文件列表；空/非法/空数组一律返回 nil，
+// 配合 json:"files,omitempty" 保证无关联任务的 JSON（进而 md5）与旧版完全一致。
+func decodeTaskFiles(s string) []string {
+	if s == "" || s == "[]" || s == "null" {
+		return nil
+	}
+	var files []string
+	if err := json.Unmarshal([]byte(s), &files); err != nil || len(files) == 0 {
+		return nil
+	}
+	return files
+}
+
 // UpsertTasks 批量替换用户任务，同时存储客户端发来的 version JSON
 func (d *DB) UpsertTasks(ctx context.Context, orgID, userID int64, tasks []TaskItem, versionJSON string) error {
 	tx, err := d.conn.BeginTx(ctx, nil)
@@ -28,7 +54,7 @@ func (d *DB) UpsertTasks(ctx context.Context, orgID, userID int64, tasks []TaskI
 		return err
 	}
 
-	const q = `INSERT INTO tasks (id, user_id, org_id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	const q = `INSERT INTO tasks (id, user_id, org_id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order, files) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	stmt, err := tx.PrepareContext(ctx, q)
 	if err != nil {
 		return err
@@ -40,7 +66,7 @@ func (d *DB) UpsertTasks(ctx context.Context, orgID, userID int64, tasks []TaskI
 		if t.AutoPostponed {
 			autoP = 1
 		}
-		if _, err := stmt.ExecContext(ctx, string(t.ID), userID, orgID, t.Title, t.Content, t.Status, t.Priority, t.Scheduled, t.Due, t.Progress, string(t.Assignee), t.PostponedCount, autoP, t.SortOrder); err != nil {
+		if _, err := stmt.ExecContext(ctx, string(t.ID), userID, orgID, t.Title, t.Content, t.Status, t.Priority, t.Scheduled, t.Due, t.Progress, string(t.Assignee), t.PostponedCount, autoP, t.SortOrder, encodeTaskFiles(t.Files)); err != nil {
 			return err
 		}
 	}
@@ -66,8 +92,8 @@ func (d *DB) UpdateTask(ctx context.Context, orgID, userID int64, task TaskItem)
 		autoP = 1
 	}
 	_, err = tx.ExecContext(ctx,
-		`UPDATE tasks SET title=?, content=?, status=?, priority=?, scheduled=?, due=?, progress=?, assignee=?, postponed_count=?, auto_postponed=?, sort_order=? WHERE org_id=? AND user_id=? AND id=?`,
-		task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, string(task.Assignee), task.PostponedCount, autoP, task.SortOrder, orgID, userID, string(task.ID))
+		`UPDATE tasks SET title=?, content=?, status=?, priority=?, scheduled=?, due=?, progress=?, assignee=?, postponed_count=?, auto_postponed=?, sort_order=?, files=? WHERE org_id=? AND user_id=? AND id=?`,
+		task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, string(task.Assignee), task.PostponedCount, autoP, task.SortOrder, encodeTaskFiles(task.Files), orgID, userID, string(task.ID))
 	if err != nil {
 		return "", err
 	}
@@ -97,8 +123,8 @@ func (d *DB) AddTask(ctx context.Context, orgID, userID int64, task TaskItem) (s
 		autoP = 1
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO tasks (id, user_id, org_id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		string(task.ID), userID, orgID, task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, string(task.Assignee), task.PostponedCount, autoP, task.SortOrder)
+		`INSERT INTO tasks (id, user_id, org_id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order, files) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		string(task.ID), userID, orgID, task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, string(task.Assignee), task.PostponedCount, autoP, task.SortOrder, encodeTaskFiles(task.Files))
 	if err != nil {
 		return "", err
 	}
@@ -173,7 +199,7 @@ func (d *DB) recomputeVersion(ctx context.Context, tx *sql.Tx, orgID, userID int
 
 	// 读取全部任务，算 md5
 	rows, err := tx.QueryContext(ctx,
-		`SELECT id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order FROM tasks WHERE org_id = ? AND user_id = ? ORDER BY sort_order`,
+		`SELECT id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order, files FROM tasks WHERE org_id = ? AND user_id = ? ORDER BY sort_order`,
 		orgID, userID)
 	if err != nil {
 		return "", err
@@ -182,11 +208,13 @@ func (d *DB) recomputeVersion(ctx context.Context, tx *sql.Tx, orgID, userID int
 	for rows.Next() {
 		var t TaskItem
 		var autoP int
-		if err := rows.Scan(&t.ID, &t.Title, &t.Content, &t.Status, &t.Priority, &t.Scheduled, &t.Due, &t.Progress, &t.Assignee, &t.PostponedCount, &autoP, &t.SortOrder); err != nil {
+		var filesJSON string
+		if err := rows.Scan(&t.ID, &t.Title, &t.Content, &t.Status, &t.Priority, &t.Scheduled, &t.Due, &t.Progress, &t.Assignee, &t.PostponedCount, &autoP, &t.SortOrder, &filesJSON); err != nil {
 			rows.Close()
 			return "", err
 		}
 		t.AutoPostponed = autoP == 1
+		t.Files = decodeTaskFiles(filesJSON)
 		tasks = append(tasks, t)
 	}
 	rows.Close()
@@ -217,7 +245,7 @@ func (d *DB) recomputeVersion(ctx context.Context, tx *sql.Tx, orgID, userID int
 // GetTasks 获取用户任务
 func (d *DB) GetTasks(ctx context.Context, orgID, userID int64) ([]TaskItem, error) {
 	rows, err := d.conn.QueryContext(ctx,
-		`SELECT id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order FROM tasks WHERE org_id = ? AND user_id = ? ORDER BY sort_order`,
+		`SELECT id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order, files FROM tasks WHERE org_id = ? AND user_id = ? ORDER BY sort_order`,
 		orgID, userID)
 	if err != nil {
 		return nil, err
@@ -228,10 +256,12 @@ func (d *DB) GetTasks(ctx context.Context, orgID, userID int64) ([]TaskItem, err
 	for rows.Next() {
 		var t TaskItem
 		var autoP int
-		if err := rows.Scan(&t.ID, &t.Title, &t.Content, &t.Status, &t.Priority, &t.Scheduled, &t.Due, &t.Progress, &t.Assignee, &t.PostponedCount, &autoP, &t.SortOrder); err != nil {
+		var filesJSON string
+		if err := rows.Scan(&t.ID, &t.Title, &t.Content, &t.Status, &t.Priority, &t.Scheduled, &t.Due, &t.Progress, &t.Assignee, &t.PostponedCount, &autoP, &t.SortOrder, &filesJSON); err != nil {
 			return nil, err
 		}
 		t.AutoPostponed = autoP == 1
+		t.Files = decodeTaskFiles(filesJSON)
 		tasks = append(tasks, t)
 	}
 	return tasks, nil
@@ -248,7 +278,7 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 
 	rows, err := d.conn.QueryContext(ctx, `
 		SELECT ?, u.id, u.updated_at, u.version_json,
-		       t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due, t.progress, t.assignee, t.postponed_count, t.auto_postponed, t.sort_order
+		       t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due, t.progress, t.assignee, t.postponed_count, t.auto_postponed, t.sort_order, t.files
 		FROM users u
 		LEFT JOIN tasks t ON t.org_id = ? AND t.user_id = u.id
 		WHERE u.id = ?
@@ -268,9 +298,9 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 	for rows.Next() {
 		var oID, uID int64
 		var updatedAt, versionJSON string
-		var taskID, taskTitle, taskContent, taskStatus, taskPriority, taskScheduled, taskDue, taskAssignee sql.NullString
+		var taskID, taskTitle, taskContent, taskStatus, taskPriority, taskScheduled, taskDue, taskAssignee, taskFiles sql.NullString
 		var taskProgress, taskPostponed, taskAutoPostponed, sortOrder sql.NullInt64
-		if err := rows.Scan(&oID, &uID, &updatedAt, &versionJSON, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder); err != nil {
+		if err := rows.Scan(&oID, &uID, &updatedAt, &versionJSON, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder, &taskFiles); err != nil {
 			return nil, err
 		}
 		orgKey := strconv.FormatInt(oID, 10)
@@ -295,6 +325,7 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 				PostponedCount: int(taskPostponed.Int64),
 				AutoPostponed:  taskAutoPostponed.Int64 == 1,
 				SortOrder:      int(sortOrder.Int64),
+				Files:          decodeTaskFiles(taskFiles.String),
 			})
 		}
 	}

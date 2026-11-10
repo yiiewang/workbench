@@ -1,8 +1,10 @@
 <script>
 import { ref, watch, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { setupTodoApp } from '../composables/useTodoApp'
 import TaskItem from '../components/todo/TaskItem.vue'
 import MarkdownEditor from '../components/todo/MarkdownEditor.vue'
+import FilePickerModal from '../components/modal/FilePickerModal.vue'
 
 // 进度档位：0/25/50/75/100 五档，对应业务状态
 const progressOptions = [
@@ -18,10 +20,12 @@ function progressLabel(p) {
 }
 
 export default {
-  components: { TaskItem, MarkdownEditor },
+  components: { TaskItem, MarkdownEditor, FilePickerModal },
   setup() {
     const todoApp = setupTodoApp()
     const modalRef = ref(null)
+    const route = useRoute()
+    const router = useRouter()
 
     // Modal 打开时自动聚焦，使 ESC 快捷键无需点击即可生效
     watch(() => todoApp.showModal.value, (show) => {
@@ -29,6 +33,32 @@ export default {
         nextTick(() => {
           modalRef.value?.focus()
         })
+      }
+    })
+
+    // 任务定位：从文件浏览"关联任务"/AI 提炼记录跳转过来（/todo?task=xxx），
+    // 等任务列表加载出目标后自动打开编辑弹窗，并清掉 query（防刷新重复弹）。
+    // 注意：不能在成功后停掉 watcher——TodoView 被 KeepAlive 缓存，setup 不会重新执行，
+    // 停掉后二次跳转（同一任务或另一任务）将无法再定位。
+    let locatedBack = false // 本次弹窗是外部定位打开的：关闭后回跳来源页
+    watch(
+      () => [route.query.task, todoApp.tasks.value],
+      ([qid, list]) => {
+        if (!qid || !Array.isArray(list) || !list.length) return
+        const target = list.find(t => String(t.id) === String(qid))
+        if (!target) return
+        todoApp.editTask(target)
+        locatedBack = true
+        router.replace({ query: { ...route.query, task: undefined } })
+      },
+      { immediate: true },
+    )
+
+    // 定位打开的编辑弹窗关闭后，自动回到来源页（文档浏览等）
+    watch(() => todoApp.showModal.value, (show, prev) => {
+      if (!show && prev && locatedBack) {
+        locatedBack = false
+        if (window.history.length > 1) router.back()
       }
     })
 
@@ -274,6 +304,27 @@ export default {
                                     <option v-for="m in orgMembers" :key="m.id" :value="String(m.id)">{{ m.name }}</option>
                                 </select>
                             </div>
+                            <!-- 关联文件（todo ↔ file 联动）：文件树选择 + chips -->
+                            <div class="form-field">
+                                <div class="task-files-label-row">
+                                    <label>关联文件</label>
+                                    <button type="button" class="task-files-link-btn" @click="openFilePicker">＋ 选择文件</button>
+                                </div>
+                                <div class="task-files-chips" v-if="(editingTask.files || []).length">
+                                    <span v-for="(f, i) in editingTask.files" :key="f" class="task-file-chip">
+                                        <svg class="chip-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+                                            <path d="M3 1h6l5 5v9H3V1z"/><path d="M9 1v5h5"/>
+                                        </svg>
+                                        <span class="chip-name" :title="'点击打开：' + f"
+                                            @click="openLinkedFile(f)">{{ f.split('/').pop() || f }}</span>
+                                        <button type="button" class="chip-remove" title="移除关联"
+                                            @click.stop="removeEditingFile(i)">&times;</button>
+                                    </span>
+                                </div>
+                                <button type="button" v-else class="task-files-empty" @click="openFilePicker">
+                                    点击选择要关联的文件
+                                </button>
+                            </div>
                             <!-- Postponed Info -->
                             <div class="postponed-info" v-if="!isCreating && editingTask.postponedCount > 0 && isOverdue(editingTask)"
                                 style="margin-top:12px;padding:10px;border-radius:6px;font-size:12px;">
@@ -498,6 +549,15 @@ export default {
                 </div>
             </div>
         </div>
+
+        <!-- 文件树选择器（任务关联文件） -->
+        <FilePickerModal
+            v-if="showFilePicker"
+            title="关联文件"
+            :initial-selected="editingTask.files || []"
+            @confirm="confirmPickFiles"
+            @close="showFilePicker = false"
+        />
     </div>
 </template>
 

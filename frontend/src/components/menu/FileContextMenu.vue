@@ -219,7 +219,7 @@ onUnmounted(() => {
 <style scoped>
 .ctx-menu {
   position: fixed;
-  z-index: 3000;
+  z-index: var(--z-context-menu, 3000);
   min-width: 170px;
   padding: 4px 0;
   background: var(--bg, #fff);

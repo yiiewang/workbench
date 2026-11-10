@@ -17,6 +17,7 @@ type Config struct {
 	Auth    AuthConfig        `yaml:"auth"`
 	Routes  map[string]string `yaml:"routes"`
 	Logging LogConfig         `yaml:"logging"`
+	AI      AIConfig          `yaml:"ai"`
 }
 
 // ServerConfig HTTP 服务配置
@@ -35,12 +36,28 @@ type DBConfig struct {
 // AuthConfig 鉴权配置
 type AuthConfig struct {
 	TokenExpiryDays int `yaml:"token_expiry_days"`
+	// AdminSetupToken 首次初始化引导码：系统无任何用户时，首个 set-password 请求
+	// 必须携带匹配的 setupToken 才能成为超管，消除"部署到注册之间"的抢占窗口。
+	// 留空 = 保持旧行为（先到先得，启动日志会告警）。建议经 ADMIN_SETUP_TOKEN 环境变量注入。
+	AdminSetupToken string `yaml:"admin_setup_token"`
 }
 
 // LogConfig 日志配置
 type LogConfig struct {
 	Dir   string `yaml:"dir"`
 	Level string `yaml:"level"` // debug | info | warn | error，默认 info
+}
+
+// AIConfig AI 对话配置（OpenAI 兼容协议：OpenAI / DeepSeek / Ollama 网关等均可）
+type AIConfig struct {
+	BaseURL string `yaml:"base_url"` // 兼容端点，如 https://api.openai.com/v1
+	APIKey  string `yaml:"api_key"`  // 后端持有，不下发前端
+	Model   string `yaml:"model"`    // 模型名，如 gpt-4o-mini
+}
+
+// Enabled AI 功能是否可用（key + base_url 均已配置才视为开启）
+func (a AIConfig) Enabled() bool {
+	return a.APIKey != "" && a.BaseURL != ""
 }
 
 // DefaultConfig 返回默认配置
@@ -65,6 +82,10 @@ func DefaultConfig() *Config {
 		Logging: LogConfig{
 			Dir:   "~/.local/state/workbench",
 			Level: "info",
+		},
+		AI: AIConfig{
+			BaseURL: "https://api.openai.com/v1",
+			Model:   "gpt-4o-mini",
 		},
 	}
 }
@@ -108,11 +129,23 @@ func mergeConfig(dst, src *Config) {
 	if src.Auth.TokenExpiryDays != 0 {
 		dst.Auth.TokenExpiryDays = src.Auth.TokenExpiryDays
 	}
+	if src.Auth.AdminSetupToken != "" {
+		dst.Auth.AdminSetupToken = src.Auth.AdminSetupToken
+	}
 	if src.Logging.Dir != "" {
 		dst.Logging.Dir = src.Logging.Dir
 	}
 	if src.Logging.Level != "" {
 		dst.Logging.Level = src.Logging.Level
+	}
+	if src.AI.BaseURL != "" {
+		dst.AI.BaseURL = src.AI.BaseURL
+	}
+	if src.AI.APIKey != "" {
+		dst.AI.APIKey = src.AI.APIKey
+	}
+	if src.AI.Model != "" {
+		dst.AI.Model = src.AI.Model
 	}
 	if src.Routes != nil {
 		dst.Routes = src.Routes
@@ -128,7 +161,7 @@ func ResolvePath(p string) string {
 	return p
 }
 
-// ApplyEnv 用环境变量覆盖配置（PORT, STATIC_DIR, DB_PATH, LOG_DIR, ALLOW_SYMLINK）
+// ApplyEnv 用环境变量覆盖配置（PORT, STATIC_DIR, DB_PATH, LOG_DIR, ALLOW_SYMLINK, ADMIN_SETUP_TOKEN, AI_*）
 func ApplyEnv(cfg *Config) {
 	if v := os.Getenv("PORT"); v != "" {
 		var port int
@@ -148,5 +181,19 @@ func ApplyEnv(cfg *Config) {
 	// ALLOW_SYMLINK=true 开启符号链接支持（默认关闭，严格校验资源路径必须在 static_dir 下）
 	if v := os.Getenv("ALLOW_SYMLINK"); v == "true" || v == "1" {
 		cfg.Server.AllowSymlink = true
+	}
+	// ADMIN_SETUP_TOKEN 首次初始化引导码（一次性使用：系统有用户后不再校验）。
+	// 不落配置文件，部署时注入：openssl rand -hex 16
+	if v := os.Getenv("ADMIN_SETUP_TOKEN"); v != "" {
+		cfg.Auth.AdminSetupToken = v
+	}
+	if v := os.Getenv("AI_BASE_URL"); v != "" {
+		cfg.AI.BaseURL = v
+	}
+	if v := os.Getenv("AI_API_KEY"); v != "" {
+		cfg.AI.APIKey = v
+	}
+	if v := os.Getenv("AI_MODEL"); v != "" {
+		cfg.AI.Model = v
 	}
 }

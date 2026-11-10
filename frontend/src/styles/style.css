@@ -22,12 +22,17 @@
   padding: 8px 12px !important;
 }
 
-/* share modal 使用与 todo 一致的 z-index: 1000，让 Element Plus 默认弹层(2000) 自然浮于其上 */
-.modal-mask.share-modal {
-  z-index: 1000;
-}
-
 :root {
+  /* ===== z-index 层级表（全局唯一定义，禁止散落魔法数） =====
+     基准：Element Plus 弹层从 2000 起动态递增，业务弹窗必须低于 2000
+     才能让弹窗内的 EP 下拉/日期选择浮在遮罩之上 */
+  --z-sidebar-mask: 899;  /* 移动端抽屉侧栏遮罩 */
+  --z-sidebar: 900;       /* 移动端抽屉侧栏 */
+  --z-fab-dock: 898;      /* 悬浮按钮区（须低于抽屉遮罩，抽屉展开时被盖住） */
+  --z-modal: 1000;        /* 业务弹窗（全局 .modal-mask 及 ModalShell） */
+  --z-modal-top: 1001;    /* 叠加弹窗（如分享密码框，盖在普通弹窗上） */
+  --z-context-menu: 3000; /* 右键菜单 */
+  --z-toast: 9999;        /* Toast 提示 */
   --bg: #ffffff;
   --sidebar-bg: #f3f3f3;
   --activity-bg: #2c2c2c;
@@ -310,7 +315,8 @@ body {
 }
 
 .tab-share,
-.tab-download {
+.tab-download,
+.tab-ai-summary {
   padding: 0 14px;
   height: 35px;
   display: flex;
@@ -324,8 +330,11 @@ body {
   white-space: nowrap;
 }
 
+.tab-ai-summary { color: var(--accent); }
+
 .tab-share:hover,
-.tab-download:hover {
+.tab-download:hover,
+.tab-ai-summary:hover {
   color: var(--accent);
   background: var(--hover);
 }
@@ -344,7 +353,7 @@ body {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   opacity: 0;
   transition: opacity 0.2s, transform 0.2s;
-  z-index: 9999;
+  z-index: var(--z-toast);
   pointer-events: none;
 }
 
@@ -799,18 +808,35 @@ body {
   color: var(--text-dim);
 }
 
-.file-detail .btn-download {
-  display: inline-block;
-  padding: 8px 20px;
+/* 下载按钮：全局类（二进制卡片、媒体顶栏共用）。
+   原来是 .file-detail .btn-download，出了 .file-detail 就退化成裸超链接 */
+.btn-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
   background: var(--accent);
   color: #fff;
   text-decoration: none;
   border-radius: 3px;
   font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
-.file-detail .btn-download:hover {
+.btn-download svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.btn-download:hover {
   background: #005a9e;
+}
+
+.btn-download:active {
+  background: #004c86;
 }
 
 /* Resizer */
@@ -855,7 +881,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 9000;
+  /* 统一层级：低于 EP 弹层(2000+)，弹窗内的下拉/日期选择才不会被遮罩盖住 */
+  z-index: var(--z-modal);
 }
 
 .modal-content {
@@ -1000,31 +1027,83 @@ body {
 
 
 /* ============================================================
-   移动端适配（≤768px）：sidebar 抽屉化 + 隐藏 resizer
-   - sidebar 变 fixed 覆盖层：从 activity-bar(48px) 右缘滑出、全高、带阴影
+   移动端适配（≤900px）：定位"友好展示/浏览"，生产力仍在 PC
+   - activity-bar 转底部导航（图标+文字，热区≥48px；AI 入口仅移动端显示）
+   - sidebar 变抽屉：贴左缘滑出（activity-bar 已移底部，不再占左侧 48px）
    - resizer 隐藏（触屏拖拽体验差，宽度固定 280px）
-   - sidebar-toggle 贴 activity-bar 右缘（left 由 inline style 控制，
-     折叠态计算值 42px 恰好贴边，展开抽屉时隐藏按钮避免遮挡树）
+   - tab-actions 图标化、tab-close 热区放大
    - 断点值与 useSidebarResize.ts MOBILE_QUERY、DefaultLayout isMobileLayout 保持一致
    ============================================================ */
+
+/* 桌面隐藏导航文字标签与"仅移动端"元素（移动端断点内恢复显示） */
+.activity-label,
+.mobile-only {
+  display: none;
+}
+
 .sidebar-mask {
   display: none;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 900px) {
+  /* ---- 底部导航（原 activity-bar 竖条转横排） ---- */
+  .activity-bar {
+    position: fixed;
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: calc(56px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    flex-direction: row;
+    align-items: stretch;
+    border-top: 1px solid var(--border);
+    z-index: var(--z-sidebar); /* 与抽屉同层系，高于内容 */
+  }
+  .activity-item {
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 2px;
+    height: auto;
+    padding: 6px 2px;
+    justify-content: center;
+  }
+  .activity-item svg { width: 22px; height: 22px; }
+  /* 底部导航的活动指示改为上边线 */
+  .activity-item.active {
+    border-left: none;
+    border-top: 2px solid var(--accent);
+  }
+  .activity-label {
+    display: block;
+    font-size: 10px;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+  .mobile-only { display: flex; }
+  .activity-divider { display: none; }
+  .activity-user { margin-top: 0; }
+  .activity-user .user-badge { width: 22px; height: 22px; font-size: 11px; }
+
+  /* ---- 侧栏抽屉：贴左缘（activity-bar 已在底部） ---- */
   .sidebar {
     position: fixed;
     top: 0;
     bottom: 0;
-    left: 48px;
+    left: 0;
     width: 280px !important; /* 抽屉宽度固定，忽略 JS 拖拽保存的宽度 */
-    max-width: calc(100vw - 48px);
-    z-index: 900;
+    max-width: calc(100vw - 32px);
+    z-index: var(--z-sidebar);
     box-shadow: 4px 0 24px rgba(0, 0, 0, 0.25);
     /* collapsed 态完全滑出屏幕。显隐只由 .collapsed 类驱动（transform），
        不依赖内联 width —— 修复 width !important 覆盖折叠态 inline width:0
        导致抽屉无法收起的问题 */
-    transform: translateX(calc(-100% - 48px));
+    transform: translateX(calc(-100% - 12px));
     transition: transform 0.2s ease;
   }
 
@@ -1033,12 +1112,11 @@ body {
     transform: translateX(0);
   }
 
-  /* 分享模式无 activity-bar，抽屉贴左缘 */
   .sidebar-mask {
     display: block;
     position: fixed;
     inset: 0;
-    z-index: 899;
+    z-index: var(--z-sidebar-mask);
     background: rgba(0, 0, 0, 0.35);
   }
 
@@ -1047,18 +1125,39 @@ body {
     display: none;
   }
 
-  /* 抽屉展开时隐藏悬浮 toggle（点遮罩收起），折叠态保留（贴 activity-bar 右缘） */
-  .sidebar-toggle:not(.collapsed) {
-    display: none;
+  /* 移动端完全隐藏悬浮 toggle：开抽屉走底部导航，关抽屉走 × / 遮罩
+     （触屏上 12px 悬浮按钮无意义，且位置悬在内容区中间很突兀） */
+  .sidebar-toggle {
+    display: none !important;
   }
 
-  /* tab 文件名收紧，多 tab 时靠滚动而非压缩 */
+  /* ---- tab 栏：操作区图标化，关闭热区放大 ---- */
   .tab-name {
     max-width: 110px;
+  }
+  .tab-share,
+  .tab-download,
+  .tab-ai-summary {
+    padding: 0 12px;
+    gap: 0;
+  }
+  .tab-share > span,
+  .tab-download > span,
+  .tab-ai-summary > span {
+    display: none; /* 只留图标 */
+  }
+  .tab-close {
+    width: 22px;
+    height: 22px;
+    line-height: 22px;
+    margin: 0 2px;
   }
 
   .main {
     width: 100%;
+    /* 底部导航高度预留，内容不被遮挡 */
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
   }
 
   /* 窄屏收紧 markdown 内边距，宽表格仍可左右滚动 */

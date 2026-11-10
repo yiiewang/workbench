@@ -1,6 +1,6 @@
 # Workbench configuration
 server:
-  port: 80
+  port: 8001
   static_dir: ./preview  # 用户文件目录（UI 资源 index.html/css/js/todo.html 走 embed，不在此服务）
   # 严格校验资源路径：符号链接指向 static_dir 外的文件时返回 404
   # 默认关闭符号链接支持，需通过环境变量 ALLOW_SYMLINK=true 开启
@@ -16,7 +16,7 @@ database:
   path: ./data/workbench.db
 
 auth:
-  token_expiry_days: 30
+  token_expiry_days: 7  # 短有效期：泄漏窗口小；改短后旧 token 仍按签发时的有效期到期
 
 # Route mapping: request path -> target
 #   "/xxx"         -> 302 redirect to target path
@@ -24,6 +24,13 @@ auth:
 #   "Display Name" -> display name alias in directory listing
 routes:
   "/todo": "__spa__"
+  # 移动端 SPA 入口（与 frontend/src/router 中 /m 子路由一一对应；新增移动页面需同步加键）
+  "/m": "__spa__"
+  "/m/files": "__spa__"
+  "/m/file": "__spa__"
+  "/m/ai": "__spa__"
+  "/m/todo": "__spa__"
+  "/m/profile": "__spa__"
   "/shares": "__spa__"
   "/login": "__spa__"
   "/file": "__spa__"
@@ -34,3 +41,11 @@ routes:
 logging:
   dir: logs
   level: info  # debug | info | warn | error
+
+# AI 对话（OpenAI 兼容协议，key 只留在后端，前端经 /api/ai/chat 代理访问）
+# api_key + base_url 均配置后 AI 入口才会启用；也可用环境变量 AI_BASE_URL / AI_API_KEY / AI_MODEL
+# 敏感凭据不进仓库：启动前 export AI_API_KEY=...（见 README），此处一律留空
+ai:
+  base_url: https://tokenlink.woa.com/openapi/v1/chat/completions  # DeepSeek: https://api.deepseek.com/v1；Ollama: http://localhost:11434/v1
+  api_key: ""  # 留空 = 关闭 AI 功能；凭据一律走环境变量 AI_API_KEY
+  model: hy4

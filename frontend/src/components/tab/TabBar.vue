@@ -17,6 +17,20 @@ const tabs = computed<[string, { name: string; ext: string; size: number }][]>((
   Array.from(storeOpenTabs.entries())
 )
 
+// 当前激活 tab 是否为 markdown 文件（决定 AI 摘要按钮显隐）
+const isMarkdownActive = computed(() =>
+  ['md', 'markdown'].includes(storeGetTab(storeActiveTabPath.value)?.ext || ''),
+)
+
+// AI 摘要：打开 AI 面板并自动引用当前文档提问（AiChat 监听 workbench:ai-ask）
+function onAiSummarize() {
+  const path = storeActiveTabPath.value
+  if (!path) return
+  window.dispatchEvent(new CustomEvent('workbench:ai-ask', {
+    detail: { files: [path], question: '请总结这份文档的核心内容，按要点列出' },
+  }))
+}
+
 // 点击 tab → 激活
 function onTabClick(path: string) {
   storeSetActiveTab(path)
@@ -83,6 +97,18 @@ async function onDownloadActive() {
 
     <!-- 右上角操作组：flex 右对齐，成员隐藏时剩余按钮自动贴右 -->
     <div class="tab-actions">
+      <!-- AI 摘要：仅 markdown 文件显示（分享模式隐藏） -->
+      <div
+        v-show="isMarkdownActive && dsMode !== 'share'"
+        class="tab-ai-summary"
+        title="AI 总结当前文档"
+        @click="onAiSummarize"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
+        </svg>
+        <span>AI 摘要</span>
+      </div>
       <div
         v-show="storeActiveTabPath && dsMode !== 'share'"
         class="tab-share"

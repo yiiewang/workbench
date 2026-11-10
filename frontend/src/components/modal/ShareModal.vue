@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { authToken, activeTabPath } from '../../stores/indexStore'
 import { showToast, copyToClipboard } from '../../lib/common'
 import * as shareApi from '../../api/share'
+import ModalShell from '../ui/ModalShell.vue'
 
 const visible = ref(false)
 const resourcePath = ref('')
@@ -87,52 +88,41 @@ const router = useRouter()
 </script>
 
 <template>
-  <div class="modal-mask share-modal" v-if="visible" @click.self="close">
-    <div class="modal-content share-modal-content">
-      <div class="modal-header">创建分享</div>
-      <div class="modal-body share-modal-body">
-        <el-form label-position="top" @submit.prevent>
-          <el-form-item label="Resource path">
-            <el-input :model-value="resourcePath" readonly></el-input>
-            <div style="font-size:11px;color:#999;margin-top:3px;">
-              Type: {{ resourceType === 'dir' ? 'Folder' : 'File' }}
-            </div>
-          </el-form-item>
-          <div style="display:flex;gap:12px;">
-            <el-form-item label="Max access (0=unlimited)" style="flex:1;">
-              <el-input-number v-model="maxAccessCount" :min="0" :step="1" controls-position="right" style="width:100%;"></el-input-number>
-            </el-form-item>
-            <el-form-item label="Password (optional)" style="flex:1;">
-              <el-input v-model="password" placeholder="Leave empty for no password" clearable></el-input>
-            </el-form-item>
-          </div>
-          <el-form-item label="Remark (optional)">
-            <el-input v-model="remark" placeholder="Included when copying link" clearable maxlength="200" show-word-limit></el-input>
-          </el-form-item>
-          <el-form-item label="Time range (optional)">
-            <el-date-picker
-              v-model="dateRange"
-              type="datetimerange"
-              range-separator="to"
-              start-placeholder="Effective"
-              end-placeholder="Expires"
-              format="YYYY-MM-DD HH:mm"
-              value-format="X"
-              style="width:100%;">
-            </el-date-picker>
-          </el-form-item>
-          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
-            <el-button @click="close">Cancel</el-button>
-            <el-button type="primary" :loading="submitting" @click="submit">Create</el-button>
-          </div>
-        </el-form>
+  <ModalShell v-if="visible" title="创建分享" width="480px" @close="close">
+    <el-form label-position="top" @submit.prevent>
+      <el-form-item label="Resource path">
+        <el-input :model-value="resourcePath" readonly></el-input>
+        <div style="font-size:11px;color:#999;margin-top:3px;">
+          Type: {{ resourceType === 'dir' ? 'Folder' : 'File' }}
+        </div>
+      </el-form-item>
+      <div style="display:flex;gap:12px;">
+        <el-form-item label="Max access (0=unlimited)" style="flex:1;">
+          <el-input-number v-model="maxAccessCount" :min="0" :step="1" controls-position="right" style="width:100%;"></el-input-number>
+        </el-form-item>
+        <el-form-item label="Password (optional)" style="flex:1;">
+          <el-input v-model="password" placeholder="Leave empty for no password" clearable></el-input>
+        </el-form-item>
       </div>
-    </div>
-  </div>
+      <el-form-item label="Remark (optional)">
+        <el-input v-model="remark" placeholder="Included when copying link" clearable maxlength="200" show-word-limit></el-input>
+      </el-form-item>
+      <el-form-item label="Time range (optional)">
+        <el-date-picker
+          v-model="dateRange"
+          type="datetimerange"
+          range-separator="to"
+          start-placeholder="Effective"
+          end-placeholder="Expires"
+          format="YYYY-MM-DD HH:mm"
+          value-format="X"
+          style="width:100%;">
+        </el-date-picker>
+      </el-form-item>
+    </el-form>
+    <template #actions>
+      <el-button @click="close">Cancel</el-button>
+      <el-button type="primary" :loading="submitting" @click="submit">Create</el-button>
+    </template>
+  </ModalShell>
 </template>
-
-<style scoped>
-.modal-mask { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.modal-content { background: var(--bg); border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,.15); width: 480px; max-width: 90vw; max-height: 80vh; overflow-y: auto; padding: 20px; }
-.modal-header { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
-</style>

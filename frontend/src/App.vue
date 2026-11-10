@@ -14,6 +14,4 @@ import SharePasswordModal from './components/modal/SharePasswordModal.vue'
 
 <style>
 .form-required { color: #e53935; }
-.share-modal-content { max-width: 480px; }
-.share-modal-body { display: block; padding: 20px 24px; }
 </style>

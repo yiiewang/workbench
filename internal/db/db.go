@@ -71,6 +71,9 @@ type TaskItem struct {
 	PostponedCount int        `json:"postponedCount"`
 	AutoPostponed  bool       `json:"autoPostponed"`
 	SortOrder      int        `json:"sort_order,omitempty"`
+	// Files 关联的文件路径（相对用户根目录），todo ↔ file 联动用。
+	// omitempty + 读出归一为 nil：保证无关联任务的 md5 与旧版一致（recomputeVersion 兼容）
+	Files []string `json:"files,omitempty"`
 	// 向后兼容旧版字段
 	Text string `json:"text"`
 	Done bool   `json:"done"`

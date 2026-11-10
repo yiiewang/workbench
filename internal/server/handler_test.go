@@ -17,6 +17,12 @@ import (
 // setupTestServer 构建一个带临时 DB + 临时静态目录的 Server，返回 httptest.Expect。
 func setupTestServer(t *testing.T) (*httptest.Expect, *db.DB, []byte, string) {
 	t.Helper()
+	return setupTestServerWith(t, nil)
+}
+
+// setupTestServerWith 同 setupTestServer，但允许在构建前修改配置（如注入 admin_setup_token）。
+func setupTestServerWith(t *testing.T, mutate func(*config.Config)) (*httptest.Expect, *db.DB, []byte, string) {
+	t.Helper()
 	// DB 用独立手动临时目录，避免异步访问日志 goroutine 占用 WAL 文件
 	// 导致 t.TempDir 自动清理失败。
 	dbDir, err := os.MkdirTemp("", "wbdb")
@@ -37,6 +43,9 @@ func setupTestServer(t *testing.T) (*httptest.Expect, *db.DB, []byte, string) {
 	staticDir := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Server.StaticDir = staticDir
+	if mutate != nil {
+		mutate(cfg)
+	}
 	secret := []byte("test-secret-key")
 
 	srv, err := New(d, cfg, secret, filepath.Join(t.TempDir(), "access.log"))
@@ -200,6 +209,35 @@ func TestHandler_SetPassword_ActivateEmptyPassword(t *testing.T) {
 	obj.Value("code").Equal(0)
 	// 激活不改变角色（仍为普通 user）
 	obj.Value("data").Object().Value("user").Object().Value("role").Equal("user")
+}
+
+func TestHandler_SetPassword_SetupToken(t *testing.T) {
+	// 配置引导码后：无 token / 错 token 均被拒，携带正确 token 才能完成首次初始化
+	e, _, _, _ := setupTestServerWith(t, func(cfg *config.Config) {
+		cfg.Auth.AdminSetupToken = "bootstrap-secret-1"
+	})
+
+	// 缺失 setupToken → 403
+	e.POST("/api/set-password").WithJSON(map[string]string{
+		"orgId": "org1", "userId": "attacker", "newPassword": "evil123",
+	}).Expect().Status(http.StatusForbidden)
+
+	// 错误 setupToken → 403
+	e.POST("/api/set-password").WithJSON(map[string]string{
+		"orgId": "org1", "userId": "attacker", "newPassword": "evil123", "setupToken": "wrong",
+	}).Expect().Status(http.StatusForbidden)
+
+	// 正确 setupToken → 200，且首个用户成为 admin
+	obj := e.POST("/api/set-password").WithJSON(map[string]string{
+		"orgId": "org1", "userId": "founder", "newPassword": "good123", "setupToken": "bootstrap-secret-1",
+	}).Expect().Status(http.StatusOK).JSON().Object()
+	obj.Value("code").Equal(0)
+	obj.Value("data").Object().Value("user").Object().Value("role").Equal("admin")
+
+	// 初始化完成后：即使再带正确 token，也不能注册新用户（表非空路径不再校验 token）
+	e.POST("/api/set-password").WithJSON(map[string]string{
+		"orgId": "org1", "userId": "stranger", "newPassword": "evil123", "setupToken": "bootstrap-secret-1",
+	}).Expect().Status(http.StatusForbidden)
 }
 
 // ============================================================

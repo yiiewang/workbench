@@ -12,6 +12,8 @@ import { useSidebarResize } from '../composables/useSidebarResize'
 import { useSidebarHeader } from '../composables/useSidebarHeader'
 import FileContextMenu from '../components/menu/FileContextMenu.vue'
 import PromptModal from '../components/modal/PromptModal.vue'
+import AiChat from '../components/ai/AiChat.vue'
+import ModalShell from '../components/ui/ModalShell.vue'
 
 const {
   sidebarWidth, collapsed, resizerActive,
@@ -56,12 +58,18 @@ const sidebarHidden = computed(() =>
 const ACTIVITY_BAR_W = 48
 const TOGGLE_BTN_HALF = 6
 const toggleBtnLeft = computed(() => {
-  const activityBarW = dsMode.value === 'share' ? 0 : ACTIVITY_BAR_W
+  // 移动端 activity-bar 转底部导航（不占左侧），偏移 0；分享模式同
+  const activityBarW = (dsMode.value === 'share' || isMobileLayout.value) ? 0 : ACTIVITY_BAR_W
   const sidebarW = collapsed.value ? 0 : sidebarWidth.value
   return Math.max(0, activityBarW + sidebarW - TOGGLE_BTN_HALF)
 })
 
-// 移动端抽屉侧栏（≤768px，见 style.css media query）：打开时显示遮罩，点遮罩收起。
+// AI 入口（移动端底部导航）：打开 AI 对话面板（AiChat 监听 workbench:ai-open）
+function handleAiClick() {
+  window.dispatchEvent(new CustomEvent('workbench:ai-open'))
+}
+
+// 移动端抽屉侧栏（≤900px，见 style.css media query）：打开时显示遮罩，点遮罩收起。
 // 桌面端不受影响（isMobileLayout false 时遮罩不渲染）。
 const isMobileLayout = ref(false)
 let mobileMq: MediaQueryList | null = null
@@ -70,7 +78,7 @@ function onMobileMqChange() {
 }
 onMounted(() => {
   if (typeof window.matchMedia === 'function') {
-    mobileMq = window.matchMedia('(max-width: 768px)')
+    mobileMq = window.matchMedia('(max-width: 900px)')
     onMobileMqChange()
     mobileMq.addEventListener('change', onMobileMqChange)
   }
@@ -84,11 +92,17 @@ watch(activeTabPath, (p) => {
   if (isMobileLayout.value && p && !collapsed.value) toggleSidebar()
 })
 
+// 移动端点底部导航项时展开对应侧栏抽屉（折叠按钮已隐藏，这是抽屉的展开入口）。
+// 只在抽屉收起时展开（已在浏览内容时不打扰），首页等无侧栏页面跳过。
+function ensureMobileDrawer() {
+  if (isMobileLayout.value && !sidebarHidden.value && collapsed.value) toggleSidebar()
+}
+
 function handleHomeClick() { router.push('/') }
-function handleExplorerClick() { router.push('/file') }
-function handleShareClick() { router.push('/shares') }
-function handleTodoClick() { router.push('/todo') }
-function handleAdminClick() { router.push('/admin') }
+function handleExplorerClick() { router.push('/file'); ensureMobileDrawer() }
+function handleShareClick() { router.push('/shares'); ensureMobileDrawer() }
+function handleTodoClick() { router.push('/todo'); ensureMobileDrawer() }
+function handleAdminClick() { router.push('/admin'); ensureMobileDrawer() }
 
 // 用户信息弹窗显隐
 const showUserMenu = ref(false)
@@ -122,23 +136,40 @@ async function onSwitchOrg(orgId: number) {
 </script>
 
 <template>
-<!-- Activity Bar -->
+<!-- Activity Bar（桌面竖条 / 移动端底部导航） -->
 <div v-show="dsMode !== 'share'" class="activity-bar">
   <div class="activity-item" :class="{ active: isHomeActive }" title="功能首页" @click="handleHomeClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+    <span class="activity-label">首页</span>
   </div>
   <div v-if="hasFeature('file')" class="activity-item" :class="{ active: isExplorerActive }" title="文件浏览器" @click="handleExplorerClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+    <span class="activity-label">文件</span>
   </div>
   <div v-if="hasFeature('share')" class="activity-item" :class="{ active: isSharesActive }" title="分享管理" @click="handleShareClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>
+    <span class="activity-label">分享</span>
     <span class="badge" id="shareBadge" style="display:none"></span>
   </div>
   <div v-if="hasFeature('todo')" class="activity-item" :class="{ active: isTodoActive }" title="Todo 看板" @click="handleTodoClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+    <span class="activity-label">Todo</span>
   </div>
   <div v-if="canManageUsers" class="activity-item" :class="{ active: isAdminActive }" title="用户管理" @click="handleAdminClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+    <span class="activity-label">管理</span>
+  </div>
+  <!-- AI 入口：仅移动端显示（桌面端用右下角悬浮按钮），点击打开 AI 对话面板 -->
+  <div
+    v-if="loggedIn"
+    class="activity-item activity-ai mobile-only"
+    title="AI 助手"
+    @click="handleAiClick"
+  >
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
+    </svg>
+    <span class="activity-label">AI</span>
   </div>
   <div class="activity-divider"></div>
   <!-- 用户图标：已登录显示头像（点击弹出用户信息），未登录显示登录图标（跳转登录页） -->
@@ -148,10 +179,11 @@ async function onSwitchOrg(orgId: number) {
       <circle cx="12" cy="7" r="4"/>
     </svg>
     <div v-else class="user-badge">{{ (currentUser?.userName || '?').charAt(0).toUpperCase() }}</div>
+    <span class="activity-label">{{ loggedIn ? '我的' : '登录' }}</span>
   </div>
 </div>
 
-<!-- 移动端抽屉遮罩：≤768px 且抽屉展开时显示，点击收起（桌面端 isMobileLayout=false 不渲染） -->
+<!-- 移动端抽屉遮罩：≤900px 且抽屉展开时显示，点击收起（桌面端 isMobileLayout=false 不渲染） -->
 <div
   v-if="isMobileLayout && !collapsed && !sidebarHidden"
   class="sidebar-mask"
@@ -190,6 +222,11 @@ async function onSwitchOrg(orgId: number) {
   </svg>
 </button>
 
+<!-- 全局悬浮按钮区（fab-dock）：右下角统一容器，悬浮组件（Markdown 目录、AI 助手）
+     通过 Teleport 挂入，由 dock 统一布局叠放，组件间互不感知。
+     必须位于 .main 之前：RouterView 内组件初始挂载时 Teleport 目标需已存在 -->
+<div id="fab-dock" class="fab-dock"></div>
+
 <div class="main">
   <RouterView v-slot="{ Component }">
     <KeepAlive>
@@ -198,51 +235,49 @@ async function onSwitchOrg(orgId: number) {
   </RouterView>
 </div>
 
-<!-- 用户信息弹窗：点击活动栏底部头像弹出，展示账号信息 + 退出登录 -->
-<div v-if="showUserMenu" class="modal-mask" @click.self="showUserMenu = false">
-  <div class="modal-content user-menu">
-    <div class="modal-header">Account</div>
-    <div class="modal-body">
-      <div class="user-profile">
-        <div class="user-avatar">{{ (currentUser?.userName || '?').charAt(0).toUpperCase() }}</div>
-        <div class="user-meta">
-          <div class="user-name">{{ currentUser?.userName }}</div>
-          <div class="user-org">{{ currentUser?.orgName }}</div>
-        </div>
-        <span class="role-tag" :class="currentUser?.role">{{ currentUser?.role }}</span>
-      </div>
-
-      <!-- 组织切换器：多组织用户可切换当前组织上下文 -->
-      <div v-if="orgs.length > 1" class="org-switcher">
-        <div class="org-switcher-label">Organizations</div>
-        <div
-          v-for="o in orgs"
-          :key="o.orgId"
-          class="org-item"
-          :class="{ active: o.orgId === currentOrgId }"
-          @click="onSwitchOrg(o.orgId)"
-        >
-          <span class="org-name">{{ o.orgName }}</span>
-          <span class="org-role" :class="o.role">{{ o.role }}</span>
-        </div>
-      </div>
-
-      <div class="user-fields">
-        <div class="field-row"><span class="field-label">User ID</span><span class="field-value">{{ currentUser?.userId }}</span></div>
-        <div class="field-row"><span class="field-label">Org ID</span><span class="field-value">{{ currentUser?.orgId }}</span></div>
-        <div class="field-row"><span class="field-label">Role</span><span class="field-value">{{ currentUser?.role }}</span></div>
-      </div>
+<!-- 用户信息弹窗：点击活动栏底部头像弹出，展示账号信息 + 退出登录（外壳统一 ModalShell） -->
+<ModalShell v-if="showUserMenu" title="Account" width="320px" @close="showUserMenu = false">
+  <div class="user-profile">
+    <div class="user-avatar">{{ (currentUser?.userName || '?').charAt(0).toUpperCase() }}</div>
+    <div class="user-meta">
+      <div class="user-name">{{ currentUser?.userName }}</div>
+      <div class="user-org">{{ currentUser?.orgName }}</div>
     </div>
-    <div class="modal-actions">
-      <button class="btn" @click="showUserMenu = false">Close</button>
-      <button class="btn btn-danger" @click="doLogout">Logout</button>
+    <span class="role-tag" :class="currentUser?.role">{{ currentUser?.role }}</span>
+  </div>
+
+  <!-- 组织切换器：多组织用户可切换当前组织上下文 -->
+  <div v-if="orgs.length > 1" class="org-switcher">
+    <div class="org-switcher-label">Organizations</div>
+    <div
+      v-for="o in orgs"
+      :key="o.orgId"
+      class="org-item"
+      :class="{ active: o.orgId === currentOrgId }"
+      @click="onSwitchOrg(o.orgId)"
+    >
+      <span class="org-name">{{ o.orgName }}</span>
+      <span class="org-role" :class="o.role">{{ o.role }}</span>
     </div>
   </div>
-</div>
+
+  <div class="user-fields">
+    <div class="field-row"><span class="field-label">User ID</span><span class="field-value">{{ currentUser?.userId }}</span></div>
+    <div class="field-row"><span class="field-label">Org ID</span><span class="field-value">{{ currentUser?.orgId }}</span></div>
+    <div class="field-row"><span class="field-label">Role</span><span class="field-value">{{ currentUser?.role }}</span></div>
+  </div>
+  <template #actions>
+    <button class="btn" @click="showUserMenu = false">Close</button>
+    <button class="btn btn-danger" @click="doLogout">Logout</button>
+  </template>
+</ModalShell>
 
 <!-- 文件树右键菜单 + 新建/重命名输入弹窗（全局单例，浏览器与分享模式共用挂载点；分享模式不触发） -->
 <FileContextMenu />
 <PromptModal />
+
+<!-- 全局 AI 对话面板（分享模式不显示；未配置 ai 段时组件内部自动隐藏） -->
+<AiChat v-if="dsMode !== 'share'" />
 </template>
 
 <style scoped>
@@ -275,7 +310,7 @@ async function onSwitchOrg(orgId: number) {
   line-height: 1.6;
   flex-shrink: 0;
 }
-/* 移动端抽屉关闭按钮：桌面隐藏；≤768px 抽屉展开时显示在 header 右侧 */
+/* 移动端抽屉关闭按钮：桌面隐藏；≤900px 抽屉展开时显示在 header 右侧 */
 .sidebar-close {
   display: none;
   margin-left: auto;
@@ -289,7 +324,7 @@ async function onSwitchOrg(orgId: number) {
   border-radius: 4px;
 }
 .sidebar-close:hover { background: var(--hover, #f2f3f5); color: var(--text); }
-@media (max-width: 768px) {
+@media (max-width: 900px) {
   .sidebar:not(.collapsed) .sidebar-close { display: inline-flex; }
 }
 .sidebar-body {
@@ -307,8 +342,25 @@ async function onSwitchOrg(orgId: number) {
 .activity-user { margin-top: auto; }
 .user-badge { width:24px; height:24px; border-radius:50%; background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; }
 
-/* 用户信息弹窗 */
-.user-menu { width: 320px; max-width: 92vw; }
+/* 全局悬浮按钮区：fixed 右下角，纵向堆叠；条目自定 order 决定叠放位（小值在上） */
+.fab-dock {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: var(--z-fab-dock);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+  pointer-events: none; /* 容器本身不拦截点击，条目恢复 pointer-events */
+}
+.fab-dock > :deep(*) { pointer-events: auto; }
+@media (max-width: 900px) {
+  /* 上移避开底部导航（56px + 间距）；AI fab 移动端隐藏，dock 内仅剩 Markdown 目录 */
+  .fab-dock { right: 12px; bottom: calc(68px + env(safe-area-inset-bottom, 0px)); }
+}
+
+/* 用户信息弹窗内容 */
 .user-profile { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .user-avatar {
   width: 44px; height: 44px; border-radius: 50%;

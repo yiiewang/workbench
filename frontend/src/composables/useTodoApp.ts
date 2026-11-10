@@ -8,10 +8,12 @@ import {
     conflictChoices, showConfirmSummary, confirmSummary, filterSeverity,
     orgTasks, activeTaskId,
 } from '../stores/todoStore'
-import { checkAuth, registerTodoAppReset } from '../stores/indexStore'
+import { checkAuth, registerTodoAppReset, openTabFn } from '../stores/indexStore'
 import * as taskApi from '../api/tasks'
 import { ElNotification } from 'element-plus'
 import SparkMD5 from 'spark-md5'
+import { useRouter } from 'vue-router'
+import { baseName, extFromPath } from '../lib/common'
 
 // API 调用统一走 ../api/ 模块（tasks/files/share/auth），不再在此重复定义 apiCall。
 // 原有的 API_CODE 常量也移至 api 模块内部。
@@ -321,11 +323,11 @@ export function setupTodoApp() {
 
     // --- Manual Conflict Resolution ---
     // --- 任务比对工具 ---
-    const DIFF_FIELDS = ['title', 'status', 'priority', 'progress', 'due', 'scheduled', 'content', 'assignee', 'postponedCount', 'confirmedDate'];
+    const DIFF_FIELDS = ['title', 'status', 'priority', 'progress', 'due', 'scheduled', 'content', 'assignee', 'postponedCount', 'confirmedDate', 'files'];
     const FIELD_LABELS = {
         title: '标题', status: '状态', priority: '优先级', progress: '进度',
         due: '截止', scheduled: '计划', content: '内容', assignee: '负责人',
-        postponedCount: '延期次数', confirmedDate: '确认日期'
+        postponedCount: '延期次数', confirmedDate: '确认日期', files: '关联文件'
     };
     const HIGH_SEVERITY_FIELDS = new Set(['status', 'priority']);
     const MEDIUM_SEVERITY_FIELDS = new Set(['due', 'scheduled', 'confirmedDate']);
@@ -1320,6 +1322,40 @@ export function setupTodoApp() {
         }
     }
 
+    // --- 关联文件（todo ↔ file 联动）---
+    // 编辑弹窗中通过 FilePickerModal（文件树选择器）增删关联文件
+    function removeEditingFile(i) {
+        (editingTask.value.files || []).splice(i, 1);
+    }
+
+    // 关联文件 chip 点击 → 打开文件预览（文件浏览页新 tab；openTabFn 由 useIndexApp 注册）
+    const fileRouter = useRouter();
+    function openLinkedFile(path) {
+        const name = baseName(path);
+        if (openTabFn) openTabFn(path, name, extFromPath(name), 0);
+        fileRouter.push('/file');
+    }
+
+    // 文件树选择器（FilePickerModal）：打开 / 确认批量追加（去重、上限）
+    const showFilePicker = ref(false);
+
+    function openFilePicker() {
+        showFilePicker.value = true;
+    }
+
+    function confirmPickFiles(paths) {
+        const files = editingTask.value.files || (editingTask.value.files = []);
+        let added = 0;
+        for (const p of paths || []) {
+            if (files.includes(p)) continue;
+            if (files.length >= 20) { showToast('关联文件最多 20 个', 'error'); break; }
+            files.push(p);
+            added++;
+        }
+        showFilePicker.value = false;
+        if (added) showToast(`已添加 ${added} 个关联文件`);
+    }
+
     function listAddTask() {
         if (viewingMember.value) return;
         if (!currentUser.value) {
@@ -1433,6 +1469,7 @@ export function setupTodoApp() {
             postponedFrom: null,
             postponedCount: 0,
             autoPostponed: false,
+            files: editingTask.value.files || [],
         };
         tasks.value.push(task);
         newTaskTitle.value[editingTask.value.status] = '';
@@ -1724,6 +1761,9 @@ export function setupTodoApp() {
         isOverdue, overdueDays, dayOffset, ganttTasks, ganttTracks, ganttTaskCount, ganttBarStyleV2, formatDateShort, switchTab,
         onDragStart, onBoardDrop,
         onStatusChange, setEditingProgress,
+        // 关联文件（todo ↔ file 联动）
+        removeEditingFile, openLinkedFile,
+        showFilePicker, openFilePicker, confirmPickFiles,
         onCalendarDragOver, onCalendarDragLeave, onCalendarDrop,
         confirmTask, addTaskToCalendar,
         changeWeek, goToThisWeek,

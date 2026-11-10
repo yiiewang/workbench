@@ -6,8 +6,10 @@
 //   files.ts  — 文件树/文件内容
 //   share.ts  — 分享创建/查询/删除/访问
 //   auth.ts   — 登录/设密码/当前用户
+//   ai.ts     — AI 对话（状态探测 + SSE 流式）
 
 export * from './tasks'
 export * from './files'
 export * from './share'
 export * from './auth'
+export * from './ai'

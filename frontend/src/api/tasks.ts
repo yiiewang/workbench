@@ -15,6 +15,8 @@ export interface Task {
   postponedCount: number
   autoPostponed: boolean
   sortOrder: number
+  // 关联的文件路径（相对用户根目录，todo ↔ file 联动）
+  files?: string[]
 }
 
 // 全量同步：获取所有任务（GET /api/tasks）— 仅返回当前登录用户自己的任务
@@ -26,6 +28,18 @@ export async function getTasks() {
 // 服务端校验目标成员与当前用户同 org 且关系 active，返回结构与 getTasks 一致
 export async function getMemberTasks(userId: number | string) {
   return apiCall(`/api/tasks/user/${encodeURIComponent(String(userId))}`)
+}
+
+// 反查关联了指定文件的任务 — GET /api/tasks/by-file?path=...
+// todo ↔ file 联动：返回当前用户任务中 files 包含该路径的任务
+export async function getTasksByFile(path: string): Promise<{ tasks: Task[] }> {
+  return apiCall(`/api/tasks/by-file?path=${encodeURIComponent(path)}`)
+}
+
+// 当前用户未完成任务（status != done，按截止日升序）— GET /api/tasks/open
+// AI 面板任务抽屉等场景用
+export async function getOpenTasks(): Promise<{ tasks: Task[] }> {
+  return apiCall('/api/tasks/open')
 }
 
 // 全量同步：替换所有任务（PUT /api/tasks）

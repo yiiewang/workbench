@@ -585,7 +585,7 @@
 #todo-app .modal-mask {
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     background: rgba(0,0,0,.5);
-    z-index: 1000;
+    z-index: var(--z-modal);
     display: flex; align-items: center; justify-content: center;
 }
 #todo-app .modal-content {
@@ -624,6 +624,51 @@
 }
 #todo-app .form-field { margin-bottom: 14px; }
 #todo-app .form-field label { display: block; font-size: 11px; color: var(--text-dim); font-weight: 600; margin-bottom: 5px; text-transform: uppercase; letter-spacing: .5px; }
+
+/* ---- 关联文件（todo ↔ file 联动）：label 行 + chips / 空态占位 ---- */
+#todo-app .task-files-label-row {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;
+}
+#todo-app .task-files-label-row label { margin-bottom: 0; }
+#todo-app .task-files-link-btn {
+    border: none; background: none; color: var(--accent); font-size: 11px;
+    cursor: pointer; padding: 0; font-weight: 500;
+}
+#todo-app .task-files-link-btn:hover { text-decoration: underline; }
+
+/* 无关联：虚线占位区（点击打开文件选择器） */
+#todo-app .task-files-empty {
+    display: block; width: 100%; box-sizing: border-box;
+    border: 1px dashed var(--border); border-radius: 6px; background: transparent;
+    color: var(--text-muted); font-size: 12px; text-align: center;
+    padding: 10px 8px; cursor: pointer; transition: all .15s;
+}
+#todo-app .task-files-empty:hover { border-color: var(--accent); color: var(--accent); }
+
+/* chips：文件图标 + 文件名 + 移除 */
+#todo-app .task-files-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+#todo-app .task-file-chip {
+    display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+    color: var(--text); font-size: 12px; padding: 3px 4px 3px 8px;
+    transition: border-color .15s;
+}
+#todo-app .task-file-chip:hover { border-color: var(--accent); }
+#todo-app .task-file-chip .chip-icon {
+    width: 12px; height: 12px; flex-shrink: 0; color: var(--text-dim);
+}
+#todo-app .task-file-chip .chip-name {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    cursor: pointer; max-width: 140px;
+}
+#todo-app .task-file-chip .chip-name:hover { color: var(--accent); }
+#todo-app .task-file-chip .chip-remove {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; flex-shrink: 0;
+    border: none; border-radius: 50%; background: none;
+    color: var(--text-dim); font-size: 13px; line-height: 1; cursor: pointer;
+}
+#todo-app .task-file-chip .chip-remove:hover { background: #fde8ea; color: #cf222e; }
 /* 原生 input/select 样式（用 :not 排除 Element Plus 组件内部的 input，
    避免 .form-field input 规则污染 el-date-picker / el-input / el-select 的内部布局） */
 #todo-app .form-field input:not(.el-input__inner):not(.el-range-input):not([class*="el-"]),
@@ -742,6 +787,7 @@
 }
 #todo-app .md-editor-wrapper .md-toolbar button svg { width: 13px; height: 13px; }
 #todo-app .md-editor-wrapper .md-toolbar button:hover { background: var(--hover); border-color: var(--border); }
+#todo-app .md-editor-wrapper .md-toolbar .md-view-toggle { margin-left: auto; width: auto; padding: 0 10px; color: var(--text); border-color: var(--border); }
 #todo-app .md-editor-wrapper .md-split { display: flex; flex: 1; min-height: 0; gap: 10px; }
 #todo-app .md-editor-wrapper .md-editor,
 #todo-app .md-editor-wrapper .md-preview { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
@@ -824,7 +870,7 @@
     #todo-app .md-editor-wrapper .md-editor,
     #todo-app .md-editor-wrapper .md-preview { min-height: 120px; }
 }
-@media (max-width: 768px) {
+@media (max-width: 900px) {
     #todo-app .header { padding: 10px 14px; gap: 8px; }
     #todo-app .header h1 { font-size: 14px; }
     #todo-app .board { grid-template-columns: repeat(2, 1fr); gap: 8px; }

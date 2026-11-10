@@ -95,12 +95,6 @@ type treeData struct {
 	Files []treeItem `json:"files"`
 }
 
-// tasksOKData PUT /api/tasks 成功载荷
-type tasksOKData struct {
-	Status string `json:"status"`
-	File   string `json:"file"`
-}
-
 // sharesData 分享列表载荷
 type sharesData struct {
 	Shares []db.Share `json:"shares"`

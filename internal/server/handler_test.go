@@ -280,21 +280,21 @@ func TestHandler_TasksJSON(t *testing.T) {
 	e.GET("/api/tasks").WithHeader("Authorization", authHeader(tok)).
 		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
 
-	body := map[string]any{
-		"orgs": map[string]any{
-			"1": map[string]any{
-				"1": map[string]any{
-					"tasks": []map[string]any{
-						{"id": "t1", "title": "first", "status": "todo", "sortOrder": 1},
-					},
-					"version": map[string]string{"md5": "v1"},
-				},
-			},
-		},
-	}
+	// 全量 PUT 已废弃：404（路由不存在）
 	e.PUT("/api/tasks").WithHeader("Authorization", authHeader(tok)).
-		WithJSON(body).Expect().Status(http.StatusOK).
-		JSON().Object().Value("code").Equal(0)
+		WithJSON(map[string]any{}).Expect().Status(http.StatusNotFound)
+
+	// 增量 POST 造数据（baseRevision 必填）
+	e.POST("/api/tasks/t1").WithHeader("Authorization", authHeader(tok)).
+		WithJSON(map[string]any{
+			"task":         map[string]any{"id": "t1", "title": "first", "status": "todo", "sortOrder": 1},
+			"baseRevision": 1,
+		}).Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
+
+	// baseRevision 缺失 → 400
+	e.POST("/api/tasks/t2").WithHeader("Authorization", authHeader(tok)).
+		WithJSON(map[string]any{"task": map[string]any{"id": "t2", "title": "x"}}).
+		Expect().Status(http.StatusBadRequest)
 
 	e.GET("/api/tasks").WithHeader("Authorization", authHeader(tok)).
 		Expect().Status(http.StatusOK).
@@ -309,10 +309,10 @@ func TestHandler_TaskOptimisticLock(t *testing.T) {
 	e, d, secret, _ := setupTestServer(t)
 	tok := createUser(t, d, secret, "org1", "alice", "p")
 
-	// 准备一条任务（POST 不带 baseRevision：兼容写），revision: 1(初始) + 1 = 2
+	// 新增任务（baseRevision=1 初始版本号），revision: 1 + 1 = 2
 	task := map[string]any{"id": "t1", "title": "v1", "status": "todo", "sortOrder": 1}
 	e.POST("/api/tasks/t1").WithHeader("Authorization", authHeader(tok)).
-		WithJSON(map[string]any{"task": task}).
+		WithJSON(map[string]any{"task": task, "baseRevision": 1}).
 		Expect().Status(http.StatusOK).JSON().Object().Value("data").Object().Value("revision").Number().Equal(2)
 
 	// baseRevision 正确 → 成功，revision 递增

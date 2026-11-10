@@ -184,48 +184,52 @@ func TestUsers_GlobalUniqueName(t *testing.T) {
 // 任务
 // ============================================================
 
-func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
+func TestTasks_IncrementalAndRevision(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 	orgID, _ := d.EnsureOrg(ctx(), "org1")
 	userID, _ := d.UpsertUser(ctx(), orgID, "alice", "h", RoleIDUser)
 
-	tasks := []TaskItem{
-		{ID: "t1", Title: "first", Status: "todo", SortOrder: 1},
-		{ID: "t2", Title: "second", Status: "done", SortOrder: 2},
-	}
-	if _, err := d.UpsertTasks(ctx(), orgID, userID, tasks, `{"md5":"abc"}`); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := d.GetTasks(ctx(), orgID, userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("GetTasks len = %d, want 2", len(got))
-	}
-	if got[0].Title != "first" || got[1].Title != "second" {
-		t.Fatalf("tasks order = %v,%v", got[0].Title, got[1].Title)
-	}
-
-	if _, err := d.UpsertTasks(ctx(), orgID, userID, []TaskItem{{ID: "t3", Title: "only", SortOrder: 1}}, `{"md5":"def"}`); err != nil {
-		t.Fatal(err)
-	}
-	got, _ = d.GetTasks(ctx(), orgID, userID)
-	if len(got) != 1 || got[0].ID != "t3" {
-		t.Fatalf("after replace got = %v, want [t3]", got)
-	}
-
-	// revision 乐观锁：每次全量写入后单调递增，GetTasksJSONByOwner 一并带出
+	// 初始 revision = 1（迁移默认）
 	rev, err := d.GetRevision(ctx(), userID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rev < 2 {
-		t.Fatalf("revision = %d, want >= 2 after two upserts", rev)
+	if rev != 1 {
+		t.Fatalf("initial revision = %d, want 1", rev)
 	}
 
+	// 增量新增两条：revision 递增
+	if _, err := d.AddTask(ctx(), orgID, userID, TaskItem{ID: "t1", Title: "first", Status: "todo", SortOrder: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.AddTask(ctx(), orgID, userID, TaskItem{ID: "t2", Title: "second", Status: "done", SortOrder: 2}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetTasks(ctx(), orgID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Title != "first" || got[1].Title != "second" {
+		t.Fatalf("tasks = %v", got)
+	}
+
+	// 更新 + 删除各一次：revision = 1 + 4 = 5
+	if _, err := d.UpdateTask(ctx(), orgID, userID, TaskItem{ID: "t1", Title: "first-v2", Status: "progress", SortOrder: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DeleteTask(ctx(), orgID, userID, "t2"); err != nil {
+		t.Fatal(err)
+	}
+	rev, err = d.GetRevision(ctx(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev != 5 {
+		t.Fatalf("revision = %d, want 5 (4 writes since init)", rev)
+	}
+
+	// GetTasksJSONByOwner 带 revision 与任务
 	data, err := d.GetTasksJSONByOwner(ctx(), orgID, userID)
 	if err != nil {
 		t.Fatal(err)
@@ -236,36 +240,29 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 	}
 	orgKey := strconv.FormatInt(orgID, 10)
 	userKey := strconv.FormatInt(userID, 10)
-	org1, ok := orgs[orgKey]
-	if !ok {
-		t.Fatalf("org %s missing", orgKey)
-	}
-	user := org1[userKey].(map[string]interface{})
-	ver := user["version"].(map[string]interface{})
-	if ver["md5"] != "def" {
-		t.Fatalf("version = %v, want def", ver["md5"])
-	}
-	// GetTasksJSONByOwner 必须带出 revision（前端乐观锁基准）
+	user := orgs[orgKey][userKey].(map[string]interface{})
 	if userRev, ok := user["revision"].(int64); !ok || userRev != rev {
 		t.Fatalf("revision in json = %v (ok=%v), want %d", user["revision"], ok, rev)
 	}
-	if ts, ok := user["tasks"].([]TaskItem); !ok || len(ts) != 1 {
+	if ts, ok := user["tasks"].([]TaskItem); !ok || len(ts) != 1 || ts[0].Title != "first-v2" {
 		t.Fatalf("tasks in json = %v", user["tasks"])
 	}
 }
 
-func TestTasksJSON_EmptyVersionFallback(t *testing.T) {
+// 空用户（无任何任务）：revision 仍为默认 1，tasks 为空数组
+func TestTasksJSON_EmptyUser(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 	orgID, _ := d.EnsureOrg(ctx(), "org1")
 	userID, _ := d.UpsertUser(ctx(), orgID, "bob", "h", RoleIDUser)
-	_, _ = d.UpsertTasks(ctx(), orgID, userID, nil, "")
 
 	data, _ := d.GetTasksJSONByOwner(ctx(), orgID, userID)
 	user := data["orgs"].(map[string]map[string]interface{})[strconv.FormatInt(orgID, 10)][strconv.FormatInt(userID, 10)].(map[string]interface{})
-	ver := user["version"].(map[string]string)
-	if ver["md5"] != "init" {
-		t.Fatalf("empty version should fall back to init, got %v", ver)
+	if user["revision"].(int64) != 1 {
+		t.Fatalf("empty user revision = %v, want 1", user["revision"])
+	}
+	if ts, ok := user["tasks"].([]TaskItem); !ok || len(ts) != 0 {
+		t.Fatalf("empty user tasks = %v (ok=%v)", user["tasks"], ok)
 	}
 }
 

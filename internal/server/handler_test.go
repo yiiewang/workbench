@@ -301,6 +301,42 @@ func TestHandler_TasksJSON(t *testing.T) {
 		JSON().Object().Value("data").Object().Value("orgs").NotNull()
 }
 
+// TestHandler_TaskOptimisticLock 增量接口乐观锁：
+//   - baseRevision 与服务端一致 → 成功，revision 递增并返回
+//   - baseRevision 落后（他端已写入）→ 409 + 服务端任务副本与当前 revision
+//   - 不带 baseRevision（旧客户端）→ 跳过校验直接写入
+func TestHandler_TaskOptimisticLock(t *testing.T) {
+	e, d, secret, _ := setupTestServer(t)
+	tok := createUser(t, d, secret, "org1", "alice", "p")
+
+	// 准备一条任务（POST 不带 baseRevision：兼容写），revision: 1(初始) + 1 = 2
+	task := map[string]any{"id": "t1", "title": "v1", "status": "todo", "sortOrder": 1}
+	e.POST("/api/tasks/t1").WithHeader("Authorization", authHeader(tok)).
+		WithJSON(map[string]any{"task": task}).
+		Expect().Status(http.StatusOK).JSON().Object().Value("data").Object().Value("revision").Number().Equal(2)
+
+	// baseRevision 正确 → 成功，revision 递增
+	task2 := map[string]any{"id": "t1", "title": "v2", "status": "todo", "sortOrder": 1}
+	rev2 := e.PATCH("/api/tasks/t1").WithHeader("Authorization", authHeader(tok)).
+		WithJSON(map[string]any{"task": task2, "baseRevision": 2}).
+		Expect().Status(http.StatusOK).JSON().Object().Value("data").Object().Value("revision").Number().Raw()
+	if rev2 != 3 {
+		t.Fatalf("revision after patch = %v, want 3", rev2)
+	}
+
+	// baseRevision 落后 → 409，data 带服务端任务副本（title=v2）与当前 revision
+	conflict := e.PATCH("/api/tasks/t1").WithHeader("Authorization", authHeader(tok)).
+		WithJSON(map[string]any{"task": map[string]any{"id": "t1", "title": "stale", "status": "todo"}, "baseRevision": 2}).
+		Expect().Status(http.StatusConflict).JSON().Object()
+	conflict.Value("code").Equal(CodeTaskConflict)
+	conflict.Value("data").Object().Value("task").Object().Value("title").Equal("v2")
+	conflict.Value("data").Object().Value("revision").Number().Equal(3)
+
+	// 轻量版本号端点
+	e.GET("/api/tasks/revision").WithHeader("Authorization", authHeader(tok)).
+		Expect().Status(http.StatusOK).JSON().Object().Value("data").Object().Value("revision").Number().Equal(3)
+}
+
 // ============================================================
 // /api/tree
 // ============================================================

@@ -122,6 +122,8 @@ func (s *Server) App() *iris.Application {
 	api.Post("/share", auth, s.handleCreateShare)
 	api.Delete("/share/{id}", auth, s.handleDeleteShare)
 
+	// 任务版本号（轻量端点：多设备轮询对账）
+	api.Get("/tasks/revision", auth, s.getTaskRevision)
 	// AI 对话 API（需鉴权；未配置 ai 段时 status 返回 enabled=false、chat 返回 50301）
 	api.Get("/ai/status", auth, s.handleAIStatus)
 	api.Post("/ai/chat", auth, s.handleAIChat)
@@ -508,15 +510,20 @@ func (s *Server) putTasksJSON(ctx iris.Context) {
 			if memberID != userID {
 				continue
 			}
-			// 存储客户端发来的 version JSON，GET 时原样回传，确保哈希一致
+			// 存储客户端发来的 version JSON，GET 时原样回传（兼容旧对账体系）；
+			// 全量 PUT 也会 bump revision（服务端权威版本号）
 			versionJSON := ""
 			if len(member.Version) > 0 && string(member.Version) != "null" {
 				versionJSON = string(member.Version)
 			}
-			if err := s.db.UpsertTasks(rctx, orgID, memberID, member.Tasks, versionJSON); err != nil {
+			result, err := s.db.UpsertTasks(rctx, orgID, memberID, member.Tasks, versionJSON)
+			if err != nil {
 				serverError(ctx, "upsert tasks failed", err, "org", orgID, "user", memberID)
 				return
 			}
+			slog.Info("tasks.json updated", "user", userID)
+			writeOK(ctx, taskVersionPayload(result))
+			return
 		}
 	}
 	slog.Info("tasks.json updated", "user", userID)
@@ -630,12 +637,36 @@ func (s *Server) getOpenTasks(ctx iris.Context) {
 
 // ============================================================
 // 增量任务接口：PATCH/POST/DELETE /api/tasks/{id}
-// 避免全量 PUT 的带宽浪费（改一条任务不发全部 23 条）
+// 乐观锁：请求携带 baseRevision（客户端上次同步到的服务端版本号），
+// 与服务端当前 revision 不一致 → 409 + 服务端任务副本（前端做字段级合并）。
+// baseRevision 缺省 = 跳过校验（旧客户端兼容写，last-writer-wins）。
 // ============================================================
 
+// writeTaskConflict 写入 409 冲突响应：携带服务端当前任务副本与 revision
+func (s *Server) writeTaskConflict(ctx iris.Context, orgID, userID int64, taskID string, revision int64) {
+	data := map[string]any{"revision": revision}
+	if tasks, err := s.db.GetTasks(ctx.Request().Context(), orgID, userID); err == nil {
+		for _, t := range tasks {
+			if string(t.ID) == taskID {
+				data["task"] = t
+				break
+			}
+		}
+	}
+	writeFailData(ctx, iris.StatusConflict, CodeTaskConflict, data)
+}
+
+// taskVersionPayload 成功响应载荷（version 兼容旧客户端 md5 对账，revision 为权威版本号）
+func taskVersionPayload(result db.TaskWriteResult) map[string]interface{} {
+	var version interface{}
+	if result.VersionJSON != "" {
+		_ = json.Unmarshal([]byte(result.VersionJSON), &version)
+	}
+	return map[string]interface{}{"status": "ok", "version": version, "revision": result.Revision}
+}
+
 // patchTask 更新单条任务（PATCH /api/tasks/{id}）
-// 请求体：{ "task": { ...单条任务 } }
-// 响应：{ "code": 0, "data": { "status": "ok", "version": {...新version} } }
+// 请求体：{ "task": {...}, "baseRevision": 12 }
 func (s *Server) patchTask(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
@@ -647,7 +678,8 @@ func (s *Server) patchTask(ctx iris.Context) {
 	}
 
 	var req struct {
-		Task db.TaskItem `json:"task"`
+		Task         db.TaskItem `json:"task"`
+		BaseRevision *int64      `json:"baseRevision"`
 	}
 	if err := readJSON(ctx, &req); err != nil {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
@@ -655,18 +687,20 @@ func (s *Server) patchTask(ctx iris.Context) {
 	}
 	req.Task.ID = db.FlexString(taskID)
 
-	versionJSON, err := s.db.UpdateTask(rctx, orgID, userID, req.Task)
+	if req.BaseRevision != nil {
+		if cur, err := s.db.GetRevision(rctx, userID); err == nil && *req.BaseRevision != cur {
+			s.writeTaskConflict(ctx, orgID, userID, taskID, cur)
+			return
+		}
+	}
+
+	result, err := s.db.UpdateTask(rctx, orgID, userID, req.Task)
 	if err != nil {
 		serverError(ctx, "update task failed", err, "task", taskID)
 		return
 	}
-
-	var version interface{}
-	if versionJSON != "" {
-		_ = json.Unmarshal([]byte(versionJSON), &version)
-	}
 	slog.Info("task patched", "user", userID, "task", taskID, "status", req.Task.Status)
-	writeOK(ctx, map[string]interface{}{"status": "ok", "version": version})
+	writeOK(ctx, taskVersionPayload(result))
 }
 
 // postTask 新增单条任务（POST /api/tasks/{id}）
@@ -681,7 +715,8 @@ func (s *Server) postTask(ctx iris.Context) {
 	}
 
 	var req struct {
-		Task db.TaskItem `json:"task"`
+		Task         db.TaskItem `json:"task"`
+		BaseRevision *int64      `json:"baseRevision"`
 	}
 	if err := readJSON(ctx, &req); err != nil {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
@@ -689,21 +724,23 @@ func (s *Server) postTask(ctx iris.Context) {
 	}
 	req.Task.ID = db.FlexString(taskID)
 
-	versionJSON, err := s.db.AddTask(rctx, orgID, userID, req.Task)
+	if req.BaseRevision != nil {
+		if cur, err := s.db.GetRevision(rctx, userID); err == nil && *req.BaseRevision != cur {
+			s.writeTaskConflict(ctx, orgID, userID, taskID, cur)
+			return
+		}
+	}
+
+	result, err := s.db.AddTask(rctx, orgID, userID, req.Task)
 	if err != nil {
 		serverError(ctx, "add task failed", err, "task", taskID)
 		return
 	}
-
-	var version interface{}
-	if versionJSON != "" {
-		_ = json.Unmarshal([]byte(versionJSON), &version)
-	}
 	slog.Info("task added", "user", userID, "task", taskID)
-	writeOK(ctx, map[string]interface{}{"status": "ok", "version": version})
+	writeOK(ctx, taskVersionPayload(result))
 }
 
-// deleteTask 删除单条任务（DELETE /api/tasks/{id}）
+// deleteTask 删除单条任务（DELETE /api/tasks/{id}?baseRevision=12）
 func (s *Server) deleteTask(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
@@ -714,18 +751,32 @@ func (s *Server) deleteTask(ctx iris.Context) {
 		return
 	}
 
-	versionJSON, err := s.db.DeleteTask(rctx, orgID, userID, taskID)
+	// DELETE 无请求体，baseRevision 走 query（-1 = 未携带，跳过校验）
+	if base := ctx.URLParamInt64Default("baseRevision", -1); base >= 0 {
+		if cur, err := s.db.GetRevision(rctx, userID); err == nil && base != cur {
+			s.writeTaskConflict(ctx, orgID, userID, taskID, cur)
+			return
+		}
+	}
+
+	result, err := s.db.DeleteTask(rctx, orgID, userID, taskID)
 	if err != nil {
 		serverError(ctx, "delete task failed", err, "task", taskID)
 		return
 	}
-
-	var version interface{}
-	if versionJSON != "" {
-		_ = json.Unmarshal([]byte(versionJSON), &version)
-	}
 	slog.Info("task deleted", "user", userID, "task", taskID)
-	writeOK(ctx, map[string]interface{}{"status": "ok", "version": version})
+	writeOK(ctx, taskVersionPayload(result))
+}
+
+// getTaskRevision 轻量版本号端点（GET /api/tasks/revision）：
+// 多设备轮询对账用，只返回当前 revision，不拉任务数据。
+func (s *Server) getTaskRevision(ctx iris.Context) {
+	rev, err := s.db.GetRevision(ctx.Request().Context(), currentUserID(ctx))
+	if err != nil {
+		serverError(ctx, "get revision failed", err)
+		return
+	}
+	writeOK(ctx, map[string]any{"revision": rev})
 }
 
 // ============================================================

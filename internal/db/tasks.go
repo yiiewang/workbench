@@ -42,22 +42,50 @@ func decodeTaskFiles(s string) []string {
 	return files
 }
 
-// UpsertTasks 批量替换用户任务，同时存储客户端发来的 version JSON
-func (d *DB) UpsertTasks(ctx context.Context, orgID, userID int64, tasks []TaskItem, versionJSON string) error {
+// TaskWriteResult 任务写入结果：
+//   - VersionJSON：兼容旧客户端 md5 对账体系的 version（增量路径由服务端重算）
+//   - Revision：服务端权威版本号（单调递增，每次任务写入 +1），乐观锁基准
+type TaskWriteResult struct {
+	VersionJSON string
+	Revision    int64
+}
+
+// bumpUserRevision 事务内递增用户任务版本号并读回新值。
+// 所有任务写路径（增/改/删/全量导入）都必须经过这里，保证 revision 严格递增。
+func bumpUserRevision(ctx context.Context, tx *sql.Tx, userID int64) (int64, error) {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET revision = revision + 1 WHERE id = ?`, userID); err != nil {
+		return 0, err
+	}
+	var rev int64
+	if err := tx.QueryRowContext(ctx, `SELECT revision FROM users WHERE id = ?`, userID).Scan(&rev); err != nil {
+		return 0, err
+	}
+	return rev, nil
+}
+
+// GetRevision 读取用户当前任务版本号（乐观锁基准；多设备轮询对账也用它）
+func (d *DB) GetRevision(ctx context.Context, userID int64) (int64, error) {
+	var rev int64
+	err := d.conn.QueryRowContext(ctx, `SELECT revision FROM users WHERE id = ?`, userID).Scan(&rev)
+	return rev, err
+}
+
+// UpsertTasks 批量替换用户任务（全量 PUT：导入/旧客户端兼容路径），version 存客户端值。
+func (d *DB) UpsertTasks(ctx context.Context, orgID, userID int64, tasks []TaskItem, versionJSON string) (TaskWriteResult, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return TaskWriteResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE org_id = ? AND user_id = ?`, orgID, userID); err != nil {
-		return err
+		return TaskWriteResult{}, err
 	}
 
 	const q = `INSERT INTO tasks (id, user_id, org_id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order, files) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	stmt, err := tx.PrepareContext(ctx, q)
 	if err != nil {
-		return err
+		return TaskWriteResult{}, err
 	}
 	defer stmt.Close()
 
@@ -67,23 +95,26 @@ func (d *DB) UpsertTasks(ctx context.Context, orgID, userID int64, tasks []TaskI
 			autoP = 1
 		}
 		if _, err := stmt.ExecContext(ctx, string(t.ID), userID, orgID, t.Title, t.Content, t.Status, t.Priority, t.Scheduled, t.Due, t.Progress, string(t.Assignee), t.PostponedCount, autoP, t.SortOrder, encodeTaskFiles(t.Files)); err != nil {
-			return err
+			return TaskWriteResult{}, err
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID)
+	rev, err := bumpUserRevision(ctx, tx, userID)
 	if err != nil {
-		return err
+		return TaskWriteResult{}, err
 	}
-	return tx.Commit()
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
+		return TaskWriteResult{}, err
+	}
+	return TaskWriteResult{VersionJSON: versionJSON, Revision: rev}, tx.Commit()
 }
 
 // UpdateTask 增量更新单条任务（PATCH /api/tasks/{id}）。
-// 更新后重新计算 version md5（服务端是唯一真相源），返回新的 versionJSON。
-func (d *DB) UpdateTask(ctx context.Context, orgID, userID int64, task TaskItem) (string, error) {
+// version 由服务端重算（唯一真相源），revision +1；两者一并返回。
+func (d *DB) UpdateTask(ctx context.Context, orgID, userID int64, task TaskItem) (TaskWriteResult, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -95,26 +126,29 @@ func (d *DB) UpdateTask(ctx context.Context, orgID, userID int64, task TaskItem)
 		`UPDATE tasks SET title=?, content=?, status=?, priority=?, scheduled=?, due=?, progress=?, assignee=?, postponed_count=?, auto_postponed=?, sort_order=?, files=? WHERE org_id=? AND user_id=? AND id=?`,
 		task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, string(task.Assignee), task.PostponedCount, autoP, task.SortOrder, encodeTaskFiles(task.Files), orgID, userID, string(task.ID))
 	if err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 
-	// 重新计算 version：读取该用户全部任务，算 md5
 	versionJSON, err := d.recomputeVersion(ctx, tx, orgID, userID)
 	if err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
-		return "", err
+	rev, err := bumpUserRevision(ctx, tx, userID)
+	if err != nil {
+		return TaskWriteResult{}, err
 	}
-	return versionJSON, tx.Commit()
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
+		return TaskWriteResult{}, err
+	}
+	return TaskWriteResult{VersionJSON: versionJSON, Revision: rev}, tx.Commit()
 }
 
 // AddTask 新增单条任务（POST /api/tasks/{id}）。
-func (d *DB) AddTask(ctx context.Context, orgID, userID int64, task TaskItem) (string, error) {
+func (d *DB) AddTask(ctx context.Context, orgID, userID int64, task TaskItem) (TaskWriteResult, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -126,41 +160,49 @@ func (d *DB) AddTask(ctx context.Context, orgID, userID int64, task TaskItem) (s
 		`INSERT INTO tasks (id, user_id, org_id, title, content, status, priority, scheduled, due, progress, assignee, postponed_count, auto_postponed, sort_order, files) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(task.ID), userID, orgID, task.Title, task.Content, task.Status, task.Priority, task.Scheduled, task.Due, task.Progress, string(task.Assignee), task.PostponedCount, autoP, task.SortOrder, encodeTaskFiles(task.Files))
 	if err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 
 	versionJSON, err := d.recomputeVersion(ctx, tx, orgID, userID)
 	if err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
-		return "", err
+	rev, err := bumpUserRevision(ctx, tx, userID)
+	if err != nil {
+		return TaskWriteResult{}, err
 	}
-	return versionJSON, tx.Commit()
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
+		return TaskWriteResult{}, err
+	}
+	return TaskWriteResult{VersionJSON: versionJSON, Revision: rev}, tx.Commit()
 }
 
 // DeleteTask 删除单条任务（DELETE /api/tasks/{id}）。
-func (d *DB) DeleteTask(ctx context.Context, orgID, userID int64, taskID string) (string, error) {
+func (d *DB) DeleteTask(ctx context.Context, orgID, userID int64, taskID string) (TaskWriteResult, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE org_id = ? AND user_id = ? AND id = ?`, orgID, userID, taskID); err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 
 	versionJSON, err := d.recomputeVersion(ctx, tx, orgID, userID)
 	if err != nil {
-		return "", err
+		return TaskWriteResult{}, err
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
-		return "", err
+	rev, err := bumpUserRevision(ctx, tx, userID)
+	if err != nil {
+		return TaskWriteResult{}, err
 	}
-	return versionJSON, tx.Commit()
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = datetime('now'), version_json = ? WHERE id = ?`, versionJSON, userID); err != nil {
+		return TaskWriteResult{}, err
+	}
+	return TaskWriteResult{VersionJSON: versionJSON, Revision: rev}, tx.Commit()
 }
 
 // GetVersionJSON 获取用户当前 version_json（供冲突检测用）。
@@ -277,7 +319,7 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 	orgsMap := make(map[string]map[string]interface{})
 
 	rows, err := d.conn.QueryContext(ctx, `
-		SELECT ?, u.id, u.updated_at, u.version_json,
+		SELECT ?, u.id, u.updated_at, u.version_json, u.revision,
 		       t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due, t.progress, t.assignee, t.postponed_count, t.auto_postponed, t.sort_order, t.files
 		FROM users u
 		LEFT JOIN tasks t ON t.org_id = ? AND t.user_id = u.id
@@ -292,15 +334,17 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 	type userData struct {
 		tasks       []TaskItem
 		versionJSON string
+		revision    int64
 	}
 	orgUsers := make(map[string]map[string]*userData)
 
 	for rows.Next() {
 		var oID, uID int64
 		var updatedAt, versionJSON string
+		var udRevision int64
 		var taskID, taskTitle, taskContent, taskStatus, taskPriority, taskScheduled, taskDue, taskAssignee, taskFiles sql.NullString
 		var taskProgress, taskPostponed, taskAutoPostponed, sortOrder sql.NullInt64
-		if err := rows.Scan(&oID, &uID, &updatedAt, &versionJSON, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder, &taskFiles); err != nil {
+		if err := rows.Scan(&oID, &uID, &updatedAt, &versionJSON, &udRevision, &taskID, &taskTitle, &taskContent, &taskStatus, &taskPriority, &taskScheduled, &taskDue, &taskProgress, &taskAssignee, &taskPostponed, &taskAutoPostponed, &sortOrder, &taskFiles); err != nil {
 			return nil, err
 		}
 		orgKey := strconv.FormatInt(oID, 10)
@@ -309,7 +353,7 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 			orgUsers[orgKey] = make(map[string]*userData)
 		}
 		if orgUsers[orgKey][userKey] == nil {
-			orgUsers[orgKey][userKey] = &userData{versionJSON: versionJSON}
+			orgUsers[orgKey][userKey] = &userData{versionJSON: versionJSON, revision: udRevision}
 		}
 		if taskID.Valid {
 			orgUsers[orgKey][userKey].tasks = append(orgUsers[orgKey][userKey].tasks, TaskItem{
@@ -348,8 +392,9 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 				version = map[string]string{"md5": "init"}
 			}
 			usersMap[userKey] = map[string]interface{}{
-				"version": version,
-				"tasks":   tasks,
+				"version":   version,
+				"revision":  ud.revision,
+				"tasks":     tasks,
 			}
 		}
 		orgsMap[orgKey] = usersMap

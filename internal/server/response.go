@@ -30,6 +30,11 @@ func writeFailMsg(ctx iris.Context, httpStatus, code int, msg string) {
 	writeJSON(ctx, httpStatus, Response{Code: code, Msg: msg})
 }
 
+// writeFailData 写入带载荷的错误响应（如 409 冲突时返回服务端副本与当前版本号）
+func writeFailData(ctx iris.Context, httpStatus, code int, data any) {
+	writeJSON(ctx, httpStatus, Response{Code: code, Msg: errMsg(code), Data: data})
+}
+
 // serverError 记录操作失败日志并写入 500 业务错误响应。
 // args 为附加结构化字段（成对 key/value），err 自动作为 "err" 字段。
 // 用于收敛 handler 中重复的 "slog.Error + writeFail(500) + return" 样板。

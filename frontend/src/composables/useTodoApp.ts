@@ -21,6 +21,13 @@ import { baseName, extFromPath } from '../lib/common'
 export function setupTodoApp() {
     // --- Constants ---
     const STORAGE_KEY_USER = 'workbench-current-user';
+
+    // 新任务 id：UUID 替代 maxId+1 —— 多设备并发新建不再产生重复 id
+    // （历史任务 id 为数字字符串，后端 FlexString 两种形态均兼容）
+    function newTaskId() {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+        return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    }
     const columns = [
         { key: 'todo', label: '待办', icon: '🔴' },
         { key: 'progress', label: '进行中', icon: '🟡' },
@@ -1263,9 +1270,8 @@ export function setupTodoApp() {
         }
         const title = (newTaskForDate.value[dateStr] || '').trim();
         if (!title) return;
-        const maxId = tasks.value.reduce((m, t) => Math.max(m, t.id || 0), 0);
         const task = {
-            id: maxId + 1,
+            id: newTaskId(),
             title,
             status: 'progress',
             priority: 'medium',
@@ -1366,9 +1372,8 @@ export function setupTodoApp() {
         const title = (listNewTitle.value || '').trim();
         if (!title) return;
         const todayStr = formatDate(new Date());
-        const maxId = tasks.value.reduce((m, t) => Math.max(m, t.id || 0), 0);
         const task = {
-            id: maxId + 1,
+            id: newTaskId(),
             title,
             content: '',
             status: 'todo',
@@ -1453,9 +1458,8 @@ export function setupTodoApp() {
             showToast('计划日期不能晚于截止日期', 'error');
             return;
         }
-        const maxId = tasks.value.reduce((m, t) => Math.max(m, t.id || 0), 0);
         const task = {
-            id: maxId + 1,
+            id: newTaskId(),
             title: editingTask.value.title,
             content: editingTask.value.content || '',
             status: editingTask.value.status,

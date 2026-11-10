@@ -194,7 +194,7 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 		{ID: "t1", Title: "first", Status: "todo", SortOrder: 1},
 		{ID: "t2", Title: "second", Status: "done", SortOrder: 2},
 	}
-	if err := d.UpsertTasks(ctx(), orgID, userID, tasks, `{"md5":"abc"}`); err != nil {
+	if _, err := d.UpsertTasks(ctx(), orgID, userID, tasks, `{"md5":"abc"}`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -209,12 +209,21 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 		t.Fatalf("tasks order = %v,%v", got[0].Title, got[1].Title)
 	}
 
-	if err := d.UpsertTasks(ctx(), orgID, userID, []TaskItem{{ID: "t3", Title: "only", SortOrder: 1}}, `{"md5":"def"}`); err != nil {
+	if _, err := d.UpsertTasks(ctx(), orgID, userID, []TaskItem{{ID: "t3", Title: "only", SortOrder: 1}}, `{"md5":"def"}`); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = d.GetTasks(ctx(), orgID, userID)
 	if len(got) != 1 || got[0].ID != "t3" {
 		t.Fatalf("after replace got = %v, want [t3]", got)
+	}
+
+	// revision 乐观锁：每次全量写入后单调递增，GetTasksJSONByOwner 一并带出
+	rev, err := d.GetRevision(ctx(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev < 2 {
+		t.Fatalf("revision = %d, want >= 2 after two upserts", rev)
 	}
 
 	data, err := d.GetTasksJSONByOwner(ctx(), orgID, userID)
@@ -236,6 +245,10 @@ func TestTasks_UpsertReplaceAndVersion(t *testing.T) {
 	if ver["md5"] != "def" {
 		t.Fatalf("version = %v, want def", ver["md5"])
 	}
+	// GetTasksJSONByOwner 必须带出 revision（前端乐观锁基准）
+	if userRev, ok := user["revision"].(int64); !ok || userRev != rev {
+		t.Fatalf("revision in json = %v (ok=%v), want %d", user["revision"], ok, rev)
+	}
 	if ts, ok := user["tasks"].([]TaskItem); !ok || len(ts) != 1 {
 		t.Fatalf("tasks in json = %v", user["tasks"])
 	}
@@ -246,7 +259,7 @@ func TestTasksJSON_EmptyVersionFallback(t *testing.T) {
 	d := newTestDB(t)
 	orgID, _ := d.EnsureOrg(ctx(), "org1")
 	userID, _ := d.UpsertUser(ctx(), orgID, "bob", "h", RoleIDUser)
-	_ = d.UpsertTasks(ctx(), orgID, userID, nil, "")
+	_, _ = d.UpsertTasks(ctx(), orgID, userID, nil, "")
 
 	data, _ := d.GetTasksJSONByOwner(ctx(), orgID, userID)
 	user := data["orgs"].(map[string]map[string]interface{})[strconv.FormatInt(orgID, 10)][strconv.FormatInt(userID, 10)].(map[string]interface{})

@@ -9,7 +9,6 @@ import {
 import { checkAuth, registerTodoAppReset, openTabFn } from '../stores/indexStore'
 import * as taskApi from '../api/tasks'
 import { ElNotification } from 'element-plus'
-import SparkMD5 from 'spark-md5'
 import { useRouter } from 'vue-router'
 import { baseName, extFromPath } from '../lib/common'
 
@@ -1015,6 +1014,7 @@ export function setupTodoApp() {
         showToast('已导出 JSON', 'success');
     }
 
+    // 导入 JSON：合并语义——服务器已有的（同 id）跳过，新任务逐条 POST 上传
     function importJSON() {
         const input = document.createElement('input');
         input.type = 'file';
@@ -1023,13 +1023,25 @@ export function setupTodoApp() {
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = (ev) => {
+            reader.onload = async (ev) => {
                 try {
                     const data = JSON.parse(ev.target.result);
-                    const unwrapped = unwrapData(data);
-                    tasks.value = unwrapped.tasks;
-                    saveLocal();
-                    showToast('导入成功', 'success');
+                    // 兼容两种导出格式：{tasks:[...]} 包装 或 纯任务数组
+                    const imported = Array.isArray(data) ? data : (Array.isArray(data?.tasks) ? data.tasks : null);
+                    if (!imported) throw new Error('无法识别的格式（需要任务数组）');
+                    const existing = new Set(tasks.value.map(t => String(t.id)));
+                    const fresh = imported.filter(t => t && t.id && !existing.has(String(t.id)));
+                    if (!fresh.length) {
+                        showToast('导入的任务都已存在，未新增', 'info');
+                        return;
+                    }
+                    for (const t of fresh) {
+                        tasks.value.push(t);
+                    }
+                    for (const t of fresh) {
+                        await applyMutation('POST', t, []);
+                    }
+                    showToast(`导入成功，新增 ${fresh.length} 条（跳过 ${imported.length - fresh.length} 条已存在）`, 'success');
                 } catch (err) {
                     showToast('导入失败: ' + err.message, 'error');
                 }
@@ -1059,7 +1071,12 @@ export function setupTodoApp() {
             return;
         }
         if (!confirm(`确定要清空「${userName}」的所有任务（共 ${userTasks.length} 项）吗？此操作不可撤销！`)) return;
+        // 先记录待删 id（filter 之后原数组引用变化），再逐条同步服务器
+        const removedIds = userTasks.map(t => t.id);
         tasks.value = tasks.value.filter(t => t.assignee !== userKey);
+        for (const id of removedIds) {
+            applyMutation('DELETE', { id }, []);
+        }
         saveLocal();
         showToast(`已清空「${userName}」的 ${userTasks.length} 项任务`, 'warning');
     }
@@ -1202,7 +1219,7 @@ export function setupTodoApp() {
         confirmTask, addTaskToCalendar,
         changeWeek, goToThisWeek,
         addTask, editTask, saveEdit, deleteTask, confirmCreate,
-        exportJSON, importJSON, saveToFile, clearAll, save,
+        exportJSON, importJSON, saveToFile, clearAll, saveLocal,
         // Date range picker
         editingDateRange, onEditingDateRangeChange,
         editingTaskContent,

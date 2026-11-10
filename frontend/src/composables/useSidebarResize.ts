@@ -14,8 +14,8 @@ function save(w: number, c: boolean) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ width: w, collapsed: c })) } catch {}
 }
 
-// 移动端断点（与 style.css 的 @media (max-width: 768px) 保持一致）
-const MOBILE_QUERY = '(max-width: 768px)'
+// 移动端断点（与 style.css 的 @media (max-width: 900px) 保持一致）
+const MOBILE_QUERY = '(max-width: 900px)'
 
 function isMobileViewport(): boolean {
   return typeof window !== 'undefined' && typeof window.matchMedia === 'function'

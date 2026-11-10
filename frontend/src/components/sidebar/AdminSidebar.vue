@@ -168,4 +168,11 @@ onMounted(() => {
   background: var(--code-bg);
   color: var(--text-dim);
 }
+
+/* 移动端（≤900px）：抽屉内触屏行高加大 */
+@media (max-width: 900px) {
+  .user-item { padding: 9px 12px; }
+  .user-name { font-size: 13px; }
+  .user-sub { font-size: 11px; }
+}
 </style>

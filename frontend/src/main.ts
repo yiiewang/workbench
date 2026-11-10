@@ -6,5 +6,7 @@ import App from './App.vue'
 import router from './router'
 import './styles/style.css'
 import './styles/todo.css'
+import './styles/ai-chat.css'
+import './styles/mobile.css'
 
 createApp(App).use(ElementPlus).use(router).mount('#app')

@@ -630,6 +630,29 @@ async function onDelete() {
 
 /* 弹窗 */
 .admin-modal { width: 400px; max-width: 92vw; }
+
+/* ===== 移动端（≤900px，与全局断点同步）：看板纵向堆叠，触屏友好 ===== */
+@media (max-width: 900px) {
+  .admin-board { padding: 8px; }
+  .board { grid-template-columns: 1fr; gap: 10px; }
+  /* 左侧概览横排：头像 + 信息 + 操作按钮一行 */
+  .board-left { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px; }
+  .avatar { margin: 0; width: 44px; height: 44px; font-size: 18px; }
+  .overview-meta { text-align: left; flex: 1; min-width: 140px; }
+  .ov-name { justify-content: flex-start; font-size: 15px; }
+  .overview-actions { flex-direction: row; margin-top: 0; margin-left: auto; }
+  .overview-actions .btn { width: auto; padding: 5px 12px; font-size: 12px; }
+  /* 统计 4 → 2 列，功能配置 2 → 1 列 */
+  .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .stat-num { font-size: 18px; }
+  .features-list { grid-template-columns: 1fr; }
+}
+@media (max-width: 540px) {
+  /* 窄屏：操作按钮占满整行 */
+  .overview-actions { width: 100%; margin-left: 0; }
+  .overview-actions .btn { flex: 1; }
+  .admin-modal { width: 100vw; max-width: 100vw; }
+}
 .form-row {
   display: flex;
   align-items: center;

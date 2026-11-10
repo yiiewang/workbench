@@ -1,0 +1,81 @@
+/* 移动端视图公共样式：views/mobile/* 各页面共用（页面容器/顶栏/列表行/空态），
+   各页 scoped 样式只保留差异化部分。 */
+
+/* 页面容器：居中限宽 + 全高 flex 列 */
+.m-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+/* 顶栏：返回 + 标题（+ 右侧自定义内容） */
+.m-page-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.m-back-btn {
+  display: flex;
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 4px;
+}
+.m-back-btn svg { width: 20px; height: 20px; }
+.m-page-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 列表容器与行 */
+.m-list { flex: 1; min-height: 0; overflow-y: auto; }
+.m-list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.m-list-row:active { background: var(--hover); }
+.m-row-icon { display: flex; width: 18px; height: 18px; color: var(--text-dim); flex-shrink: 0; }
+.m-row-icon.dir { color: var(--dir-color, #dcb67a); }
+.m-row-icon svg { width: 100%; height: 100%; }
+.m-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.m-row-size { flex-shrink: 0; font-size: 12px; color: var(--text-muted); }
+.m-row-arrow { width: 16px; height: 16px; color: var(--text-muted); flex-shrink: 0; }
+
+/* 空态/错误态 */
+.m-page-empty {
+  padding: 40px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.m-page-empty.is-error { color: #cf222e; }

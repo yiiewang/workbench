@@ -1,12 +1,21 @@
 <script setup lang="ts">
 // 右下角悬浮目录：点图标展开标题列表，点击即定位（fixed 定位，不占正文宽度）
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue'
 import { scrollToId, type MdHeading } from '../../lib/markdownFold'
 
 const props = defineProps<{ outline: MdHeading[]; root: HTMLElement | null }>()
 
 const open = ref(false)
 const activeId = ref('')
+
+// KeepAlive 失活时隐藏：所属页面（IndexView 等）被缓存不卸载，
+// Teleport 到 fab-dock 的按钮会残留到其他路由，需按激活态显隐
+const activated = ref(true)
+onActivated(() => { activated.value = true })
+onDeactivated(() => {
+  activated.value = false
+  open.value = false
+})
 
 function toggle() {
   open.value = !open.value
@@ -64,43 +73,45 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="outline.length" class="md-toc">
-    <button
-      class="md-toc-fab"
-      :class="{ active: open }"
-      type="button"
-      title="目录"
-      aria-label="目录"
-      @click.stop="toggle"
-    >
-      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-        <path d="M2.5 4h11M2.5 8h11M2.5 12h7" />
-      </svg>
-    </button>
+  <!-- 悬浮按钮统一挂到全局 fab-dock 容器（见 DefaultLayout），布局与避让由 dock 负责 -->
+  <Teleport to="#fab-dock">
+    <div v-if="activated && outline.length" class="md-toc">
+      <button
+        class="md-toc-fab"
+        :class="{ active: open }"
+        type="button"
+        title="目录"
+        aria-label="目录"
+        @click.stop="toggle"
+      >
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <path d="M2.5 4h11M2.5 8h11M2.5 12h7" />
+        </svg>
+      </button>
 
-    <div v-show="open" class="md-toc-panel" @click.stop>
-      <div class="md-toc-head">目录</div>
-      <div class="md-toc-list">
-        <a
-          v-for="(h, i) in outline"
-          :key="h.id + '-' + i"
-          class="md-toc-item"
-          :class="[`lv-${h.level}`, { active: h.id === activeId }]"
-          :href="`#${h.id}`"
-          :title="h.text"
-          @click.prevent="goTo(h)"
-        >{{ h.text }}</a>
+      <div v-show="open" class="md-toc-panel" @click.stop>
+        <div class="md-toc-head">目录</div>
+        <div class="md-toc-list">
+          <a
+            v-for="(h, i) in outline"
+            :key="h.id + '-' + i"
+            class="md-toc-item"
+            :class="[`lv-${h.level}`, { active: h.id === activeId }]"
+            :href="`#${h.id}`"
+            :title="h.text"
+            @click.prevent="goTo(h)"
+          >{{ h.text }}</a>
+        </div>
       </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <style scoped>
+/* dock 条目：相对定位供面板锚定；order 控制在 dock 中的叠放位（AI 按钮在上） */
 .md-toc {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 60;
+  position: relative;
+  order: 20;
 }
 
 .md-toc-fab {
@@ -126,7 +137,7 @@ onUnmounted(() => {
 .md-toc-panel {
   position: absolute;
   right: 0;
-  bottom: 48px;
+  bottom: calc(100% + 10px);
   width: 280px;
   max-width: calc(100vw - 48px);
   max-height: 50vh;
@@ -181,11 +192,4 @@ onUnmounted(() => {
 .md-toc-item.lv-4 { padding-left: 48px; }
 .md-toc-item.lv-5 { padding-left: 60px; }
 .md-toc-item.lv-6 { padding-left: 72px; }
-
-@media (max-width: 768px) {
-  .md-toc {
-    right: 16px;
-    bottom: 16px;
-  }
-}
 </style>

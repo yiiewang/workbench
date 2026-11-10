@@ -30,13 +30,21 @@ Then open http://localhost:80 in your browser.
 
 ## First-time Setup (Admin Initialization)
 
-On first launch the `users` table is empty. The **first user to set a password automatically becomes the super admin** and gains access to the User Management panel:
+On first launch the `users` table is empty. The **first user to set a password automatically becomes the super admin** and gains access to the User Management panel.
 
-```bash
-curl -s -X POST http://localhost/api/set-password \
-  -H "Content-Type: application/json" \
-  -d '{"orgId":"cm","userId":"yiiewang","newPassword":"your-password"}'
-```
+> **Secure the init window**: between deployment and first registration, anyone who can reach the server can claim the super admin. Set a one-time bootstrap token before first launch — the first registration must then present it:
+>
+> ```bash
+> export ADMIN_SETUP_TOKEN=$(openssl rand -hex 16)   # remember this value
+> make run
+>
+> # First registration (setupToken required only while no user exists; useless afterwards)
+> curl -s -X POST http://localhost/api/set-password \
+>   -H "Content-Type: application/json" \
+>   -d '{"orgId":"cm","userId":"yiiewang","newPassword":"your-password","setupToken":"<the-value>"}'
+> ```
+>
+> Without `ADMIN_SETUP_TOKEN`, behavior falls back to first-come-first-admin and a warning is logged at startup. The token is only checked while the user table is empty.
 
 > `orgId` is required at registration (it records which org the user belongs to). At **login** time, `orgId` is optional — usernames are globally unique, so you can sign in with just `userId` + `password`.
 
@@ -61,7 +69,7 @@ database:
   path: ./data/workbench.db   # SQLite file path
 
 auth:
-  token_expiry_days: 30       # Token validity
+  token_expiry_days: 7        # Token validity (keep short; leaked tokens self-expire sooner)
 
 routes:                       # URL routing
   "/todo": "/todo.html"       # 302 redirect
@@ -71,6 +79,11 @@ routes:                       # URL routing
 logging:
   dir: ~/.local/state/workbench  # Access log directory
   level: info                    # Operational log level: debug | info | warn | error (structured JSON to stdout)
+
+ai:                            # AI chat (OpenAI-compatible), disabled unless api_key + base_url are set
+  base_url: https://api.openai.com/v1
+  api_key: ""                  # keep empty in the file — inject via AI_API_KEY env instead; never commit real keys
+  model: gpt-4o-mini
 ```
 
 ### Environment Variables
@@ -82,12 +95,18 @@ logging:
 | `DB_PATH` | `database.path` | SQLite database path |
 | `LOG_DIR` | `logging.dir` | Access log directory |
 | `ALLOW_SYMLINK` | `server.allow_symlink` | Set `true` or `1` to allow symlink access outside static_dir |
+| `AI_BASE_URL` | `ai.base_url` | OpenAI-compatible endpoint base URL |
+| `AI_API_KEY` | `ai.api_key` | AI provider API key (server-side only; prefer env over config file) |
+| `AI_MODEL` | `ai.model` | Chat model name |
+| `ADMIN_SETUP_TOKEN` | `auth.admin_setup_token` | One-time bootstrap token required by the first admin registration (only checked while no user exists) |
 
 ## Features
 
 - **File Browser** — Directory tree, tabbed editor, syntax highlighting for code/markdown/JSON
 - **Markdown Viewer** — Rendered markdown with Mermaid diagrams, cross-file link navigation, anchor scrolling
 - **JSON Viewer** — Collapsible tree view, raw text toggle, copy raw to clipboard
+- **AI Chat** — OpenAI-compatible chat panel (bottom-right), `@` file references, reasoning display, session history persisted in SQLite
+- **Todo ↔ File Linking** — Tasks can link files (tree picker in todo editor); the file viewer shows linked tasks with jump-to-task and link-existing-task actions
 - **Download & Share** — Download any file; create time-limited, access-controlled shares for files or folders
 - **Static File Serving** — HTML, Markdown, JSON, CSS, JS, images with path traversal protection
 - **Route Mapping** — Clean URLs, display name aliases, redirects, directory listings
@@ -146,12 +165,39 @@ SQLite database (`data/workbench.db`, WAL mode):
 | `shares` | Resource shares with access count, time range, password protection |
 | `app_secrets` | Application secrets (token signing key, etc.) |
 
+## Deployment (Public Server)
+
+When exposing Workbench beyond localhost, put a reverse proxy in front and never expose the backend directly:
+
+```
+client ──HTTPS──> nginx (443, TLS) ──HTTP──> workbench (127.0.0.1:8001)
+```
+
+- **Bind the backend to loopback only** — the only public ports should be 80/443 on the proxy. Otherwise the backend serves plaintext and bypasses TLS entirely.
+- **TLS**: on a server without a domain (bare IP), Let's Encrypt issues IP-address certificates via the `shortlived` profile (~6-day validity, auto-renewed):
+  ```bash
+  acme.sh --issue -d <server-ip> --webroot <acme-webroot> --cert-profile shortlived
+  acme.sh --install-cert -d <server-ip> \
+    --key-file <ssl-dir>/ip.key --fullchain-file <ssl-dir>/ip.crt \
+    --reloadcmd "nginx -s reload"
+  ```
+  Mainland-China note: an unregistered (未备案) server typically gets TCP-through-TLS-reset on port 443 — verify your provider allows it, and make sure the security group actually opens 443.
+- **Proxy settings that matter**:
+  ```nginx
+  client_max_body_size 512m;      # match the workbench upload limit (512MB)
+  proxy_buffering off;            # required for SSE streaming (/api/ai/chat)
+  proxy_read_timeout 3600s;
+  ```
+- **Never commit real secrets** (AI keys, bootstrap tokens) to the repository — inject them through environment variables. If a key ever lands in git history, treat it as leaked: revoke it at the provider, then rewrite history.
+
 ## Security
 
 - **Path Traversal Protection** — `safeJoin` blocks `../` attacks (literal and URL-encoded)
 - **Symlink Guard** — Default `allow_symlink: false` resolves symlinks and verifies real path stays within `static_dir`
 - **CORS for Sandboxed iframe** — Preview iframe uses `sandbox` without `allow-same-origin`; API responses include `Access-Control-Allow-Origin: null` to allow script execution without token leakage
 - **Token Auth** — Bearer token (HMAC-SHA256), not stored in cookies; write operations require valid token
+- **Short Token Lifetime** — `token_expiry_days: 7` by default; leaked tokens self-expire quickly and cannot be revoked individually (re-issue requires rotating the signing secret)
+- **Admin Init Guard** — First registration requires a one-time `ADMIN_SETUP_TOKEN` when configured (constant-time compare), closing the deployment-to-registration race window
 
 ## Directory Structure
 

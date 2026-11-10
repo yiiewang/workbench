@@ -83,6 +83,15 @@ func run() error {
 		return fmt.Errorf("load token secret: %w", err)
 	}
 
+	// 首次初始化安全告警：系统尚无任何用户且未配置引导码时，第一个 set-password
+	// 的访问者将成为超管（抢占窗口）。提示用 ADMIN_SETUP_TOKEN 关闭该窗口。
+	if cfg.Auth.AdminSetupToken == "" {
+		if hasUsers, err := database.HasAnyUser(context.Background()); err == nil && !hasUsers {
+			slog.Warn("ADMIN_SETUP_TOKEN not set: first caller of /api/set-password becomes super admin. " +
+				"Set ADMIN_SETUP_TOKEN env (e.g. `openssl rand -hex 16`) before first launch to close this window.")
+		}
+	}
+
 	logFile := filepath.Join(logDir, "preview.log")
 
 	// 初始化 HTTP Server

@@ -1,4 +1,4 @@
-import { base64ToBytes, isBinaryExt } from '../lib/common'
+import { base64ToBytes, isBinaryExt, extFromPath } from '../lib/common'
 import { shareRootPath } from '../stores/indexStore'
 import * as fileApi from '../api/files'
 import * as shareApi from '../api/share'
@@ -23,6 +23,13 @@ export const dataSource = {
     return fileApi.getTree(path)
   },
 
+  // 媒体流式播放地址（短时效 ticket）+ 文件大小。分享模式没有对应端点，返回 null，
+  // 由 FileViewer 回退到 blob 播放（整文件入内存）。
+  async getMediaTicket(path: string): Promise<{ url: string; size: number } | null> {
+    if (this.mode === 'share') return null
+    return fileApi.getMediaTicket(path)
+  },
+
   async getFile(path: string) {
     if (this.mode === 'share') {
       // token 已唯一确定 share.ResourcePath：
@@ -41,7 +48,7 @@ export const dataSource = {
     }
     const safePath = String(path || '')
     const name = safePath.split('/').pop() || 'file'
-    const ext = (name.split('.').pop() || '').toLowerCase()
+    const ext = extFromPath(name)
     return {
       name, ext, size: 0, isBinary: isBinaryExt(ext),
       text: () => fileApi.getFile(safePath).then(r => r.text()),

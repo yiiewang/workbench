@@ -116,6 +116,31 @@ ai:                            # AI chat (OpenAI-compatible), disabled unless ap
 - **Share Management** — Create shares with access count limits, time ranges, optional passwords; manage all shares from sidebar panel
 - **Todo Board** — User/org task management with conflict detection, version sync, multi-device support
 - **SQLite Storage** — All data in a single portable `workbench.db` file (WAL mode)
+
+### Feature Matrix (Desktop vs Mobile)
+
+The mobile UI (`/m/*`, auto-served on viewports ≤900px) is a separate, browse-first view set that shares all business logic with the desktop UI. Complex management flows stay desktop-only by design.
+
+| Capability | Desktop | Mobile |
+|---|:---:|:---:|
+| File browsing (tree / directory drill-down) | ✅ full sidebar tree + tabs | ✅ single-level drill-down list |
+| File preview (markdown / code / image / audio / video) | ✅ | ✅ same viewer components |
+| File upload | ✅ drag & drop / context menu | ✅ (from file picker) |
+| File management (create / rename / move / delete) | ✅ | — |
+| Multi-tab editor | ✅ | — |
+| Markdown TOC (heading navigation) | ✅ | — |
+| AI chat (streaming, `@` file references, reasoning, history) | ✅ floating panel | ✅ full-screen page |
+| AI message actions (copy / regenerate / save as file) | ✅ | ✅ |
+| AI document summary (one-click) | ✅ tab-bar button | — |
+| Todo: view tasks | ✅ quadrant / board / calendar | ✅ status-grouped list |
+| Todo: edit tasks | ✅ full editor | ✅ status toggle / check |
+| Todo: create / delete tasks, quadrant & calendar views | ✅ | — |
+| Todo ↔ file linking | ✅ picker + reverse-link | ✅ view links, open files |
+| Share creation & management | ✅ | — |
+| Share consumption (opening a shared link) | ✅ | ✅ dedicated mobile view |
+| User management (admin) | ✅ | — |
+| Organization switching | ✅ | ✅ profile page |
+| Login / logout | ✅ | ✅ |
 - **CORS Security** — Sandboxed iframe preview with null-origin CORS (no token leakage)
 
 ## API Endpoints

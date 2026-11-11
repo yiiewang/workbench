@@ -6,7 +6,7 @@ import { loggedIn, currentUser } from '../stores/auth'
 import {
   getAIStatus, chatStream,
   listAISessions, getAISession, createAISession, updateAISession, deleteAISession,
-  type ChatMessage, type AISessionSummary,
+  type ChatMessage, type AISessionSummary, type AiPayloadMessage,
 } from '../api/ai'
 import { getFile, createDir, uploadFiles } from '../api/files'
 import { showToast, isBinaryExt, extFromPath, copyToClipboard } from '../lib/common'
@@ -215,8 +215,38 @@ export function useAIChat(onScrollBottom?: () => void) {
     await streamReply(userMsg)
   }
 
+  // 展示态消息 → 上游 payload 消息：
+  // 带工具调用的 assistant 消息展开为 assistant(tool_calls) + 逐条 tool(结果)，
+  // 模型多轮决策需要看到自己调过什么、拿到了什么结果。
+  function toPayloadMessages(msgs: ChatMessage[]): AiPayloadMessage[] {
+    const out: AiPayloadMessage[] = []
+    for (const m of msgs) {
+      if (m.role === 'assistant' && m.toolCalls?.length) {
+        out.push({
+          role: 'assistant',
+          content: m.content || '',
+          tool_calls: m.toolCalls.map(t => ({
+            id: t.id,
+            type: 'function' as const,
+            function: { name: t.name, arguments: t.arguments },
+          })),
+        })
+        for (const t of m.toolCalls) {
+          out.push({
+            role: 'tool',
+            tool_call_id: t.id,
+            content: JSON.stringify(t.result ?? { error: 'no result' }),
+          })
+        }
+      } else {
+        out.push({ role: m.role, content: m.content })
+      }
+    }
+    return out
+  }
+
   async function streamReply(userMsg: ChatMessage) {
-    const reply: ChatMessage = { role: 'assistant', content: '', reasoning: '' }
+    const reply: ChatMessage = { role: 'assistant', content: '', reasoning: '', toolCalls: [] }
     messages.value.push(reply)
     streaming.value = true
     scrollBottom()
@@ -228,8 +258,8 @@ export function useAIChat(onScrollBottom?: () => void) {
     const question = ctxText
       ? `【引用文件内容】\n${ctxText}\n【引用文件结束】\n\n我的问题：${userMsg.content}`
       : userMsg.content
-    const payload: ChatMessage[] = [
-      ...history,
+    const payload: AiPayloadMessage[] = [
+      ...toPayloadMessages(history),
       { role: 'user', content: question },
     ]
     try {
@@ -244,6 +274,17 @@ export function useAIChat(onScrollBottom?: () => void) {
         },
         onDelta: (delta) => {
           reply.content += delta
+          scrollBottom()
+          throttledPersist()
+        },
+        onToolCall: (tc) => {
+          reply.toolCalls = reply.toolCalls || []
+          reply.toolCalls.push({ id: tc.id, name: tc.name, arguments: tc.arguments })
+          scrollBottom()
+        },
+        onToolResult: (tr) => {
+          const tc = reply.toolCalls?.find(t => t.id === tr.id)
+          if (tc) tc.result = tr.result
           scrollBottom()
           throttledPersist()
         },

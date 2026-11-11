@@ -53,6 +53,10 @@ type AIConfig struct {
 	BaseURL string `yaml:"base_url"` // 兼容端点，如 https://api.openai.com/v1
 	APIKey  string `yaml:"api_key"`  // 后端持有，不下发前端
 	Model   string `yaml:"model"`    // 模型名，如 gpt-4o-mini
+	// Tools 开启 AI 工具调用（Agent 模式）：模型可调用 list_dir / read_file /
+	// list_tasks / create_task 四个内置工具，由后端执行并回传结果。
+	// 要求上游模型支持 function calling。Env: AI_TOOLS=true 开启
+	Tools bool `yaml:"tools"`
 }
 
 // Enabled AI 功能是否可用（key + base_url 均已配置才视为开启）
@@ -147,6 +151,9 @@ func mergeConfig(dst, src *Config) {
 	if src.AI.Model != "" {
 		dst.AI.Model = src.AI.Model
 	}
+	if src.AI.Tools {
+		dst.AI.Tools = true
+	}
 	if src.Routes != nil {
 		dst.Routes = src.Routes
 	}
@@ -195,5 +202,9 @@ func ApplyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("AI_MODEL"); v != "" {
 		cfg.AI.Model = v
+	}
+	// AI_TOOLS=true 开启工具调用（Agent 模式），默认关闭保持纯对话行为
+	if v := os.Getenv("AI_TOOLS"); v == "true" || v == "1" {
+		cfg.AI.Tools = true
 	}
 }

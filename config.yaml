@@ -49,3 +49,7 @@ ai:
   base_url: https://tokenlink.woa.com/openapi/v1/chat/completions  # DeepSeek: https://api.deepseek.com/v1；Ollama: http://localhost:11434/v1
   api_key: ""  # 留空 = 关闭 AI 功能；凭据一律走环境变量 AI_API_KEY
   model: hy4
+  # 工具调用（Agent 模式）：模型可调 list_dir / read_file / list_tasks / create_task，
+  # 由后端执行并把结果回传模型循环决策；要求模型支持 function calling。
+  # 默认关闭保持纯对话；环境变量 AI_TOOLS=true 开启
+  tools: true

@@ -6,6 +6,7 @@ import { loggedIn } from '../../stores/auth'
 import { showToast } from '../../lib/common'
 import { useAIChat } from '../../composables/useAIChat'
 import FilePickerModal from '../modal/FilePickerModal.vue'
+import ToolCallList from './ToolCallList.vue'
 
 const listEl = ref<HTMLElement | null>(null)
 
@@ -205,6 +206,8 @@ function onResizeStart(e: MouseEvent) {
           <!-- 气泡：assistant 走 markdown 渲染，user 纯文本 -->
           <div class="ai-bubble" :class="m.role">
             <template v-if="m.role === 'assistant'">
+              <!-- 工具调用（Agent 模式）：每次调用一张可折叠卡片 -->
+              <ToolCallList v-if="m.toolCalls?.length" :calls="m.toolCalls" />
               <!-- 思考过程（推理模型）：默认折叠，流式中标题显示"思考中…" -->
               <div v-if="m.reasoning" class="ai-reasoning">
                 <button class="ai-reasoning-toggle" @click="toggleReasoning(i)">

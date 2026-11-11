@@ -4,6 +4,7 @@
 import { ref, nextTick, onMounted } from 'vue'
 import { useAIChat } from '../../composables/useAIChat'
 import FilePickerModal from '../../components/modal/FilePickerModal.vue'
+import ToolCallList from '../../components/ai/ToolCallList.vue'
 
 const listEl = ref<HTMLElement | null>(null)
 
@@ -124,6 +125,7 @@ onMounted(() => {
 
         <div class="ai-bubble" :class="m.role">
           <template v-if="m.role === 'assistant'">
+            <ToolCallList v-if="m.toolCalls?.length" :calls="m.toolCalls" />
             <div v-if="m.reasoning" class="ai-reasoning">
               <button class="ai-reasoning-toggle" @click="toggleReasoning(i)">
                 {{ openReasoning.has(i) ? '收起思考' : (isStreamingTail(i) && !m.content ? '思考中…' : '思考过程') }}

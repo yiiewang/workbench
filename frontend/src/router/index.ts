@@ -122,6 +122,7 @@ const MOBILE_TO_PC: Record<string, string> = {
   '/m': '/',
   '/m/files': '/file',
   '/m/todo': '/todo',
+  '/jobs': '/jobs',
   '/m/ai': '/',
   '/m/profile': '/',
 }

@@ -296,6 +296,7 @@ export default {
                                 <el-date-picker v-model="editingDateRange" type="datetimerange"
                                     range-separator="至" start-placeholder="计划" end-placeholder="截止"
                                     format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DD HH:mm" size="default"
+                                    style="width: 100%"
                                     @change="onEditingDateRangeChange"></el-date-picker>
                             </div>
                             <div class="form-field" v-if="!isCreating">

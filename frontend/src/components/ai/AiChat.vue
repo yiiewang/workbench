@@ -63,9 +63,30 @@ function onExternalOpen() {
 
 // ---- 消息目录刻度：跳转 + 摘要预览 + 滚动律动 ----
 const tocHover = ref(-1)
+const tocVisible = ref(false)
+const tocTipStyle = ref<Record<string, string>>({})
 // 当前视口对应的消息索引：刻度条随滚动实时高亮（律动跟随）
 const activeToc = ref(0)
 let tocRaf = 0
+
+// hover 期间 tip 常驻：切换条目只更新内容与垂直位置（水平位置固定在
+// 目录列右缘——不随条宽左右跳动），tip 垂直居中于选中条目
+function onTocEnter(i: number, e: MouseEvent) {
+  tocHover.value = i
+  const item = (e.currentTarget as HTMLElement)
+  const toc = item.parentElement
+  const itemR = item.getBoundingClientRect()
+  const tocR = toc?.getBoundingClientRect()
+  const centerY = itemR.top + itemR.height / 2
+  const left = (tocR ? tocR.right : itemR.right) + 10
+  const top = Math.max(30, Math.min(centerY, window.innerHeight - 60))
+  tocTipStyle.value = { left: left + 'px', top: top + 'px' }
+}
+
+function onTocLeave() {
+  tocVisible.value = false
+  tocHover.value = -1
+}
 
 function jumpTo(i: number) {
   listEl.value?.querySelector(`[data-idx="${i}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -92,9 +113,9 @@ function onListScroll() {
 
 // 刻度条宽度：活跃条最长最显眼，相邻按距离衰减（律动），其余基础长
 function tocBarStyle(m: { content: string }, i: number) {
-  if (i === activeToc.value) return { width: '38px' }
+  if (i === activeToc.value) return { width: '28px' }
   const d = Math.abs(i - activeToc.value)
-  const w = Math.max(8, 20 - d * 4)
+  const w = Math.max(8, 18 - d * 4)
   return { width: w + 'px' }
 }
 
@@ -107,12 +128,10 @@ function tocSummary(m: { role: string; content: string; toolCalls?: readonly unk
 onMounted(() => {
   window.addEventListener('workbench:ai-ask', onExternalAsk as EventListener)
   window.addEventListener('workbench:ai-open', onExternalOpen)
-  listEl.value?.addEventListener('scroll', onListScroll, { passive: true })
 })
 onUnmounted(() => {
   window.removeEventListener('workbench:ai-ask', onExternalAsk as EventListener)
   window.removeEventListener('workbench:ai-open', onExternalOpen)
-  listEl.value?.removeEventListener('scroll', onListScroll)
   if (tocRaf) cancelAnimationFrame(tocRaf)
 })
 
@@ -215,22 +234,33 @@ function onResizeStart(e: MouseEvent) {
       </div>
 
       <!-- 消息目录刻度（固定于消息区左缘，不随滚动移动；滚动时律动跟随） -->
-      <div v-if="messages.length > 6 && !sessionsOpen" class="ai-toc">
+      <div
+        v-if="messages.length > 6 && !sessionsOpen"
+        class="ai-toc"
+        @mouseenter="tocVisible = true"
+        @mouseleave="onTocLeave"
+      >
         <div
           v-for="(m, i) in visibleMessages"
           :key="'toc' + i"
           class="ai-toc-item"
           :class="{ active: i === activeToc }"
           @click="jumpTo(i)"
-          @mouseenter="tocHover = i"
-          @mouseleave="tocHover = -1"
+          @mouseenter="onTocEnter(i, $event)"
         >
           <span class="ai-toc-bar" :class="m.role" :style="tocBarStyle(m, i)"></span>
-          <div v-if="tocHover === i" class="ai-toc-tip">{{ tocSummary(m) }}</div>
         </div>
       </div>
+      <!-- 摘要卡：Teleport 到 body，fixed 定位（不受 toc 容器 overflow 裁剪）；
+           hover 期间常驻，切换条目只更新内容与位置（不闪烁） -->
+      <Teleport to="body">
+        <div v-if="tocVisible && tocHover >= 0 && visibleMessages[tocHover]" class="ai-toc-tip" :style="tocTipStyle">
+          <div class="ai-toc-tip-title">{{ visibleMessages[tocHover].role === 'user' ? '我的提问' : 'AI 回复' }}</div>
+          <div class="ai-toc-tip-body">{{ tocSummary(visibleMessages[tocHover]) }}</div>
+        </div>
+      </Teleport>
 
-      <div v-show="!sessionsOpen" ref="listEl" class="ai-list">
+      <div v-show="!sessionsOpen" ref="listEl" class="ai-list" @scroll.passive="onListScroll">
         <button v-if="hiddenCount" class="ai-load-more" @click="showMore">
           加载更早的 {{ hiddenCount }} 条消息
         </button>
@@ -392,55 +422,68 @@ function onResizeStart(e: MouseEvent) {
   overflow: hidden;
 }
 
-/* ---- 消息目录刻度：固定在消息区左缘，hover 预览摘要，点击跳转 ---- */
+/* ---- 消息目录刻度：固定在消息区左缘，hover 预览摘要（Teleport body），点击跳转 ---- */
 .ai-toc {
   position: absolute;
-  left: 2px;
+  left: 0;
   top: 48px;
   bottom: 106px;
-  width: 18px;
+  width: 48px; /* 容纳最长活跃条（38px）不裁圆角 */
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  justify-content: center; /* 刻度组垂直居中 */
+  align-items: flex-start; /* 条左对齐：贴分隔线向右伸展 */
   gap: 3px;
+  padding: 2px 5px;
   overflow: hidden auto;
   z-index: 2;
 }
 .ai-toc-item {
-  position: relative;
   display: flex;
   align-items: center;
-  padding: 1px 2px;
   cursor: pointer;
   flex-shrink: 0;
 }
 .ai-toc-bar {
-  height: 3px;
+  height: 4px;
   border-radius: 2px;
   background: var(--border);
+  opacity: .9;
   transition: background .15s, width .15s;
 }
-.ai-toc-item:hover .ai-toc-bar { background: var(--accent); }
+.ai-toc-item:hover .ai-toc-bar { background: var(--accent); opacity: 1; }
 .ai-toc-item.active .ai-toc-bar { background: var(--text); opacity: 1; }
-.ai-toc-bar.user { background: var(--accent); opacity: .45; }
+.ai-toc-bar.user { background: var(--accent); opacity: .5; }
 .ai-toc-item:hover .ai-toc-bar.user { opacity: 1; }
 .ai-toc-tip {
-  position: absolute;
-  left: 20px;
-  top: -10px;
-  width: 260px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
-  padding: 9px 11px;
+  position: fixed;
+  transform: translateY(-50%); /* 垂直居中于选中条目 */
+  max-width: 300px;
+  background: #1c2127;
+  color: #e8eaed;
+  border-radius: 8px;
+  padding: 9px 12px;
   font-size: 12px;
-  line-height: 1.5;
-  color: var(--text);
+  line-height: 1.55;
   white-space: normal;
   word-break: break-all;
-  z-index: 3;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .28);
+  z-index: 9999;
+  /* 出现时淡入；hover 切换条目时仅垂直平滑跟随（水平固定不跳动） */
+  animation: toc-tip-in .15s ease-out;
+  transition: left .12s ease-out, top .12s ease-out;
 }
+@keyframes toc-tip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.ai-toc-tip-title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 3px;
+  color: #fff;
+}
+.ai-toc-tip-body { color: #b8bfc7; }
 
 /* 左缘拖拽调宽：默认隐形细条，hover/拖拽时淡显居中线 */
 .ai-resizer {
@@ -592,7 +635,7 @@ function onResizeStart(e: MouseEvent) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 14px 14px 24px;
+  padding: 14px 14px 14px 52px;
   display: flex;
   flex-direction: column;
   gap: 14px;

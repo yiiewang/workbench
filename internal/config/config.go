@@ -12,12 +12,40 @@ import (
 
 // Config 应用总配置
 type Config struct {
-	Server  ServerConfig      `yaml:"server"`
-	DB      DBConfig          `yaml:"database"`
-	Auth    AuthConfig        `yaml:"auth"`
-	Routes  map[string]string `yaml:"routes"`
-	Logging LogConfig         `yaml:"logging"`
-	AI      AIConfig          `yaml:"ai"`
+	Server   ServerConfig      `yaml:"server"`
+	DB       DBConfig          `yaml:"database"`
+	Auth     AuthConfig        `yaml:"auth"`
+	Routes   map[string]string `yaml:"routes"`
+	Logging  LogConfig         `yaml:"logging"`
+	AI       AIConfig          `yaml:"ai"`
+	Schedule ScheduleConfig    `yaml:"schedule"`
+	Notify   NotifyConfig      `yaml:"notify"`
+}
+
+// ScheduleConfig 定时调度配置（schedule 包：cron 引擎 + 事件总线）
+type ScheduleConfig struct {
+	// Enabled 开启定时任务（关闭 = 调度器不启动，不影响其他功能）
+	Enabled bool `yaml:"enabled"`
+	// Timezone cron 表达式求值时区（IANA 名，如 Asia/Shanghai；缺省 UTC）
+	Timezone string `yaml:"timezone"`
+	// TodoDueCron 到期扫描 cron 表达式（5 段），缺省 "*/5 * * * *"
+	TodoDueCron string `yaml:"todo_due_cron"`
+}
+
+// NotifyConfig 通知渠道配置（订阅 schedule 事件总线）
+type NotifyConfig struct {
+	Email EmailNotifyConfig `yaml:"email"`
+}
+
+// EmailNotifyConfig 邮箱通知配置。
+// SMTP 凭据经环境变量 EMAIL_PASS 注入，不落配置文件。
+type EmailNotifyConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Host     string `yaml:"host"` // SMTP 服务器，如 smtp.qq.com
+	Port     int    `yaml:"port"` // 587（STARTTLS；465 出站常被云厂商干预）
+	User     string `yaml:"user"` // SMTP 认证用户名（仅登录鉴权用，QQ 邮箱为完整地址）
+	From     string `yaml:"from"` // 系统发件邮箱（收件人看到的发件地址）
+	FromName string `yaml:"from_name"` // 发件人显示名，缺省 "Workbench"
 }
 
 // ServerConfig HTTP 服务配置
@@ -91,6 +119,16 @@ func DefaultConfig() *Config {
 			BaseURL: "https://api.openai.com/v1",
 			Model:   "gpt-4o-mini",
 		},
+		Schedule: ScheduleConfig{
+			Timezone:    "Asia/Shanghai",
+			TodoDueCron: "*/5 * * * *",
+		},
+		Notify: NotifyConfig{
+			Email: EmailNotifyConfig{
+				Host: "smtp.qq.com",
+				Port: 587,
+			},
+		},
 	}
 }
 
@@ -153,6 +191,33 @@ func mergeConfig(dst, src *Config) {
 	}
 	if src.AI.Tools {
 		dst.AI.Tools = true
+	}
+	if src.Schedule.Enabled {
+		dst.Schedule.Enabled = true
+	}
+	if src.Schedule.Timezone != "" {
+		dst.Schedule.Timezone = src.Schedule.Timezone
+	}
+	if src.Schedule.TodoDueCron != "" {
+		dst.Schedule.TodoDueCron = src.Schedule.TodoDueCron
+	}
+	if src.Notify.Email.Host != "" {
+		dst.Notify.Email.Host = src.Notify.Email.Host
+	}
+	if src.Notify.Email.Port != 0 {
+		dst.Notify.Email.Port = src.Notify.Email.Port
+	}
+	if src.Notify.Email.User != "" {
+		dst.Notify.Email.User = src.Notify.Email.User
+	}
+	if src.Notify.Email.From != "" {
+		dst.Notify.Email.From = src.Notify.Email.From
+	}
+	if src.Notify.Email.FromName != "" {
+		dst.Notify.Email.FromName = src.Notify.Email.FromName
+	}
+	if src.Notify.Email.Enabled {
+		dst.Notify.Email.Enabled = true
 	}
 	if src.Routes != nil {
 		dst.Routes = src.Routes

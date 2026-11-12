@@ -36,6 +36,7 @@ type UserInfo struct {
 	OrgName   string `json:"orgName"`
 	Name      string `json:"name"`
 	Mobile    string `json:"mobile"`
+	Email     string `json:"email"`
 	RoleID    int64  `json:"roleId"`
 	Role      string `json:"role"`
 	CreatedAt string `json:"createdAt"`
@@ -263,14 +264,14 @@ func (d *DB) ListUsers(ctx context.Context, orgID int64) ([]UserInfo, error) {
 	var err error
 	if orgID > 0 {
 		rows, err = d.conn.QueryContext(ctx, `
-			SELECT u.id, uo.org_id, o.name, u.name, COALESCE(u.mobile, ''), u.is_platform_admin, uo.role, COALESCE(u.created_at, '')
+			SELECT u.id, uo.org_id, o.name, u.name, COALESCE(u.mobile, ''), COALESCE(u.email, ''), u.is_platform_admin, uo.role, COALESCE(u.created_at, '')
 			FROM users u
 			JOIN user_orgs uo ON uo.user_id = u.id AND uo.org_id = ? AND uo.status = 'active'
 			JOIN orgs o ON o.id = uo.org_id
 			ORDER BY u.id`, orgID)
 	} else {
 		rows, err = d.conn.QueryContext(ctx, `
-			SELECT u.id, uo.org_id, o.name, u.name, COALESCE(u.mobile, ''), u.is_platform_admin, uo.role, COALESCE(u.created_at, '')
+			SELECT u.id, uo.org_id, o.name, u.name, COALESCE(u.mobile, ''), COALESCE(u.email, ''), u.is_platform_admin, uo.role, COALESCE(u.created_at, '')
 			FROM users u
 			LEFT JOIN user_orgs uo ON uo.id = (
 				SELECT uo2.id FROM user_orgs uo2 WHERE uo2.user_id = u.id AND uo2.status = 'active' ORDER BY uo2.id LIMIT 1
@@ -288,7 +289,7 @@ func (d *DB) ListUsers(ctx context.Context, orgID int64) ([]UserInfo, error) {
 		var u UserInfo
 		var isAdmin int
 		var orgRole string
-		if err := rows.Scan(&u.ID, &u.OrgID, &u.OrgName, &u.Name, &u.Mobile, &isAdmin, &orgRole, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.OrgID, &u.OrgName, &u.Name, &u.Mobile, &u.Email, &isAdmin, &orgRole, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		u.RoleID = roleIDFromInternal(isAdmin == 1, orgRole)
@@ -301,7 +302,7 @@ func (d *DB) ListUsers(ctx context.Context, orgID int64) ([]UserInfo, error) {
 // GetUserByID 按全局用户 id 查完整信息（取主组织，即第一个 active user_orgs），不存在返回 nil。
 func (d *DB) GetUserByID(ctx context.Context, userID int64) (*UserInfo, error) {
 	const q = `
-		SELECT u.id, uo.org_id, o.name, u.name, COALESCE(u.mobile, ''), u.is_platform_admin, uo.role, COALESCE(u.created_at, '')
+		SELECT u.id, uo.org_id, o.name, u.name, COALESCE(u.mobile, ''), COALESCE(u.email, ''), u.is_platform_admin, uo.role, COALESCE(u.created_at, '')
 		FROM users u
 		LEFT JOIN user_orgs uo ON uo.id = (
 			SELECT uo2.id FROM user_orgs uo2 WHERE uo2.user_id = u.id AND uo2.status = 'active' ORDER BY uo2.id LIMIT 1
@@ -311,7 +312,7 @@ func (d *DB) GetUserByID(ctx context.Context, userID int64) (*UserInfo, error) {
 	var u UserInfo
 	var isAdmin int
 	var orgRole string
-	err := d.conn.QueryRowContext(ctx, q, userID).Scan(&u.ID, &u.OrgID, &u.OrgName, &u.Name, &u.Mobile, &isAdmin, &orgRole, &u.CreatedAt)
+	err := d.conn.QueryRowContext(ctx, q, userID).Scan(&u.ID, &u.OrgID, &u.OrgName, &u.Name, &u.Mobile, &u.Email, &isAdmin, &orgRole, &u.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -328,15 +329,16 @@ type UserProfile struct {
 	ID              int64  `json:"id"`
 	Name            string `json:"name"`
 	Mobile          string `json:"mobile"`
+	Email           string `json:"email"`
 	IsPlatformAdmin bool   `json:"isPlatformAdmin"`
 }
 
 // GetUserProfile 按全局用户 id 查基本信息（含平台超管标志），不存在返回 nil
 func (d *DB) GetUserProfile(ctx context.Context, userID int64) (*UserProfile, error) {
-	const q = `SELECT id, name, COALESCE(mobile, ''), COALESCE(is_platform_admin, 0) FROM users WHERE id = ?`
+	const q = `SELECT id, name, COALESCE(mobile, ''), COALESCE(email, ''), COALESCE(is_platform_admin, 0) FROM users WHERE id = ?`
 	var p UserProfile
 	var isAdmin int
-	err := d.conn.QueryRowContext(ctx, q, userID).Scan(&p.ID, &p.Name, &p.Mobile, &isAdmin)
+	err := d.conn.QueryRowContext(ctx, q, userID).Scan(&p.ID, &p.Name, &p.Mobile, &p.Email, &isAdmin)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -349,7 +351,7 @@ func (d *DB) GetUserProfile(ctx context.Context, userID int64) (*UserProfile, er
 
 // CreateUser 新建用户（admin 专用），用户名全局唯一冲突时返回唯一约束错误。
 // roleID 决定 is_platform_admin 标志与组织角色。
-func (d *DB) CreateUser(ctx context.Context, orgID int64, name, mobile, passwordHash string, roleID int64) (int64, error) {
+func (d *DB) CreateUser(ctx context.Context, orgID int64, name, mobile, email, passwordHash string, roleID int64) (int64, error) {
 	var mobileVal any
 	if mobile == "" {
 		mobileVal = nil
@@ -360,8 +362,8 @@ func (d *DB) CreateUser(ctx context.Context, orgID int64, name, mobile, password
 	if roleID == RoleIDAdmin {
 		isAdmin = 1
 	}
-	const q = `INSERT INTO users (name, mobile, password_hash, is_platform_admin) VALUES (?, ?, ?, ?)`
-	if _, err := d.conn.ExecContext(ctx, q, name, mobileVal, passwordHash, isAdmin); err != nil {
+	const q = `INSERT INTO users (name, mobile, email, password_hash, is_platform_admin) VALUES (?, ?, ?, ?, ?)`
+	if _, err := d.conn.ExecContext(ctx, q, name, mobileVal, email, passwordHash, isAdmin); err != nil {
 		return 0, err
 	}
 	userID, err := d.FindUserIDByName(ctx, name)
@@ -415,6 +417,39 @@ func (d *DB) UpdateUserMobileByID(ctx context.Context, userID int64, mobile stri
 	}
 	_, err := d.conn.ExecContext(ctx, `UPDATE users SET mobile = ?, updated_at = datetime('now') WHERE id = ?`, mobileVal, userID)
 	return err
+}
+
+// UpdateUserEmailByID 修改用户邮箱（admin / 个人资料），空串 = 清空（不再接收通知）
+func (d *DB) UpdateUserEmailByID(ctx context.Context, userID int64, email string) error {
+	_, err := d.conn.ExecContext(ctx, `UPDATE users SET email = ?, updated_at = datetime('now') WHERE id = ?`, email, userID)
+	return err
+}
+
+// GetUserEmail 查用户邮箱（通知投递用），无邮箱返回空串
+func (d *DB) GetUserEmail(ctx context.Context, userID int64) (string, error) {
+	var email string
+	err := d.conn.QueryRowContext(ctx, `SELECT COALESCE(email, '') FROM users WHERE id = ?`, userID).Scan(&email)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return email, err
+}
+
+// MarkNotified 通知去重：同 (topic, dedupKey, notifyDate) 只标记一次。
+// 返回 true = 本次为新标记（应投递）；false = 今天已发过（跳过）。
+// 去重写入与判断一体（INSERT OR IGNORE + 受影响行数），无竞态窗口。
+func (d *DB) MarkNotified(ctx context.Context, topic, dedupKey, notifyDate string) (bool, error) {
+	res, err := d.conn.ExecContext(ctx,
+		`INSERT OR IGNORE INTO notify_log (topic, dedup_key, notify_date) VALUES (?, ?, ?)`,
+		topic, dedupKey, notifyDate)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // DeleteUserByID 删除用户（admin 专用），tasks/user_orgs 由外键级联删除

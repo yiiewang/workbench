@@ -61,16 +61,24 @@ type DB struct {
 type TaskItem struct {
 	ID             FlexString `json:"id"`
 	Title          string     `json:"title"`
-	Content        string     `json:"content"`
+	Content        string     `json:"content,omitempty"`
 	Status         string     `json:"status"`
 	Priority       string     `json:"priority"`
 	Scheduled      string     `json:"scheduled"`
 	Due            string     `json:"due"`
+	// ScheduledTime/DueTime 精确时刻（HH:mm，空 = 无精确时间，仅按日期粒度提醒）：
+	// scheduled_time 到点发"开始提醒"，due_time 到点且未完成发"到期提醒"
+	ScheduledTime  string     `json:"scheduledTime,omitempty"`
+	DueTime        string     `json:"dueTime,omitempty"`
 	Progress       int        `json:"progress"`
 	Assignee       FlexString `json:"assignee"`
 	PostponedCount int        `json:"postponedCount"`
 	AutoPostponed  bool       `json:"autoPostponed"`
 	SortOrder      int        `json:"sort_order,omitempty"`
+	// ContentPreview 列表响应中的正文预览（截断）：
+	// 列表/详情分离——列表不传 content 全文（响应瘦身），编辑/详情场景
+	// 经 GET /api/tasks/{id} 拉取完整任务。详情与编辑保存场景不填此字段。
+	ContentPreview string `json:"contentPreview,omitempty"`
 	// Files 关联的文件路径（相对用户根目录），todo ↔ file 联动用。
 	// omitempty + 读出归一为 nil：保证无关联任务的 md5 与旧版一致（recomputeVersion 兼容）
 	Files []string `json:"files,omitempty"`

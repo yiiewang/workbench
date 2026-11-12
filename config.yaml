@@ -23,6 +23,7 @@ auth:
 #   "__listdir__"  -> show file listing
 #   "Display Name" -> display name alias in directory listing
 routes:
+  "/jobs": "__spa__"
   "/todo": "__spa__"
   # 移动端 SPA 入口（与 frontend/src/router 中 /m 子路由一一对应；新增移动页面需同步加键）
   "/m": "__spa__"
@@ -53,3 +54,21 @@ ai:
   # 由后端执行并把结果回传模型循环决策；要求模型支持 function calling。
   # 默认关闭保持纯对话；环境变量 AI_TOOLS=true 开启
   tools: true
+
+# 定时调度（cron 引擎 + 进程内事件总线，internal/schedule）
+schedule:
+  enabled: true            # 开启后启动调度器
+  timezone: Asia/Shanghai   # cron 表达式求值时区（IANA 名）
+  todo_due_cron: "*/5 * * * *"  # Todo 到期扫描频率（5 段标准表达式）
+
+# 通知渠道（订阅事件总线；任务到期提醒发给任务归属用户的邮箱）
+notify:
+  email:
+    enabled: true          # 开启邮件通知
+    host: smtp.qq.com       # SMTP 服务器（587 STARTTLS；465 出站常被云厂商干预不可用）
+    port: 587
+    user: "yiiewang@qq.com" # SMTP 认证用户名（QQ 邮箱为完整地址；个人邮箱同时兼作发件地址）
+    # from: ""              # 系统发件邮箱，可选：缺省用 user（仅企业邮局/代发服务需要不同值时配置）
+    from_name: "Workbench Robot" # 发件人显示名，缺省 "Workbench"
+    # 收件人（to）= 任务归属用户的 email（用户管理/移动端「我的」页配置），无需在此配置
+    # 授权码不落配置：启动前 export EMAIL_PASS=...（QQ 邮箱为 SMTP 授权码）

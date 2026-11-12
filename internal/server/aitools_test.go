@@ -100,6 +100,48 @@ type errWriter struct{}
 func (errWriter) Write(p []byte) (int, error) { return 0, io.ErrClosedPipe }
 func (errWriter) Flush()                      {}
 
+// 审批协调器：跨请求决定传递、用户归属校验、一次性语义
+func TestApprovalHub(t *testing.T) {
+	var hub aiApprovalHub
+
+	// 正常路径：create → resolve → 等待方收到决定
+	ch := hub.create("call_1", 42)
+	if ok := hub.resolve("call_1", 42, true); !ok {
+		t.Fatal("resolve should succeed for owner")
+	}
+	if approved := <-ch; !approved {
+		t.Fatal("expected approved=true")
+	}
+	// 一次性：同 id 二次 resolve 失败
+	if ok := hub.resolve("call_1", 42, true); ok {
+		t.Fatal("resolve should fail for consumed id")
+	}
+
+	// 归属校验：他人 resolve 失败，且不消费条目（本人仍可决定）
+	ch2 := hub.create("call_2", 42)
+	if ok := hub.resolve("call_2", 7, true); ok {
+		t.Fatal("resolve should fail for non-owner")
+	}
+	if ok := hub.resolve("call_2", 42, false); !ok {
+		t.Fatal("owner resolve should succeed after foreign attempt")
+	}
+	if approved := <-ch2; approved {
+		t.Fatal("expected approved=false")
+	}
+
+	// remove 作废后 resolve 失败；等待方不会收到任何值（channel 无数据）
+	ch3 := hub.create("call_3", 42)
+	hub.remove("call_3")
+	if ok := hub.resolve("call_3", 42, true); ok {
+		t.Fatal("resolve should fail after remove")
+	}
+	select {
+	case v := <-ch3:
+		t.Fatalf("channel should be empty after remove, got %v", v)
+	default:
+	}
+}
+
 func TestValidateAIMessages_ToolRoles(t *testing.T) {
 	cases := []struct {
 		name    string

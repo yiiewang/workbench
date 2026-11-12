@@ -23,6 +23,8 @@ import (
 	"github.com/yiiewang/workbench"
 	"github.com/yiiewang/workbench/internal/config"
 	"github.com/yiiewang/workbench/internal/db"
+	"github.com/yiiewang/workbench/internal/notify"
+	"github.com/yiiewang/workbench/internal/schedule"
 )
 
 // Server HTTP 服务
@@ -34,6 +36,14 @@ type Server struct {
 	tokenSecret []byte
 	logFile     string
 	app         *iris.Application
+	// aiApprovals AI 写工具审批协调器（Agent 模式，跨请求状态：
+	// SSE 对话流 create/等待，POST /api/ai/approval resolve）
+	aiApprovals aiApprovalHub
+	// scheduler 定时调度器（schedule.enabled 时启动，进程退出随之消亡；
+	// job 均为短扫描，中断无害，无需优雅停止）
+	scheduler *schedule.Scheduler
+	// bus 事件总线（AI 工具 list_events/notify_user 消费；订阅者在 New 中注册）
+	bus *schedule.EventBus
 }
 
 // New 创建 Server 实例
@@ -50,14 +60,53 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 		return nil, fmt.Errorf("create admin dir: %w", err)
 	}
 
-	return &Server{
+	srv := &Server{
 		db:          database,
 		cfg:         cfg,
 		serDirAbs:   absDir,
 		adminRoot:   adminRoot,
 		tokenSecret: tokenSecret,
 		logFile:     logFile,
-	}, nil
+	}
+
+	// 定时调度 + 事件总线：订阅者（EmailNotifier 等）注册到总线，
+	// schedule.enabled 时启动 cron 引擎（表达式配置错误 fail fast）
+	bus := schedule.NewEventBus()
+	srv.bus = bus
+	if _, err := notify.NewEmailNotifier(cfg.Notify.Email, database, bus); err != nil {
+		return nil, err
+	}
+	if cfg.Schedule.Enabled {
+		loc, lerr := time.LoadLocation(cfg.Schedule.Timezone)
+		if lerr != nil {
+			slog.Warn("schedule timezone invalid, fallback to UTC", "tz", cfg.Schedule.Timezone)
+			loc = time.UTC
+		}
+		sched := schedule.NewScheduler(bus, loc)
+		job, jerr := schedule.NewTodoDueScanJob(database, loc, cfg.Schedule.TodoDueCron)
+		if jerr != nil {
+			return nil, fmt.Errorf("init schedule jobs: %w", jerr)
+		}
+		sched.AddJob(job)
+		// 精确时间提醒：每分钟扫描 scheduled_time/due_time 命中当前时刻的任务
+		timeJob, terr := schedule.NewTodoTimeReminderJob(database, loc)
+		if terr != nil {
+			return nil, fmt.Errorf("init time reminder job: %w", terr)
+		}
+		sched.AddJob(timeJob)
+		// AI 定时任务执行（用户自建，cron 命中 → LLM 生成 → 邮件通知）
+		aiJobsRunner, ajerr := schedule.NewAIJobsRunnerJob(database, srv.aiChatOnce, loc)
+		if ajerr != nil {
+			return nil, fmt.Errorf("init ai jobs runner: %w", ajerr)
+		}
+		sched.AddJob(aiJobsRunner)
+		sched.Start(context.Background())
+		srv.scheduler = sched
+		slog.Info("scheduler started", "timezone", loc.String(), "jobs", sched.Jobs(),
+			"todoDueCron", cfg.Schedule.TodoDueCron)
+	}
+
+	return srv, nil
 }
 
 // App 构建 iris.Application 并注册所有路由
@@ -65,7 +114,10 @@ func (s *Server) App() *iris.Application {
 	app := iris.New()
 	s.app = app
 
-	// 全局中间件：访问日志 + 安全响应头
+	// 全局中间件：响应压缩 + 访问日志 + 安全响应头
+	// （压缩在最外层：logging 的 Record 记录未压缩数据，响应给客户端的是压缩流，
+	//  iris 对 Record→Compress 的包装顺序两种情况均已兼容）
+	app.Use(s.compressionMiddleware())
 	app.Use(s.loggingMiddleware())
 	app.Use(s.securityHeadersMiddleware())
 
@@ -87,12 +139,16 @@ func (s *Server) App() *iris.Application {
 	api.Get("/me", auth, s.handleMe)
 	api.Get("/userinfo", auth, s.handleUserInfo)
 	api.Post("/org/switch", auth, s.handleOrgSwitch)
+	// 用户自助修改通知邮箱（任务到期提醒投递目标）
+	api.Post("/profile/email", auth, s.handleProfileEmail)
 	api.Get("/org/features", auth, s.handleOrgFeatures)
 	api.Get("/stats", auth, s.handleStats)
 	api.Get("/map", auth, s.handleMap)
 	api.Get("/tree", auth, s.handleTree)
 	api.Get("/org-members", auth, s.handleOrgMembers)
 	api.Get("/tasks", auth, s.getTasksJSON)
+	// 任务详情（列表响应瘦身后按 id 拉完整任务，含 content 全文）
+	api.Get("/tasks/{id}", auth, s.getTaskDetail)
 	// 查看同组织成员的任务（只读，TodoView"查看成员日程"）
 	api.Get("/tasks/user/{id}", auth, s.getMemberTasks)
 	// 反查关联了指定文件的任务（todo ↔ file 联动，FileViewer 侧展示用）
@@ -126,6 +182,14 @@ func (s *Server) App() *iris.Application {
 	// AI 对话 API（需鉴权；未配置 ai 段时 status 返回 enabled=false、chat 返回 50301）
 	api.Get("/ai/status", auth, s.handleAIStatus)
 	api.Post("/ai/chat", auth, s.handleAIChat)
+	// 写类工具审批决定（Agent 模式，Human-in-the-loop）
+	api.Post("/ai/approval", auth, s.handleAIApproval)
+	// AI 定时任务 CRUD（用户自建"到点让 AI 执行 prompt"）
+	api.Get("/ai/jobs", auth, s.handleAIJobsList)
+	api.Post("/ai/jobs", auth, s.handleAIJobCreate)
+	api.Get("/ai/jobs/{id}/runs", auth, s.handleAIJobRuns)
+	api.Put("/ai/jobs/{id}", auth, s.handleAIJobUpdate)
+	api.Delete("/ai/jobs/{id}", auth, s.handleAIJobDelete)
 	// AI 会话历史 CRUD（回到历史会话继续沟通）
 	api.Get("/ai/sessions", auth, s.handleAISessionsList)
 	api.Post("/ai/sessions", auth, s.handleAISessionCreate)
@@ -594,6 +658,12 @@ func (s *Server) writeTaskConflict(ctx iris.Context, orgID, userID int64, taskID
 }
 // patchTask 更新单条任务（PATCH /api/tasks/{id}）
 // 请求体：{ "task": {...}, "baseRevision": 12 }
+//
+// content 字段缺省语义（列表瘦身配套）：列表响应不再携带 content 全文，
+// 看板拖拽/勾选完成/移动端快捷操作等路径的 task 对象没有 content 字段
+// （序列化时省略）。UpdateTask 是全字段覆盖写——请求体 task 中 content
+// 字段缺失时必须回填服务端现值，否则这些快捷修改会把正文清空。
+// 显式传 content（含空串 = 用户主动清空正文）按传入值更新。
 func (s *Server) patchTask(ctx iris.Context) {
 	rctx := ctx.Request().Context()
 	userID := currentUserID(ctx)
@@ -604,11 +674,24 @@ func (s *Server) patchTask(ctx iris.Context) {
 		return
 	}
 
+	body, err := io.ReadAll(ctx.Request().Body)
+	if err != nil {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
+		return
+	}
+	// 探测 task.content 字段是否存在（缺失 = 保留服务端现值）
+	var probe struct {
+		Task map[string]json.RawMessage `json:"task"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
+		return
+	}
 	var req struct {
 		Task         db.TaskItem `json:"task"`
 		BaseRevision *int64      `json:"baseRevision"`
 	}
-	if err := readJSON(ctx, &req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
 		return
 	}
@@ -623,6 +706,27 @@ func (s *Server) patchTask(ctx iris.Context) {
 		return
 	}
 
+	// 缺失字段回填服务端现值（任务不存在时保持空值，UpdateTask 自然失败）：
+	//   - content：列表瘦身（不传全文）后快捷修改路径无此字段
+	//   - scheduledTime/dueTime：omitempty 序列化，空值省略——快捷修改同样会缺失
+	// 显式传值（含空串 = 用户主动清空）按传入值更新。
+	hasContent := probe.Task["content"] != nil
+	hasSTime := probe.Task["scheduledTime"] != nil
+	hasDTime := probe.Task["dueTime"] != nil
+	if !hasContent || !hasSTime || !hasDTime {
+		if cur, exists, err := s.db.GetTaskByID(rctx, orgID, userID, taskID); err == nil && exists {
+			if !hasContent {
+				req.Task.Content = cur.Content
+			}
+			if !hasSTime {
+				req.Task.ScheduledTime = cur.ScheduledTime
+			}
+			if !hasDTime {
+				req.Task.DueTime = cur.DueTime
+			}
+		}
+	}
+
 	rev, err := s.db.UpdateTask(rctx, orgID, userID, req.Task)
 	if err != nil {
 		serverError(ctx, "update task failed", err, "task", taskID)
@@ -630,6 +734,31 @@ func (s *Server) patchTask(ctx iris.Context) {
 	}
 	slog.Info("task patched", "user", userID, "task", taskID, "status", req.Task.Status)
 	writeOK(ctx, map[string]any{"status": "ok", "revision": rev})
+}
+
+// getTaskDetail 任务详情（GET /api/tasks/{id}）：
+// 列表响应瘦身后 content 不随列表下发，编辑/查看详情场景按 id 拉取完整任务。
+func (s *Server) getTaskDetail(ctx iris.Context) {
+	taskID := strings.TrimSpace(ctx.Params().Get("id"))
+	if taskID == "" {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		return
+	}
+	task, exists, err := s.db.GetTaskByID(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), taskID)
+	if err != nil {
+		serverError(ctx, "get task failed", err, "task", taskID)
+		return
+	}
+	if !exists {
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
+	}
+	rev, err := s.db.GetRevision(ctx.Request().Context(), currentUserID(ctx))
+	if err != nil {
+		serverError(ctx, "get revision failed", err)
+		return
+	}
+	writeOK(ctx, map[string]any{"task": task, "revision": rev})
 }
 
 // postTask 新增单条任务（POST /api/tasks/{id}）
@@ -1235,6 +1364,34 @@ func (s *Server) listDirectory(ctx iris.Context, dirPath string) {
 
 	ctx.ContentType("text/html; charset=utf-8")
 	_, _ = ctx.WriteString(body)
+}
+
+// ============================================================
+// 响应压缩中间件（gzip/deflate/br，按客户端 Accept-Encoding 协商）
+// ============================================================
+
+// compressionSkipPrefixes 排除压缩的流式接口：
+//   - /api/media：http.ServeContent 的 Range 语义与压缩不兼容
+//     （客户端按未压缩字节区间请求，压缩后区间错位，视频拖动直接失效）
+//   - /api/ai/chat：SSE 逐行透传（每行 flush 的小增量在压缩层下无收益，
+//     徒增大量小 gzip 块与解压开销）
+func compressionSkipPrefixes() []string {
+	return []string{"/api/media", "/api/ai/chat"}
+}
+
+func (s *Server) compressionMiddleware() iris.Handler {
+	return func(ctx iris.Context) {
+		p := ctx.Path()
+		for _, prefix := range compressionSkipPrefixes() {
+			if strings.HasPrefix(p, prefix) {
+				ctx.Next()
+				return
+			}
+		}
+		// 客户端未声明 Accept-Encoding 时 iris 内部自动回退原 writer（静默失败）
+		_ = ctx.CompressWriter(true)
+		ctx.Next()
+	}
 }
 
 // ============================================================

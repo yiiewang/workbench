@@ -23,9 +23,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/kataras/iris/v12"
+	"github.com/google/uuid"
 	"github.com/yiiewang/workbench/internal/db"
+	"github.com/yiiewang/workbench/internal/schedule"
 )
 
 // aiMaxMessages 单次请求允许携带的最大消息条数（含历史），防滥用。
@@ -337,7 +338,7 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 			msgs = append(msgs, aiMessage{Role: "assistant", Content: res.Content, ToolCalls: res.ToolCalls})
 			for _, call := range res.ToolCalls {
 				sseWriteEvent(w, "tool_call", call)
-				result := s.execAITool(ctx, call)
+				result := s.runToolWithApproval(ctx, w, call)
 				sseWriteEvent(w, "tool_result", map[string]any{
 					"id":     call.ID,
 					"name":   call.Function.Name,
@@ -359,13 +360,300 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 }
 
 // ============================================================
+// 非流式单次调用（AI 定时任务等后台场景用）
+// ============================================================
+
+// aiChatOnce 非流式调用上游 /chat/completions，返回首个回复文本。
+// 不走 Agent 循环/工具（定时任务是后台生成型任务，无需交互）。
+func (s *Server) aiChatOnce(ctx context.Context, prompt string) (string, error) {
+	if !s.cfg.AI.Enabled() {
+		return "", fmt.Errorf("AI not configured (ai.api_key / AI_BASE_URL)")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model": s.cfg.AI.Model,
+		"messages": []aiMessage{
+			{Role: "user", Content: prompt},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, normalizeAIEndpoint(s.cfg.AI.BaseURL), bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AI.APIKey)
+	req.Header.Set("X-Model-Request-Id", uuid.NewString())
+
+	resp, err := aiClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("upstream %s: %s", resp.Status, truncateStr(string(body), 200))
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || len(out.Choices) == 0 {
+		return "", fmt.Errorf("unexpected upstream response")
+	}
+	return out.Choices[0].Message.Content, nil
+}
+
+// truncateStr 字符串截断（错误信息拼装用）
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// ============================================================
+// AI 定时任务 CRUD — /api/ai/jobs
+// ============================================================
+
+// aiJobBody 创建/更新请求体
+type aiJobBody struct {
+	Name     string `json:"name"`
+	CronExpr string `json:"cronExpr"`
+	Prompt   string `json:"prompt"`
+	Enabled  *bool  `json:"enabled"`
+}
+
+// validateAIJobBody 校验：name/cron/prompt 必填，cron 表达式可解析
+func validateAIJobBody(b *aiJobBody) string {
+	b.Name = strings.TrimSpace(b.Name)
+	b.CronExpr = strings.TrimSpace(b.CronExpr)
+	b.Prompt = strings.TrimSpace(b.Prompt)
+	if b.Name == "" {
+		return "name is required"
+	}
+	if len(b.Name) > 100 {
+		return "name too long (max 100)"
+	}
+	if b.CronExpr == "" {
+		return "cronExpr is required"
+	}
+	if _, err := schedule.ParseCron(b.CronExpr); err != nil {
+		return "invalid cron expression: " + err.Error()
+	}
+	if b.Prompt == "" {
+		return "prompt is required"
+	}
+	if len(b.Prompt) > 16*1024 {
+		return "prompt too long (max 16KB)"
+	}
+	if b.Enabled == nil {
+		t := true
+		b.Enabled = &t
+	}
+	return ""
+}
+
+func (s *Server) handleAIJobsList(ctx iris.Context) {
+	jobs, err := s.db.ListAIJobs(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx))
+	if err != nil {
+		serverError(ctx, "list ai jobs failed", err)
+		return
+	}
+	writeOK(ctx, map[string]any{"jobs": jobs})
+}
+
+func (s *Server) handleAIJobCreate(ctx iris.Context) {
+	var req aiJobBody
+	if err := readJSON(ctx, &req); err != nil {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
+		return
+	}
+	if msg := validateAIJobBody(&req); msg != "" {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, msg)
+		return
+	}
+	id, err := s.db.CreateAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), req.Name, req.CronExpr, req.Prompt, *req.Enabled)
+	if err != nil {
+		serverError(ctx, "create ai job failed", err)
+		return
+	}
+	slog.Info("ai job created", "user", currentUserID(ctx), "job", req.Name, "cron", req.CronExpr)
+	writeOK(ctx, map[string]any{"id": id})
+}
+
+func (s *Server) handleAIJobUpdate(ctx iris.Context) {
+	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		return
+	}
+	var req aiJobBody
+	if err := readJSON(ctx, &req); err != nil {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
+		return
+	}
+	if msg := validateAIJobBody(&req); msg != "" {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, msg)
+		return
+	}
+	// 存在性 + 归属校验
+	cur, err := s.db.GetAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id)
+	if err != nil {
+		serverError(ctx, "get ai job failed", err)
+		return
+	}
+	if cur == nil {
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
+	}
+	if err := s.db.UpdateAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, req.Name, req.CronExpr, req.Prompt, *req.Enabled); err != nil {
+		serverError(ctx, "update ai job failed", err)
+		return
+	}
+	slog.Info("ai job updated", "user", currentUserID(ctx), "job", req.Name)
+	writeOK(ctx, map[string]any{"status": "ok"})
+}
+
+func (s *Server) handleAIJobDelete(ctx iris.Context) {
+	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		return
+	}
+	if err := s.db.DeleteAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id); err != nil {
+		serverError(ctx, "delete ai job failed", err)
+		return
+	}
+	slog.Info("ai job deleted", "user", currentUserID(ctx), "id", id)
+	writeOK(ctx, map[string]any{"status": "ok"})
+}
+
+// handleAIJobRuns 任务执行历史（GET /api/ai/jobs/{id}/runs?limit=20）。
+// 归属：全局任务（user_id IS NULL）所有用户可查；私有任务仅归属人。
+func (s *Server) handleAIJobRuns(ctx iris.Context) {
+	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		return
+	}
+	limit, _ := strconv.Atoi(ctx.URLParam("limit"))
+	job, err := s.db.GetAIJobAny(ctx.Request().Context(), id)
+	if err != nil {
+		serverError(ctx, "get ai job failed", err)
+		return
+	}
+	if job == nil || (!job.IsGlobal && int64(job.UserID) != currentUserID(ctx)) {
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
+	}
+	runs, err := s.db.ListAIJobRuns(ctx.Request().Context(), id, limit)
+	if err != nil {
+		serverError(ctx, "list ai job runs failed", err)
+		return
+	}
+	writeOK(ctx, map[string]any{"runs": runs})
+}
+
+// ============================================================
+// 写类工具审批（Human-in-the-loop，协调器见 aiapproval.go）
+// ============================================================
+
+// runToolWithApproval 执行一次工具调用，写类工具先经用户审批：
+//
+//	tool_call 事件先发（前端立即建卡片）→ approval_request 事件（卡片进入待确认态）
+//	→ 阻塞等待 POST /api/ai/approval 的决定（或超时/断开）
+//	→ approval_resolved 事件（卡片定格）→ 执行或跳过
+//
+// 返回值即 tool 消息内容：拒绝/超时返回说明性结果，由模型向用户解释。
+func (s *Server) runToolWithApproval(ctx iris.Context, w aiStreamWriter, call aiToolCall) any {
+	tool := aiToolByName(call.Function.Name)
+	if tool == nil || !tool.NeedApproval {
+		return s.execAITool(ctx, call) // 读类工具或未知工具直接走原路径
+	}
+
+	// 审批 ID 直接复用 tool_call ID（一次对话内上游保证唯一）
+	ch := s.aiApprovals.create(call.ID, currentUserID(ctx))
+	sseWriteEvent(w, "approval_request", map[string]any{
+		"id":        call.ID,
+		"name":      call.Function.Name,
+		"arguments": call.Function.Arguments,
+	})
+
+	var approved bool
+	var outcome string
+	select {
+	case approved = <-ch:
+		if approved {
+			outcome = "approved"
+		} else {
+			outcome = "declined"
+		}
+	case <-time.After(aiApprovalTimeout):
+		s.aiApprovals.remove(call.ID)
+		approved, outcome = false, "timeout"
+	case <-ctx.Request().Context().Done():
+		// 客户端断开（关面板/停止生成）：作废审批，不执行
+		s.aiApprovals.remove(call.ID)
+		slog.Info("ai approval aborted", "tool", call.Function.Name, "reason", "client disconnected")
+		return map[string]any{"error": "client disconnected before approval"}
+	}
+
+	sseWriteEvent(w, "approval_resolved", map[string]any{
+		"id":      call.ID,
+		"outcome": outcome,
+	})
+
+	if !approved {
+		switch outcome {
+		case "declined":
+			return map[string]any{"error": "user declined this operation"}
+		default: // timeout
+			return map[string]any{"error": "user did not confirm within 5 minutes, operation cancelled"}
+		}
+	}
+	return s.execAITool(ctx, call)
+}
+
+// handleAIApproval POST /api/ai/approval — 用户对写工具调用的审批决定。
+// 请求体 {id, approved}；id 为 approval_request 事件携带的 tool_call ID。
+func (s *Server) handleAIApproval(ctx iris.Context) {
+	var req struct {
+		ID       string `json:"id"`
+		Approved bool   `json:"approved"`
+	}
+	if err := readJSON(ctx, &req); err != nil {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
+		return
+	}
+	if req.ID == "" {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "id is required")
+		return
+	}
+	if !s.aiApprovals.resolve(req.ID, currentUserID(ctx), req.Approved) {
+		// 不存在 / 已处理 / 非本人发起：统一按未找到返回，不泄露其他用户的审批状态
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
+	}
+	slog.Info("ai approval resolved", "user", currentUserID(ctx), "id", req.ID, "approved", req.Approved)
+	writeOK(ctx, map[string]any{"status": "ok"})
+}
+
+// ============================================================
 // 上游流式响应的转发与增量解析
 // ============================================================
 
 // aiRoundResult 一轮上游流式响应的解析结果
 type aiRoundResult struct {
-	Content      string      // 本轮增量文本（多轮拼接后即最终回答）
-	FinishReason string      // stop | tool_calls | length | ...
+	Content      string       // 本轮增量文本（多轮拼接后即最终回答）
+	FinishReason string       // stop | tool_calls | length | ...
 	ToolCalls    []aiToolCall // 按 index 升序、分片已拼接完成的工具调用
 }
 

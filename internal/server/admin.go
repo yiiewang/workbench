@@ -77,6 +77,17 @@ func (s *Server) handleAdminUserDashboard(ctx iris.Context) {
 	writeOK(ctx, dash)
 }
 
+// validEmail 宽松邮箱格式校验（局部@域名.TLD），严格格式交给 SMTP 投递验证
+func validEmail(s string) bool {
+	at := strings.IndexByte(s, '@')
+	if at <= 0 || at != strings.LastIndexByte(s, '@') {
+		return false
+	}
+	domain := s[at+1:]
+	dot := strings.LastIndexByte(domain, '.')
+	return dot > 0 && dot < len(domain)-1
+}
+
 // POST /api/admin/users — 创建用户。admin 跨 org，org_admin 仅可创建自己 org 用户
 func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 	rctx := ctx.Request().Context()
@@ -86,6 +97,7 @@ func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 		Password string `json:"password"`
 		RoleID   int64  `json:"roleId"`
 		Mobile   string `json:"mobile"`
+		Email    string `json:"email"`
 	}
 	if err := readJSON(ctx, &req); err != nil {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
@@ -94,6 +106,7 @@ func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 	req.Org = strings.TrimSpace(req.Org)
 	req.Name = strings.TrimSpace(req.Name)
 	req.Mobile = strings.TrimSpace(req.Mobile)
+	req.Email = strings.TrimSpace(req.Email)
 	if req.Org == "" || req.Name == "" || req.Password == "" {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "org, name and password are required")
 		return
@@ -132,7 +145,7 @@ func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 		serverError(ctx, "hash password failed", err)
 		return
 	}
-	userID, err := s.db.CreateUser(rctx, orgID, req.Name, req.Mobile, hash, req.RoleID)
+	userID, err := s.db.CreateUser(rctx, orgID, req.Name, req.Mobile, req.Email, hash, req.RoleID)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			writeFail(ctx, iris.StatusBadRequest, CodeUserNameExists)
@@ -177,6 +190,7 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 	var req struct {
 		Name     *string `json:"name"`
 		Mobile   *string `json:"mobile"`
+		Email    *string `json:"email"`
 		Password *string `json:"password"`
 		RoleID   *int64  `json:"roleId"`
 	}
@@ -255,6 +269,19 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 				return
 			}
 			serverError(ctx, "update user mobile failed", err, "user", userID)
+			return
+		}
+	}
+
+	// 改邮箱：空串清空（不再接收通知）
+	if req.Email != nil {
+		email := strings.TrimSpace(*req.Email)
+		if email != "" && !validEmail(email) {
+			writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid email")
+			return
+		}
+		if err := s.db.UpdateUserEmailByID(rctx, userID, email); err != nil {
+			serverError(ctx, "update user email failed", err, "user", userID)
 			return
 		}
 	}

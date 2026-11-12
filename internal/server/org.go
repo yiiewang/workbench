@@ -2,6 +2,9 @@
 package server
 
 import (
+	"log/slog"
+	"strings"
+
 	"github.com/kataras/iris/v12"
 	"github.com/yiiewang/workbench/internal/db"
 )
@@ -50,6 +53,7 @@ func (s *Server) handleUserInfo(ctx iris.Context) {
 			UserID:          profile.ID,
 			UserName:        profile.Name,
 			Mobile:          profile.Mobile,
+			Email:           profile.Email,
 			IsPlatformAdmin: profile.IsPlatformAdmin,
 		},
 		Orgs:         orgs,
@@ -57,6 +61,33 @@ func (s *Server) handleUserInfo(ctx iris.Context) {
 		Role:         currentRole(ctx),
 		Features:     features,
 	})
+}
+
+// ============================================================
+// POST /api/profile/email — 修改自己的通知邮箱
+// ============================================================
+
+// handleProfileEmail 用户自助修改邮箱（任务到期提醒投递目标），
+// 空串 = 清空（不再接收通知）。格式校验与 admin 侧一致（validEmail）。
+func (s *Server) handleProfileEmail(ctx iris.Context) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := readJSON(ctx, &req); err != nil {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
+		return
+	}
+	email := strings.TrimSpace(req.Email)
+	if email != "" && !validEmail(email) {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid email")
+		return
+	}
+	if err := s.db.UpdateUserEmailByID(ctx.Request().Context(), currentUserID(ctx), email); err != nil {
+		serverError(ctx, "update email failed", err)
+		return
+	}
+	slog.Info("profile email updated", "user", currentUserID(ctx))
+	writeOK(ctx, map[string]any{"status": "ok", "email": email})
 }
 
 // ============================================================
@@ -139,6 +170,7 @@ type userinfoUser struct {
 	UserID          int64  `json:"userId"`
 	UserName        string `json:"userName"`
 	Mobile          string `json:"mobile"`
+	Email           string `json:"email"`
 	IsPlatformAdmin bool   `json:"isPlatformAdmin"`
 }
 

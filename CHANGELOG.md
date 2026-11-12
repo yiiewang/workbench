@@ -7,12 +7,60 @@
 
 ### Added
 
+- **任务精确时间提醒**（迁移 000009：tasks 加 `scheduled_time`/`due_time` 列，HH:mm 可选）：编辑弹窗时间范围选择器升级为 `datetimerange`（一个控件选日期 + 时刻；约定时刻 `00:00` = 未指定，归一为空，避免无时间任务触发凌晨提醒风暴）；每分钟扫描 job（`todo_time_reminder`）——`scheduled_time` 到点发"计划开始"提醒、`due_time` 到点且未完成发"即将截止"提醒，经 `task.reminder` 事件 → 邮件投递（含任务状态/优先级/进度）；去重键含时刻（`taskID:kind:HH:mm`），同分钟重跑不重发。PATCH 缺省保留语义扩展至 `scheduledTime`/`dueTime`（omitempty 空值省略，快捷修改不清空时刻）；AI 工具 `create_task`/`update_task` 支持 `dueTime`/`scheduledTime` 参数（HH:mm 校验，空串清除）
+- **AI 定时任务**（迁移 000009/000010/000011；功能栏「定时」入口 `/jobs`，首页功能卡片）：用户自建"到点让 AI 执行 prompt"的任务——
+  - **全局公共任务模型**（000010）：`user_id IS NULL` = 全局任务只存一条（预置"每日工作总结"），执行时对所有有邮箱的用户逐个以本人身份展开（各自任务数据/投递），避免按用户复制记录导致数据量膨胀；私有任务（user_id 归属）用户自建自管；前端「公共」徽标 + 只读
+  - 管理：侧栏任务列表（名称/cron/启用状态点/新建）+ 主区域左右双卡片（左详情表单含 cron 频率预设，右执行记录）；CRUD API `/api/ai/jobs`（cron 创建时校验 fail fast）
+  - **执行记录**（000011 `ai_job_runs` 表）：每次触发留痕（时间/状态/输出前 4KB），`GET /api/ai/jobs/{id}/runs` 查看（全局任务的记录所有用户可查）
+  - 执行引擎：`ai_jobs_runner` 每分钟读库（增删改下一分钟生效，无需重载调度器）→ cron 命中且 `last_run_at` 非本分钟（幂等，重启不重跑）→ 组 prompt（平台角色 + 该用户任务数据精简 ≤50 条 + 指令）→ 非流式 LLM 调用（`aiChatOnce`，复用上游 AI 配置，2 分钟超时）→ 结果经 `user.notify` 事件邮件投递；失败也通知；单任务独立 goroutine 慢任务不阻塞 tick
+  - **Agent 工具接入**：`list_ai_jobs`（只读）/ `create_ai_job` / `update_ai_job`（先读后合并，公共任务不可改）/ `delete_ai_job`（写类走审批）——对话里一句话即可安排定时任务
+  - 典型用法：每天 18:00 AI 总结任务发日报；每周一 09:00 生成周报与本周优先级建议
+
+### Added
+
+- **定时调度系统**（`internal/schedule`，`schedule.enabled` 开启，默认关闭）：cron 引擎 + 进程内事件总线（ebus）+ 订阅式通知渠道，三层解耦——定时触发、事件分发、投递通道各自独立，未来 webhook/站内信只需新增订阅者：
+  - **手写 cron 引擎**（零依赖）：标准 5 段表达式（分 时 日 月 周），支持 `*`、`*/n` 步进、`a-b` 区间、逗号列表与英文别名（`wed`/`nov`）；预编译为 5 个 bitset，每分钟整点对齐 tick 后 O(1) 匹配；日/周均受限时取 Vixie cron 并集语义；表达式配置错误启动即失败（fail fast）
+  - **EventBus**：topic → handlers 发布订阅；Publish 为每个 handler 起独立 goroutine（发布方不阻塞），handler panic recover 不影响总线与其他订阅者
+  - **TodoDueScan 内置 job**（`todo_due_cron` 默认每 5 分钟）：全库扫描 `due <= today && status != done` 的任务 → 逐条经 `notify_log` 表去重（同任务同天只提醒一次：截止日当天 + 逾期每天各一次，`INSERT OR IGNORE` + 受影响行数判断，无竞态窗口）→ 发布 `task.due` 事件；任务完成后自然停止提醒
+  - **邮件通知渠道**（`internal/notify`，`notify.email.enabled` 开启）：`EmailNotifier` 订阅 `task.due`，向**任务归属用户**的邮箱投递（含任务标题/截止日/逾期天数/优先级/进度）；SMTP 587 STARTTLS（`net/smtp`，465 出站常被云厂商干预故不使用），授权码走环境变量 `EMAIL_PASS`；UTF-8 base64 编码正文/主题（RFC 2045 76 字符折行）；用户未设邮箱跳过记日志，投递失败不影响其他事件
+  - 时区支持（`schedule.timezone`，IANA 名，默认 Asia/Shanghai）；单测覆盖表达式解析/匹配/非法输入、总线分发与 panic 隔离、去重扫描（当天去重/次日重发/逾期天数）、邮件内容与报文组装
+- **AI 事件总线工具**（Agent 与事件系统打通）：
+  - `list_events`（只读）：总线内省——`KnownTopics` 注册表（topic → 用途说明）+ 实时订阅者数，AI 据此了解可触发什么
+  - `notify_user(subject, body)`（写类，走审批）：向当前用户发布 `user.notify` 自定义通知事件 → EmailNotifier 订阅并按用户邮箱投递；发布异步（受理即返回），用户未配置邮箱时跳过记日志
+- **用户邮箱字段**（迁移 000008：users 加 `email` 列 + `notify_log` 去重表）：通知投递目标。admin 用户管理创建/编辑支持邮箱（格式校验）；用户自助修改接口 `POST /api/profile/email`（空串 = 清空不再接收提醒），移动端「我的」页提供编辑入口；`userinfo` 聚合接口携带 email
 - **AI 工具调用（Agent 模式）**（`config.yaml` `ai.tools: true` 或环境变量 `AI_TOOLS=true` 开启，默认关闭保持纯对话；要求上游模型支持 function calling）：`/api/ai/chat` 从透传代理升级为服务端 Agent 循环——模型可调用 4 个内置工具（`list_dir` 列目录 / `read_file` 读文件 / `list_tasks` 查任务 / `create_task` 建任务），后端执行并把结果以 tool 消息回传模型继续决策，最多 5 轮（防无限循环）：
   - 安全：工具一律在后端执行，文件路径复用 `resolveUserPathSafe` 沙箱校验（safeJoin + EvalSymlinks），前端只做展示；工具结果限长 32KB（防撑爆上下文）、执行 panic 兜底转为错误结果回传模型
   - 流式解析：`tool_calls` 分片按 index 累积（id/name 首片携带、arguments 逐片拼接）；中间轮上游 `data: [DONE]` 抑制、最终轮统一补发（否则前端提前断流）；流已开启后上游再失败改走 SSE `error` 事件（HTTP 状态码已不可改）
   - SSE 协议扩展：新增 `event: tool_call` / `tool_result` / `error` 自定义事件
   - 前端：消息气泡内可折叠工具调用卡片（工具名/参数摘要/执行结果 JSON，执行中闪烁、出错红框），PC 面板与移动端共用新组件 `ToolCallList`；会话历史保留工具上下文（`toPayloadMessages` 展开为 assistant(tool_calls)+tool(结果) 序列回传，多轮对话模型可见自己调过什么）；`/api/ai/status` 新增 `tools` 字段
   - 消息校验扩展：role 支持 `tool`，assistant 带 `tool_calls` 时 content 允许为空；新增流式分片拼接/[DONE] 抑制/断开/校验单测
+- **AI 写类工具与审批机制（Human-in-the-loop）**：Agent 模式新增 2 个写工具——`write_file`（写/覆盖文件，父目录须已存在，内容限 256KB）与 `update_task`（更新已有任务，先读现有任务再合并改动字段——db 层 UpdateTask 为全字段覆盖写，防未提供字段被清空）；写工具执行前必须经用户确认：
+  - 跨请求协调：SSE 对话流发 `approval_request` 事件后阻塞等待，用户经 `POST /api/ai/approval {id, approved}`（独立 HTTP 连接）提交决定，`aiApprovalHub`（channel + 一次性条目 + 用户绑定）接通两条连接；审批 ID 直接复用上游 tool_call ID
+  - 安全：审批绑定发起用户（归属校验通过才消费/删除条目——陌生人请求无法作废他人审批）、一次性语义（重复提交失败）、60s 超时视为拒绝、客户端断开（关面板/停止生成）自动作废不执行
+  - SSE 新增 `approval_request` / `approval_resolved` 事件；拒绝/超时以说明性结果作为 tool 消息回传模型，由模型向用户解释原因后继续对话
+  - 前端：工具卡片待确认态显示「批准/拒绝」按钮与状态徽标（待确认/已批准/已拒绝/已超时），本地先更新防重复点击、提交失败回滚可重试；中断生成时未决审批定格为已拒绝；PC 面板与移动端共用 `ToolCallList`
+  - 新增审批协调器单测（决定传递/归属校验/一次性/作废语义），首版实现"先删后校验归属"的缺陷由测试暴露后修复
+
+### Fixed
+
+- **邮件主题显示原始编码（`=?UTF-8?B?...`）**：`b64()` 对最后一段也补 `\r\n`，主题 encoded-word 被裸换行截断且无 `?=` 闭合，收件方无法解码原样显示。新增 `encodeWord`（RFC 2047）：按 ~40 字节切段（回退 UTF-8 字符边界防切断中文）、每段独立闭合、段间 CRLF+空格续行折叠；显示名同样处理（支持中文）
+- **AI 定时任务执行成功但邮件查询失败（context canceled）**：`runAIJob` 的 `runCtx` 在函数 return 时被 `defer cancel()` 取消，而 `bus.Publish` 的邮件 handler 是异步 goroutine——LLM 完成后主流程毫秒级返回并取消 ctx，handler 的查库请求被打断（竞态）。发布事件改用独立长生命周期 ctx（事件分发不绑定发布方生命周期）
+- **AI 写工具审批按钮不显示（用户反馈超时取消的根因）**：`useAIChat.streamReply` 中 `reply` 对象 push 进响应式数组后，流式回调仍在修改**原始对象**（raw）——Vue 深层代理不为 raw 修改触发视图更新，`approval: 'pending'` 状态变化无法到达 `ToolCallList`，批准/拒绝按钮永不渲染（60s 超时必然发生）。改为 push 后取 `messages.value[len-1]` 响应式代理操作；顺带：审批超时 60s → 5 分钟（人工操作场景），待确认的工具卡片自动展开（不依赖用户点开折叠卡片）
+- **长会话报错 too many messages (max 30)**：Agent 对话中一条"AI 回复"在 payload 展开为 assistant(tool_calls) + N 条 tool 消息，原 `HISTORY_LIMIT=20`（按显示条数）展开后突破后端 30 条上限。历史截断改为**按"轮"预算**（user + 其回复为原子单位，展开后总条数 ≤28，从尾部往前取）——既不超限，也不把 assistant 与其 tool 消息拆开（OpenAI 语义非法）
+- **TodoView 打开即崩（TypeError: e.showModal is undefined）**：useTodoApp 拆分重构时编辑弹窗 store refs（`showModal`/`isCreating`/`editingTask`/`editingDateRange`/`activeTaskId`）经 ctx 传入各域模块后不再经域模块转发，主 return 导出面遗漏——TodoView 的 `watch(todoApp.showModal.value)` 与模板 `v-if="showModal"` 全部失效；导出面补齐
+
+### Changed
+
+- **AI 对话 UI**：操作按钮布局重做——user 提问 hover 悬浮显示、AI 回答常驻，均在气泡下方流内排列（对齐文字列、避开头像列），轻量线性图标（无边框、hover 主题色）；长会话渲染窗口（打开只渲染最近 5 条，顶部"加载更早"逐批 +10 展开）；PC 面板左缘消息目录刻度（条宽随内容长度变化、hover 显示消息摘要、点击平滑跳转、**滚动律动**——活跃条拉长变深、相邻按距离衰减，随滚动实时跟随）
+
+### Performance
+
+- **任务列表/详情分离（content 瘦身）**：`GET /api/tasks` 列表不再携带任务正文（content）全文，以 80 字截断的 `contentPreview`（按 rune 截，防中文乱码）替代；新增 `GET /api/tasks/{id}` 详情接口返回完整任务（含 content）。配套防丢数据设计：
+  - **PATCH content 缺省语义**：`db.UpdateTask` 为全字段覆盖写，列表瘦身后看板拖拽/勾选完成/移动端快捷操作等路径的任务对象没有 content 字段——patchTask 解析请求体探测 `task.content` 字段是否存在，缺失时回填服务端现值（快捷修改零改动且不再清空正文）；显式传空串 = 用户主动清空
+  - `TaskItem.Content` 加 `omitempty`（空正文序列化省略，与旧版响应兼容）+ 新增 `ContentPreview` 字段
+  - 前端：PC 编辑弹窗改为**先拉详情成功再弹窗**（失败不弹，杜绝无正文对象进入保存链路）；移动端任务详情点击时拉取（失败降级）；看板卡片预览用 `contentPreview`；冲突对比卡两侧（编辑对象/服务端副本）均含 content，对比逻辑不变
+  - AI 的 `update_task` 工具本就先读后合并全量写，不受影响
+- **API/静态资源响应压缩**：全局压缩中间件（iris `CompressWriter`，gzip/deflate/br 按客户端 Accept-Encoding 协商，不声明则自动回退不压缩）。排查 `/api/tasks` 公网访问慢（0.59s）定位：服务端直连仅 2.2ms，慢在网络传输——56KB 未压缩 JSON 在公网 RTT 下需多轮传输。压缩后 JSON/前端静态资源（embed 的 JS/CSS）预计缩减 70-85%；流式接口显式排除：`/api/media`（`http.ServeContent` 的 Range 字节区间与压缩语义冲突，视频拖动会失效）、`/api/ai/chat`（SSE 逐行透传，压缩徒增小 gzip 块）。压缩中间件与访问日志的 `Record` 顺序兼容（记录未压缩数据）；附压缩行为单测（声明/不声明 Accept-Encoding、流式路径跳过三例）
 
 ## [1.3.0] - 2026-11-10
 

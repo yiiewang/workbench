@@ -96,7 +96,7 @@ var aiTools = []aiTool{
 	},
 	{
 		Name: "create_task",
-		Desc: "为当前用户创建一条新的 Todo 任务（状态为待办）",
+		Desc: "为当前用户创建一条新的 Todo 任务（状态为待办）。时间范围建议给全：scheduled（计划开始日）与 due（截止日）至少给 due",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -113,17 +113,21 @@ var aiTools = []aiTool{
 					"enum":        []string{"high", "medium", "low"},
 					"description": "优先级，默认 medium",
 				},
+				"scheduled": map[string]any{
+					"type":        "string",
+					"description": "计划开始日期 YYYY-MM-DD；用户未指定时默认与 due 相同",
+				},
 				"due": map[string]any{
 					"type":        "string",
-					"description": "截止日期，格式 YYYY-MM-DD，可选",
-				},
-				"dueTime": map[string]any{
-					"type":        "string",
-					"description": "截止时刻 HH:mm（需同时给 due），到点自动邮件提醒，可选",
+					"description": "截止日期 YYYY-MM-DD；用户未指定时默认当天",
 				},
 				"scheduledTime": map[string]any{
 					"type":        "string",
 					"description": "计划开始时刻 HH:mm，到点自动邮件提醒，可选",
+				},
+				"dueTime": map[string]any{
+					"type":        "string",
+					"description": "截止时刻 HH:mm，到点自动邮件提醒，可选",
 				},
 			},
 			"required": []string{"title"},
@@ -160,11 +164,12 @@ var aiTools = []aiTool{
 					"type":        "string",
 					"description": "任务 ID（可用 list_tasks 查询），必填",
 				},
-				"title":    map[string]any{"type": "string", "description": "新标题"},
-				"content":  map[string]any{"type": "string", "description": "新详细说明"},
-				"status":   map[string]any{"type": "string", "enum": []string{"todo", "progress", "done"}, "description": "新状态"},
-				"priority": map[string]any{"type": "string", "enum": []string{"high", "medium", "low"}, "description": "新优先级"},
-				"due":      map[string]any{"type": "string", "description": "新截止日期 YYYY-MM-DD"},
+				"title":     map[string]any{"type": "string", "description": "新标题"},
+				"content":   map[string]any{"type": "string", "description": "新详细说明"},
+				"status":    map[string]any{"type": "string", "enum": []string{"todo", "progress", "done"}, "description": "新状态"},
+				"priority":  map[string]any{"type": "string", "enum": []string{"high", "medium", "low"}, "description": "新优先级"},
+				"scheduled": map[string]any{"type": "string", "description": "新计划开始日期 YYYY-MM-DD"},
+				"due":       map[string]any{"type": "string", "description": "新截止日期 YYYY-MM-DD"},
 				"dueTime":  map[string]any{"type": "string", "description": "截止时刻 HH:mm，到点自动邮件提醒；传空串清除"},
 				"scheduledTime": map[string]any{"type": "string", "description": "计划开始时刻 HH:mm，到点自动邮件提醒；传空串清除"},
 				"progress": map[string]any{"type": "integer", "description": "进度百分比 0-100"},
@@ -435,10 +440,23 @@ func execCreateTask(s *Server, ctx iris.Context, args map[string]any) any {
 		priority = "medium"
 	}
 	due, _ := args["due"].(string)
-	if due != "" {
-		if _, err := time.Parse("2006-01-02", due); err != nil {
-			return map[string]any{"error": "due must be YYYY-MM-DD"}
-		}
+	scheduled, _ := args["scheduled"].(string)
+	today := time.Now().Format("2006-01-02")
+	// 默认值：未给 due → 当天；未给 scheduled → 与 due 相同（保证任务有时间范围）
+	if due == "" {
+		due = today
+	}
+	if scheduled == "" {
+		scheduled = due
+	}
+	if _, err := time.Parse("2006-01-02", due); err != nil {
+		return map[string]any{"error": "due must be YYYY-MM-DD"}
+	}
+	if _, err := time.Parse("2006-01-02", scheduled); err != nil {
+		return map[string]any{"error": "scheduled must be YYYY-MM-DD"}
+	}
+	if scheduled > due {
+		return map[string]any{"error": "scheduled must not be later than due"}
 	}
 	dueTime, _ := args["dueTime"].(string)
 	scheduledTime, _ := args["scheduledTime"].(string)
@@ -453,6 +471,7 @@ func execCreateTask(s *Server, ctx iris.Context, args map[string]any) any {
 		Content:       content,
 		Status:        "todo",
 		Priority:      priority,
+		Scheduled:     scheduled,
 		Due:           due,
 		DueTime:       dueTime,
 		ScheduledTime: scheduledTime,
@@ -463,7 +482,8 @@ func execCreateTask(s *Server, ctx iris.Context, args map[string]any) any {
 	if err != nil {
 		return map[string]any{"error": "create task failed"}
 	}
-	return map[string]any{"ok": true, "taskId": string(task.ID), "title": title, "priority": priority, "due": due, "revision": rev}
+	return map[string]any{"ok": true, "taskId": string(task.ID), "title": title, "priority": priority,
+		"scheduled": scheduled, "due": due, "revision": rev}
 }
 
 // validHHMM 校验 HH:mm 时刻（空串合法 = 无精确时间）
@@ -763,6 +783,14 @@ func execUpdateTask(s *Server, ctx iris.Context, args map[string]any) any {
 		default:
 			return map[string]any{"error": "priority must be high|medium|low"}
 		}
+	}
+	if v, ok := args["scheduled"].(string); ok {
+		if v != "" {
+			if _, err := time.Parse("2006-01-02", v); err != nil {
+				return map[string]any{"error": "scheduled must be YYYY-MM-DD"}
+			}
+		}
+		cur.Scheduled = v
 	}
 	if v, ok := args["due"].(string); ok {
 		if v != "" {

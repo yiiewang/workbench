@@ -223,6 +223,19 @@ func (s *Server) handleAISessionDelete(ctx iris.Context) {
 // aiMaxToolRounds 单次对话允许的最大工具轮数（防模型无限循环调用）
 const aiMaxToolRounds = 5
 
+// aiSystemPrompt Agent 模式的系统提示：角色 + 当前时间 + 写操作礼仪。
+// 模型没有时间感知——此前用户让 AI "建个明天截止的任务"时日期全靠猜。
+func aiSystemPrompt(now time.Time) string {
+	local := now.Format("2006-01-02 15:04") + " " + []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}[now.Weekday()]
+	return "你是 Workbench 个人开发平台的 AI 助手，可调用工具帮助用户管理文件、Todo 任务、定时任务与通知。\n" +
+		"当前时间：" + local + "。涉及\"今天/明天/下周\"等日期推算时一律以此为准，不要凭空猜测。\n" +
+		"行为要求：\n" +
+		"1. 执行写操作（创建/修改任务、写文件、发通知、安排定时任务）前，先用一两句话向用户说明你的计划（要做什么、关键参数如日期时刻），再发起工具调用等待批准；一次只安排一个写操作，等确认后再进行下一个。\n" +
+		"2. 创建/修改任务时给全时间范围参数：用户说了开始与截止就都填；只说截止则 scheduled 与 due 相同；都没说则默认都为当天。涉及具体钟点（如\"晚上 8 点\"）时同时给对应的 Time 参数，到点会自动邮件提醒。\n" +
+		"3. 用户消息中引用的文件内容已附在消息里，无需再调用 read_file。\n" +
+		"4. 回答保持简洁，直接给出结果。"
+}
+
 func (s *Server) handleAIChat(ctx iris.Context) {
 	if !s.cfg.AI.Enabled() {
 		writeFail(ctx, http.StatusServiceUnavailable, CodeAINotConfigured)
@@ -250,6 +263,11 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 	upstreamURL := normalizeAIEndpoint(s.cfg.AI.BaseURL)
 	toolsOn := s.cfg.AI.Tools
 	msgs := req.Messages
+	// Agent 模式注入系统提示：平台角色 + 当前时间（模型无时间感知，
+	// 此前任务日期全靠猜）+ 写操作前置说明要求（先解释计划再请求确认）
+	if toolsOn {
+		msgs = append([]aiMessage{{Role: "system", Content: aiSystemPrompt(time.Now())}}, msgs...)
+	}
 
 	// 绑定请求上下文：客户端断开 → 上游取消
 	upCtx, cancel := context.WithTimeout(ctx.Request().Context(), aiStreamTimeout)

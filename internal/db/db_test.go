@@ -31,7 +31,7 @@ func TestOpen_CreatesTables(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 
-	tables := []string{"orgs", "users", "tasks", "shares", "app_secrets", "visit_logs"}
+	tables := []string{"orgs", "users", "tasks", "shares", "app_secrets"}
 	for _, tbl := range tables {
 		var name string
 		err := d.conn.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&name)
@@ -367,41 +367,6 @@ func TestIncrementShareAccessCount_Unlimited(t *testing.T) {
 }
 
 // ============================================================
-// 访问统计
-// ============================================================
-
-func TestStats_LogAndQuery(t *testing.T) {
-	t.Parallel()
-	d := newTestDB(t)
-
-	stats, err := d.GetStatsByOrg(ctx(), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.TotalVisitors != 0 || stats.TotalPageViews != 0 {
-		t.Fatalf("empty stats = %+v", stats)
-	}
-
-	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", 1, "ua", "/a", 200)
-	_ = d.LogVisit(ctx(), "v1", "1.1.1.1", 1, "ua", "/b", 200)
-	_ = d.LogVisit(ctx(), "v2", "2.2.2.2", 1, "ua", "/a", 200)
-
-	stats, _ = d.GetStatsByOrg(ctx(), 1)
-	if stats.TotalVisitors != 2 {
-		t.Fatalf("visitors = %d, want 2", stats.TotalVisitors)
-	}
-	if stats.TotalPageViews != 3 {
-		t.Fatalf("page views = %d, want 3", stats.TotalPageViews)
-	}
-	v1 := stats.Visitors["v1"]
-	if v1.Visits != 2 || v1.PagesVisited != 2 {
-		t.Fatalf("v1 = %+v", v1)
-	}
-	if stats.TopPages["/a"] != 2 {
-		t.Fatalf("top page /a = %d, want 2", stats.TopPages["/a"])
-	}
-}
-
 // ============================================================
 // 限流（DB 持久化）
 // ============================================================

@@ -142,7 +142,6 @@ func (s *Server) App() *iris.Application {
 	// 用户自助修改通知邮箱（任务到期提醒投递目标）
 	api.Post("/profile/email", auth, s.handleProfileEmail)
 	api.Get("/org/features", auth, s.handleOrgFeatures)
-	api.Get("/stats", auth, s.handleStats)
 	api.Get("/map", auth, s.handleMap)
 	api.Get("/tree", auth, s.handleTree)
 	api.Get("/org-members", auth, s.handleOrgMembers)
@@ -264,21 +263,6 @@ func (s *Server) handleRouteRedirect(ctx iris.Context) bool {
 		return true
 	}
 	return false
-}
-
-// ============================================================
-// GET /api/stats
-// ============================================================
-
-func (s *Server) handleStats(ctx iris.Context) {
-	rctx := ctx.Request().Context()
-	orgID := currentOrgID(ctx)
-	stats, err := s.db.GetStatsByOrg(rctx, orgID)
-	if err != nil {
-		serverError(ctx, "get stats failed", err)
-		return
-	}
-	writeOK(ctx, stats)
 }
 
 // ============================================================
@@ -1418,13 +1402,6 @@ func (s *Server) loggingMiddleware() iris.Handler {
 			ua = ua[:50]
 		}
 		visitorID := fmt.Sprintf("%s|%s", ip, ua)
-		path := ctx.Path()
-		orgID := currentOrgID(ctx)
-		go func() {
-			if err := s.db.LogVisit(context.Background(), visitorID, ip, orgID, ua, path, statusCode); err != nil {
-				slog.Error("log visit failed", "err", err)
-			}
-		}()
 
 		timestamp := time.Now().Format("2006-01-02 15:04:05")
 		writeAccessLog(s.logFile, timestamp, visitorID, ctx.Path(), fmt.Sprintf("%d", statusCode))

@@ -87,24 +87,6 @@ type TaskItem struct {
 	Done bool   `json:"done"`
 }
 
-// VisitorStat 访问统计中的访客信息
-type VisitorStat struct {
-	VisitorID    string `json:"visitor_id"`
-	Visits       int    `json:"visits"`
-	PagesVisited int    `json:"pages_visited"`
-	DurationSecs int    `json:"duration_seconds"`
-	FirstVisit   string `json:"first_visit"`
-	LastVisit    string `json:"last_visit"`
-}
-
-// VisitStats 访问统计汇总
-type VisitStats struct {
-	TotalVisitors  int                    `json:"total_visitors"`
-	TotalPageViews int                    `json:"total_page_views"`
-	Visitors       map[string]VisitorStat `json:"visitors"`
-	TopPages       map[string]int         `json:"top_pages"`
-}
-
 // sqliteBusyTimeoutMs SQLite busy 超时（毫秒）
 const sqliteBusyTimeoutMs = 5000
 

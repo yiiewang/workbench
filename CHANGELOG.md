@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **访问统计（visit_logs）**（迁移 000012 drop 表）：移除 `GET /api/stats` 接口与每请求的 visit_logs INSERT（无谓写放大）；文本访问日志（access log 文件）保留。历史统计数据随表删除，需要时可经 down 迁移恢复表结构重新启用
+
 ### Added
 
 - **任务精确时间提醒**（迁移 000009：tasks 加 `scheduled_time`/`due_time` 列，HH:mm 可选）：编辑弹窗时间范围选择器升级为 `datetimerange`（一个控件选日期 + 时刻；约定时刻 `00:00` = 未指定，归一为空，避免无时间任务触发凌晨提醒风暴）；每分钟扫描 job（`todo_time_reminder`）——`scheduled_time` 到点发"计划开始"提醒、`due_time` 到点且未完成发"即将截止"提醒，经 `task.reminder` 事件 → 邮件投递（含任务状态/优先级/进度）；去重键含时刻（`taskID:kind:HH:mm`），同分钟重跑不重发。PATCH 缺省保留语义扩展至 `scheduledTime`/`dueTime`（omitempty 空值省略，快捷修改不清空时刻）；AI 工具 `create_task`/`update_task` 支持 `dueTime`/`scheduledTime` 参数（HH:mm 校验，空串清除）

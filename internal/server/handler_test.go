@@ -449,7 +449,7 @@ func TestHandler_ShareNotYetEffective(t *testing.T) {
 }
 
 // ============================================================
-// /api/org-members, /api/map, /api/stats
+// /api/org-members, /api/map
 // ============================================================
 
 func TestHandler_OrgMembers(t *testing.T) {
@@ -462,14 +462,12 @@ func TestHandler_OrgMembers(t *testing.T) {
 		JSON().Object().Value("data").Object().Value("members").Array().NotEmpty()
 }
 
-func TestHandler_MapAndStats(t *testing.T) {
+func TestHandler_Map(t *testing.T) {
 	e, d, secret, _ := setupTestServer(t)
 	tok := createUser(t, d, secret, "org1", "alice", "p")
 	_ = d
 
 	e.GET("/api/map").WithHeader("Authorization", authHeader(tok)).
-		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
-	e.GET("/api/stats").WithHeader("Authorization", authHeader(tok)).
 		Expect().Status(http.StatusOK).JSON().Object().Value("code").Equal(0)
 }
 

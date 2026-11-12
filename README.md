@@ -127,7 +127,6 @@ notify:                        # notification channels (subscribe to the event b
 - **Download & Share** — Download any file; create time-limited, access-controlled shares for files or folders
 - **Static File Serving** — HTML, Markdown, JSON, CSS, JS, images with path traversal protection; gzip/br response compression
 - **Route Mapping** — Clean URLs, display name aliases, redirects, directory listings
-- **Visit Tracking** — Per-visitor and per-page statistics persisted in SQLite (`GET /__stats__`)
 - **Token Auth** — HMAC-SHA256 authentication; all file access requires valid Bearer token (fully private mode)
 - **User Management** — Admin role with a user management UI (create / edit / reset-password / delete users across orgs, per-user notification email)
 - **Share Management** — Create shares with access count limits, time ranges, optional passwords; manage all shares from sidebar panel
@@ -175,7 +174,6 @@ The mobile UI (`/m/*`, auto-served on viewports ≤900px) is a separate, browse-
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/__stats__` | GET | Visit statistics (requires token) |
 | `/__map__` | GET | Route configuration map (requires token) |
 | `/__tree__` | GET | File directory tree (JSON, requires token) |
 | `/api/org-members` | GET | List org members (`?orgId=xxx`, requires token) |

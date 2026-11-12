@@ -84,6 +84,22 @@ ai:                            # AI chat (OpenAI-compatible), disabled unless ap
   base_url: https://api.openai.com/v1
   api_key: ""                  # keep empty in the file — inject via AI_API_KEY env instead; never commit real keys
   model: gpt-4o-mini
+  tools: false                 # enable Agent tool calling (requires function-calling capable model); env: AI_TOOLS=true
+
+schedule:                      # cron scheduler + in-process event bus (internal/schedule)
+  enabled: false               # config-only (no env override); enables all scheduler jobs
+  timezone: Asia/Shanghai      # IANA timezone for cron evaluation
+  todo_due_cron: "*/5 * * * *" # due-date scan frequency
+
+notify:                        # notification channels (subscribe to the event bus)
+  email:
+    enabled: false             # requires schedule.enabled; recipient = task owner's email (per-user, set in UI)
+    host: smtp.qq.com          # SMTP server (587 STARTTLS; port 465 often blocked by cloud providers)
+    port: 587
+    user: ""                   # SMTP auth username (full address for QQ mail)
+    from: ""                   # sender address, defaults to user
+    from_name: "Workbench"     # display name shown in the recipient's inbox
+    # auth code is injected via env: EMAIL_PASS (never commit it)
 ```
 
 ### Environment Variables
@@ -105,17 +121,29 @@ ai:                            # AI chat (OpenAI-compatible), disabled unless ap
 - **File Browser** — Directory tree, tabbed editor, syntax highlighting for code/markdown/JSON
 - **Markdown Viewer** — Rendered markdown with Mermaid diagrams, cross-file link navigation, anchor scrolling
 - **JSON Viewer** — Collapsible tree view, raw text toggle, copy raw to clipboard
-- **AI Chat** — OpenAI-compatible chat panel (bottom-right), `@` file references, reasoning display, session history persisted in SQLite
+- **AI Chat & Agent** — OpenAI-compatible streaming chat with 13 built-in tools (file ops / task management / event publishing / scheduled jobs); Human-in-the-loop approval for write operations; `@` file references; reasoning display; session history persisted in SQLite
+- **Scheduled Tasks & Notifications** — Hand-written cron engine + in-process event bus; AI scheduled jobs (run your prompt at a cron time, results emailed); precise task-time reminders (start/due HH:mm); email delivery via SMTP 587 STARTTLS
 - **Todo ↔ File Linking** — Tasks can link files (tree picker in todo editor); the file viewer shows linked tasks with jump-to-task and link-existing-task actions
 - **Download & Share** — Download any file; create time-limited, access-controlled shares for files or folders
-- **Static File Serving** — HTML, Markdown, JSON, CSS, JS, images with path traversal protection
+- **Static File Serving** — HTML, Markdown, JSON, CSS, JS, images with path traversal protection; gzip/br response compression
 - **Route Mapping** — Clean URLs, display name aliases, redirects, directory listings
 - **Visit Tracking** — Per-visitor and per-page statistics persisted in SQLite (`GET /__stats__`)
 - **Token Auth** — HMAC-SHA256 authentication; all file access requires valid Bearer token (fully private mode)
-- **User Management** — Admin role with a user management UI (create / edit / reset-password / delete users across orgs)
+- **User Management** — Admin role with a user management UI (create / edit / reset-password / delete users across orgs, per-user notification email)
 - **Share Management** — Create shares with access count limits, time ranges, optional passwords; manage all shares from sidebar panel
-- **Todo Board** — User/org task management with conflict detection, version sync, multi-device support
+- **Todo Board** — User/org task management with conflict detection, optimistic-lock revision sync, multi-device support
 - **SQLite Storage** — All data in a single portable `workbench.db` file (WAL mode)
+
+### AI Agent Tools (13)
+
+When `ai.tools` is enabled, the chat agent can call these tools (write operations require in-chat approval):
+
+| Category | Tools |
+|---|---|
+| Files | `list_dir` · `read_file` · `write_file` |
+| Tasks | `list_tasks` · `create_task` · `update_task` |
+| Scheduled jobs | `list_ai_jobs` · `create_ai_job` · `update_ai_job` · `delete_ai_job` |
+| Events & notifications | `list_events` · `notify_user` |
 
 ### Feature Matrix (Desktop vs Mobile)
 
@@ -159,6 +187,12 @@ The mobile UI (`/m/*`, auto-served on viewports ≤900px) is a separate, browse-
 | `/api/share` | GET | List my shares (requires token) |
 | `/api/share` | POST | Create share `{resourcePath, resourceType, maxAccessCount, password, effectiveAt, expiresAt}` (requires token) |
 | `/api/share/{id}` | DELETE | Revoke share (requires token) |
+| `/api/profile/email` | POST | Update own notification email `{email}` (requires token) |
+| `/api/tasks/{id}` | GET | Task detail (full fields incl. content; requires token) |
+| `/api/ai/approval` | POST | Approve/decline an AI write-tool call `{id, approved}` (requires token) |
+| `/api/ai/jobs` | GET/POST | List / create AI scheduled jobs (requires token) |
+| `/api/ai/jobs/{id}` | PUT/DELETE | Update / delete an AI scheduled job (requires token) |
+| `/api/ai/jobs/{id}/runs` | GET | Job execution history (requires token) |
 | `/api/admin/users` | GET | List all users across orgs (admin only) |
 | `/api/admin/users` | POST | Create user `{org, name, password, roleId, mobile}` (admin only) |
 | `/api/admin/users/{id}` | PATCH | Update user `{name?, mobile?, password?, roleId?}` (admin only) |

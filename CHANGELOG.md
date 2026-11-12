@@ -49,9 +49,20 @@
 - **长会话报错 too many messages (max 30)**：Agent 对话中一条"AI 回复"在 payload 展开为 assistant(tool_calls) + N 条 tool 消息，原 `HISTORY_LIMIT=20`（按显示条数）展开后突破后端 30 条上限。历史截断改为**按"轮"预算**（user + 其回复为原子单位，展开后总条数 ≤28，从尾部往前取）——既不超限，也不把 assistant 与其 tool 消息拆开（OpenAI 语义非法）
 - **TodoView 打开即崩（TypeError: e.showModal is undefined）**：useTodoApp 拆分重构时编辑弹窗 store refs（`showModal`/`isCreating`/`editingTask`/`editingDateRange`/`activeTaskId`）经 ctx 传入各域模块后不再经域模块转发，主 return 导出面遗漏——TodoView 的 `watch(todoApp.showModal.value)` 与模板 `v-if="showModal"` 全部失效；导出面补齐
 
+### Added
+
+- **HTML 邮件模板**（简约版，设计稿 `docs/email-template-preview.html`）：三封邮件共用骨架（类型灰字/加粗标题/meta 信息行/正文/细分隔线/底部说明），`multipart/alternative`（HTML 优先 + 纯文本兜底，老客户端自动降级）；`mdToHTML` 极简渲染——markdown `##/-/**`（AI 执行 prompt 强制要求输出标准 markdown）+ 中文序号小标题（"一、二、"）+ `·/•` 列表兜底识别，用户内容经 `html/template` 转义防 XSS；AI 报告标题去掉 `[定时任务]` 前缀（类型标识移至顶部灰字）
+- **Agent 系统提示**：Agent 模式注入 system prompt——平台角色 + 当前日期时间（修复模型无时间感知、任务日期靠猜）+ 写操作礼仪（先说明计划再请求确认、一次一个写操作）+ 创建任务给全时间范围（只说截止则起止相同、涉及钟点给 Time 参数）
+- **任务时间范围参数补全**：`create_task`/`update_task` 新增 `scheduled`（计划开始日期）；创建默认值兜底（due 未给 → 当天、scheduled 未给 → 与 due 相同），AI 创建的任务永远有时间范围
+
 ### Changed
 
-- **AI 对话 UI**：操作按钮布局重做——user 提问 hover 悬浮显示、AI 回答常驻，均在气泡下方流内排列（对齐文字列、避开头像列），轻量线性图标（无边框、hover 主题色）；长会话渲染窗口（打开只渲染最近 5 条，顶部"加载更早"逐批 +10 展开）；PC 面板左缘消息目录刻度（条宽随内容长度变化、hover 显示消息摘要、点击平滑跳转、**滚动律动**——活跃条拉长变深、相邻按距离衰减，随滚动实时跟随）
+- **AI 对话 UI**：操作按钮布局重做——user 提问 hover 悬浮显示、AI 回答常驻，均在气泡下方流内排列（对齐文字列、避开头像列），轻量线性图标（无边框、hover 主题色）；长会话渲染窗口（打开只渲染最近 5 条，顶部"加载更早"逐批 +10 展开）
+- **AI 对话目录刻度**（PC 面板左缘，消息 >6 条时出现）：条宽随内容长度变化、点击平滑跳转、滚动律动（活跃条拉长变深、相邻按距离衰减，随滚动实时跟随）；摘要卡 `Teleport` 到 body 修复被 toc 容器 overflow 裁剪不显示的问题；滚动监听改模板 `@scroll` 声明式绑定（原 `onMounted` 手动绑定在面板未打开时绑了个空——律动失效的根因）；刻度条垂直居中/左对齐向右伸展/活跃条 28px；hover 期间摘要卡常驻（水平固定于目录列右缘、垂直平滑跟随选中条居中、内容原地更新不闪烁）、出现时淡入、两段式内容（粗体角色标题 + 灰色摘要）
+- **Todo 编辑弹窗时间选择**：`datetimerange` 一体选择（日期 + 时刻），宽度撑满表单列；约定时刻 `00:00` = 未指定（归一为空，避免无时间任务触发凌晨提醒风暴）
+- **AI 定时任务执行**：LLM 调用超时 2 → 5 分钟（推理模型生成日报类长文实测需要数分钟）；执行 prompt 明确输出格式要求（Markdown 分节/列表/粗体，禁用中文序号与 `·` 符号）
+- **移动端**：MHome 新增「AI 定时任务」入口（/jobs 响应式单列可用）；README 更新（Agent 工具 13 个清单、schedule/notify 配置段、8 个新 API 端点、Features）
+
 
 ### Performance
 

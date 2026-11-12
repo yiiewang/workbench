@@ -5,11 +5,23 @@ import { apiCall, authFetch } from '../lib/common'
 export interface Task {
   id: string
   title: string
-  content: string
+  /**
+   * 任务正文（markdown）。列表响应（getTasks/getMemberTasks）已瘦身不携带
+   * content 全文，此处为 undefined；编辑/详情场景经 getTaskDetail 拉取完整任务。
+   * 注意：快捷修改（拖拽/勾选）直接 PATCH 任务对象时 content 为 undefined，
+   * JSON 序列化省略该字段 → 后端按"缺失"语义保留服务端现值，不会清空正文。
+   */
+  content?: string
+  /** 列表响应中的正文预览（截断），卡片/列表项展示用 */
+  contentPreview?: string
   status: string
   priority: string
   scheduled: string
   due: string
+  /** 计划开始时刻（HH:mm，空 = 无精确时间提醒） */
+  scheduledTime?: string
+  /** 截止时刻（HH:mm，空 = 无精确时间提醒） */
+  dueTime?: string
   progress: number
   assignee: string
   postponedCount: number
@@ -22,6 +34,12 @@ export interface Task {
 // 全量同步：获取所有任务（GET /api/tasks）— 仅返回当前登录用户自己的任务
 export async function getTasks() {
   return apiCall('/api/tasks')
+}
+
+// 任务详情（GET /api/tasks/{id}）— 含 content 全文（列表已瘦身），
+// 编辑弹窗/详情查看用；同时返回当前 revision
+export async function getTaskDetail(id: string | number): Promise<{ task: Task; revision: number }> {
+  return apiCall(`/api/tasks/${encodeURIComponent(String(id))}`)
 }
 
 // 查看同组织成员的任务（只读）— GET /api/tasks/user/{userId}

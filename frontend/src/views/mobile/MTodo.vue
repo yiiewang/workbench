@@ -3,7 +3,7 @@
 // 四象限/甘特等复杂视图留在 PC；点击任务看详情（含关联文件，可跳移动预览）。
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getTasks, updateTask, type Task } from '../../api/tasks'
+import { getTasks, getTaskDetail, updateTask, type Task } from '../../api/tasks'
 import { currentUser } from '../../stores/auth'
 import { showToast } from '../../lib/common'
 import { renderMarkdown } from '../../lib/markdownRenderer'
@@ -81,6 +81,17 @@ function toggleDone(t: Task) {
   setStatus(t, t.status === 'done' ? 'todo' : 'done')
 }
 
+// 打开任务详情：列表已瘦身（无 content 全文），拉详情后再展示；
+// 拉取失败降级用列表数据（正文区不显示，其余字段可看可改）
+async function selectTask(t: Task) {
+  try {
+    const data = await getTaskDetail(t.id)
+    selected.value = data?.task || t
+  } catch {
+    selected.value = t
+  }
+}
+
 // 关联文件 → 移动端预览
 function openFile(path: string) {
   selected.value = null
@@ -111,7 +122,7 @@ function openFile(path: string) {
         v-for="t in g.list"
         :key="t.id"
         class="mt-task"
-        @click="selected = t"
+        @click="selectTask(t)"
       >
         <button class="mt-check" :class="{ done: t.status === 'done' }" @click.stop="toggleDone(t)">
           <svg v-if="t.status === 'done'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>

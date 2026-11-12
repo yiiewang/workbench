@@ -36,6 +36,8 @@ export interface AuthUser {
   userName: string
   orgName: string
   role: string
+  /** 通知邮箱（任务到期提醒投递目标，userinfo 刷新后携带） */
+  email?: string
   isPlatformAdmin?: boolean
 }
 

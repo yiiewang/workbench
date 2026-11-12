@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import { formatDate, newTaskId } from '../../lib/todoUtils'
 import { baseName, extFromPath } from '../../lib/common'
 import { openTabFn } from '../../stores/indexStore'
+import { getTaskDetail } from '../../api/tasks'
 
 export interface TodoEditorContext {
   tasks: Ref<any[]>
@@ -62,20 +63,32 @@ export function createTodoEditor(ctx: TodoEditorContext) {
       postponedCount: 0,
       autoPostponed: false,
     }
-    ctx.editingDateRange.value = [today, today]
+    ctx.editingDateRange.value = [today + ' 00:00', today + ' 00:00']
     ctx.showModal.value = true
   }
 
-  /** 编辑已有任务（浅拷贝，弹窗内改动不直接生效） */
-  function editTask(task: any) {
+  /** 编辑已有任务：先拉详情（content 不随列表下发），成功后再弹窗；
+   *  失败不弹窗，避免无正文的任务对象进入保存链路 */
+  async function editTask(task: any) {
     if (ctx.viewingMember.value) return
+    let full = task
+    try {
+      const data = await getTaskDetail(task.id)
+      if (data?.task) full = data.task
+    } catch {
+      ctx.showToast('加载任务详情失败，请重试', 'error')
+      return
+    }
     ctx.isCreating.value = false
-    ctx.editingTask.value = { ...task }
-    // 初始化日期区间选择器并保证 scheduled <= due
-    if (task.scheduled && task.due) {
-      const start = task.scheduled <= task.due ? task.scheduled : task.due
-      const end = task.scheduled <= task.due ? task.due : task.scheduled
-      ctx.editingDateRange.value = [start, end]
+    ctx.editingTask.value = { ...full }
+    // 初始化日期时间区间选择器（datetimerange：YYYY-MM-DD HH:mm）并保证 scheduled <= due；
+    // 无精确时间的任务回填 00:00 占位（提交时 00:00 归一为空 = 无精确提醒）
+    if (full.scheduled && full.due) {
+      const start = full.scheduled <= full.due ? full.scheduled : full.due
+      const end = full.scheduled <= full.due ? full.due : full.scheduled
+      const startT = start === full.scheduled ? (full.scheduledTime || '00:00') : (full.dueTime || '00:00')
+      const endT = start === full.scheduled ? (full.dueTime || '00:00') : (full.scheduledTime || '00:00')
+      ctx.editingDateRange.value = [start + ' ' + startT, end + ' ' + endT]
       ctx.editingTask.value.scheduled = start
       ctx.editingTask.value.due = end
     } else {
@@ -91,13 +104,26 @@ export function createTodoEditor(ctx: TodoEditorContext) {
   }
 
   // ========== 日期区间与进度联动 ==========
+  // datetimerange（YYYY-MM-DD HH:mm）→ 日期 + 时刻字段拆分。
+  // 约定：时刻 00:00 视为未指定精确提醒（存空串），避免无时间任务
+  // 回填 00:00 后整点触发无意义的提醒风暴。
   function onEditingDateRangeChange(dates: string[] | null) {
+    const split = (dt: string) => ({
+      date: dt.slice(0, 10),
+      time: dt.length > 10 && dt.slice(11, 16) !== '00:00' ? dt.slice(11, 16) : '',
+    })
     if (dates && dates.length === 2) {
-      ctx.editingTask.value.scheduled = dates[0]
-      ctx.editingTask.value.due = dates[1]
+      const s = split(dates[0])
+      const e = split(dates[1])
+      ctx.editingTask.value.scheduled = s.date
+      ctx.editingTask.value.due = e.date
+      ctx.editingTask.value.scheduledTime = s.time
+      ctx.editingTask.value.dueTime = e.time
     } else {
       ctx.editingTask.value.scheduled = null
       ctx.editingTask.value.due = null
+      ctx.editingTask.value.scheduledTime = ''
+      ctx.editingTask.value.dueTime = ''
     }
   }
 

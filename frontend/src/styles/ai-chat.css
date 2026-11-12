@@ -5,18 +5,36 @@
 .ai-msg { display: flex; gap: 8px; align-items: flex-start; position: relative; }
 .ai-msg.user { flex-direction: row-reverse; }
 
-/* hover/触屏工具条 */
+/* 消息操作条：两种形态——
+   user：hover 时显示在气泡下方（右对齐，流内换行，不悬浮压住头像）；
+   assistant：常驻显示在气泡下方（左对齐）。均为轻量线性图标（无边框）。 */
 .ai-msg-actions {
-  position: absolute;
-  top: -6px;
-  right: 0;
   display: flex;
-  gap: 2px;
+  gap: 4px;
   opacity: 0;
   transition: opacity .15s;
-  z-index: 1;
+  order: 3;
+  width: 100%;
+  margin-top: -4px; /* 抵消 flex 换行的 row gap，紧凑贴合气泡 */
 }
+.ai-msg { flex-wrap: wrap; }
 .ai-msg:hover .ai-msg-actions { opacity: 1; }
+/* 按钮对齐到气泡文字列（避开头像列 26px + 8px 间距） */
+.ai-msg.user .ai-msg-actions { justify-content: flex-end; padding-right: 34px; }
+.ai-msg.assistant .ai-msg-actions { opacity: 1; justify-content: flex-start; padding-left: 34px; }
+/* 加载更早消息（长会话渲染窗口） */
+.ai-load-more {
+  align-self: center;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-dim);
+  border-radius: 12px;
+  font-size: 11px;
+  padding: 4px 12px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+.ai-load-more:hover { color: var(--accent); border-color: var(--accent); }
 @media (hover: none) {
   .ai-msg-actions { opacity: 1; } /* 触屏常显 */
 }
@@ -25,16 +43,16 @@
   align-items: center;
   justify-content: center;
   width: 22px;
-  height: 22px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--bg);
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: none;
   color: var(--text-dim);
   cursor: pointer;
   padding: 0;
 }
-.ai-act:hover { color: var(--accent); border-color: var(--accent); }
-.ai-act svg { width: 11px; height: 11px; }
+.ai-act:hover { color: var(--accent); background: var(--code-bg); }
+.ai-act svg { width: 12px; height: 12px; }
 
 /* 头像 */
 .ai-avatar {
@@ -168,6 +186,35 @@
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* 审批徽标（写类工具状态） */
+.ai-tool-approval { flex: none; font-size: 10px; padding: 1px 6px; border-radius: 8px; }
+.ai-tool-approval.is-pending { color: #b8860b; background: rgba(230, 170, 30, 0.15); animation: ai-tool-blink 1.2s ease-in-out infinite; }
+.ai-tool-approval.is-approved { color: #2e7d32; background: rgba(60, 160, 70, 0.14); }
+.ai-tool-approval.is-declined, .ai-tool-approval.is-timeout { color: #a04040; background: rgba(220, 80, 80, 0.14); }
+
+/* 待确认操作条 */
+.ai-tool-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+}
+.ai-tool-confirm-tip { flex: 1; font-size: 11px; color: var(--text-dim); }
+.ai-tool-btn {
+  flex: none;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+  border-radius: 6px;
+  background: none;
+  font-size: 11px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+.ai-tool-btn.is-ok { color: #2e7d32; border-color: rgba(60, 160, 70, 0.5); }
+.ai-tool-btn.is-ok:hover { background: rgba(60, 160, 70, 0.14); }
+.ai-tool-btn.is-no { color: #a04040; border-color: rgba(220, 80, 80, 0.5); }
+.ai-tool-btn.is-no:hover { background: rgba(220, 80, 80, 0.14); }
 .ai-reasoning-body {
   margin-top: 4px;
   padding: 8px 10px;

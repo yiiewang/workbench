@@ -54,9 +54,9 @@ export default {
         {{ task.title }}
       </div>
 
-      <!-- 备注（card 变体独有） -->
-      <div v-if="variant === 'card' && task.content" class="task-item-content">
-        {{ task.content }}
+      <!-- 备注（card 变体独有）：列表已瘦身，用 contentPreview；详情对象兜底 content -->
+      <div v-if="variant === 'card' && (task.contentPreview || task.content)" class="task-item-content">
+        {{ task.contentPreview || task.content }}
       </div>
 
       <!-- 元信息行（优先级 + 截止日期 + 进度环，统一样式） -->

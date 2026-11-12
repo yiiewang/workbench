@@ -4,7 +4,7 @@
 import { ref, computed, watch } from 'vue'
 import { loggedIn, currentUser } from '../stores/auth'
 import {
-  getAIStatus, chatStream,
+  getAIStatus, chatStream, approveAITool,
   listAISessions, getAISession, createAISession, updateAISession, deleteAISession,
   type ChatMessage, type AISessionSummary, type AiPayloadMessage,
 } from '../api/ai'
@@ -26,8 +26,21 @@ export function useAIChat(onScrollBottom?: () => void) {
   let abortCtrl: AbortController | null = null
   let sessionId = newId()
 
-  const HISTORY_LIMIT = 20
+  // payload 展开后总条数预算（后端上限 30，留余量）：Agent 对话一条
+  // "AI 回复"展开为 assistant(tool_calls) + N 条 tool 消息，按显示条数截断
+  // 会超限，必须按展开后条数计
+  const HISTORY_BUDGET = 28
   const CTX_TEXT_LIMIT = 20_000
+
+  // ---- 消息渲染窗口：长会话只渲染最近 N 条（顶部"加载更早"逐批展开）----
+  const INITIAL_VISIBLE = 5
+  const LOAD_MORE_STEP = 10
+  const visibleCount = ref(INITIAL_VISIBLE)
+  const visibleMessages = computed(() => messages.value.slice(-visibleCount.value))
+  const hiddenCount = computed(() => Math.max(0, messages.value.length - visibleCount.value))
+  function showMore() {
+    visibleCount.value += LOAD_MORE_STEP
+  }
 
   const pendingCtxFiles = ref<string[]>([])
   const showFilePicker = ref(false)
@@ -145,6 +158,7 @@ export function useAIChat(onScrollBottom?: () => void) {
       messages.value = (detail?.messages || []).filter(m => m?.role && typeof m.content === 'string')
       dbSessionId.value = detail.id
       sessionId = newId()
+      visibleCount.value = INITIAL_VISIBLE
       sessionsOpen.value = false
       try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
       scrollBottom()
@@ -182,6 +196,7 @@ export function useAIChat(onScrollBottom?: () => void) {
   function clearChat() {
     if (streaming.value) stopStreaming()
     messages.value = []
+    visibleCount.value = INITIAL_VISIBLE
     sessionId = newId()
     dbSessionId.value = null
     try { sessionStorage.setItem(NEW_CHAT_FLAG, '1') } catch { /* 忽略 */ }
@@ -245,21 +260,46 @@ export function useAIChat(onScrollBottom?: () => void) {
     return out
   }
 
+  // 历史按"轮"预算截断：user + 其回复是一轮（原子单位）。
+  // 从尾部往前收集轮次，展开后总条数不超预算——避免把 assistant
+  // 与其 tool 消息拆开（OpenAI 语义：tool 消息必须紧跟对应 tool_calls），
+  // 也避免超过后端 aiMaxMessages 上限。
+  function buildPayloadHistory(msgs: ChatMessage[]): AiPayloadMessage[] {
+    const rounds: ChatMessage[][] = []
+    for (const m of msgs) {
+      if (m.role === 'user') rounds.push([m])
+      else if (rounds.length) rounds[rounds.length - 1].push(m)
+    }
+    let count = 0
+    let start = rounds.length
+    for (let i = rounds.length - 1; i >= 0; i--) {
+      const r = rounds[i]
+      const cost = r.reduce((s, m) => s + (m.toolCalls?.length ? 1 + m.toolCalls.length : 1), 0)
+      if (count + cost > HISTORY_BUDGET) break
+      count += cost
+      start = i
+    }
+    return toPayloadMessages(rounds.slice(start).flat())
+  }
+
   async function streamReply(userMsg: ChatMessage) {
     const reply: ChatMessage = { role: 'assistant', content: '', reasoning: '', toolCalls: [] }
     messages.value.push(reply)
+    // 关键：push 后取响应式代理再操作——直接改原始对象（raw）不会触发
+    // 视图更新（审批按钮/工具卡片依赖此处的实时变更）
+    const live = messages.value[messages.value.length - 1]
     streaming.value = true
     scrollBottom()
 
     abortCtrl = new AbortController()
     const qaId = newId()
     const ctxText = await buildCtxText(userMsg.files || [])
-    const history = messages.value.slice(0, -2).slice(-HISTORY_LIMIT)
+    const history = messages.value.slice(0, -2)
     const question = ctxText
       ? `【引用文件内容】\n${ctxText}\n【引用文件结束】\n\n我的问题：${userMsg.content}`
       : userMsg.content
     const payload: AiPayloadMessage[] = [
-      ...toPayloadMessages(history),
+      ...buildPayloadHistory(history),
       { role: 'user', content: question },
     ]
     try {
@@ -268,32 +308,47 @@ export function useAIChat(onScrollBottom?: () => void) {
         qaId,
         sessionId,
         onReasoning: (delta) => {
-          reply.reasoning = (reply.reasoning || '') + delta
+          live.reasoning = (live.reasoning || '') + delta
           scrollBottom()
           throttledPersist()
         },
         onDelta: (delta) => {
-          reply.content += delta
+          live.content += delta
           scrollBottom()
           throttledPersist()
         },
         onToolCall: (tc) => {
-          reply.toolCalls = reply.toolCalls || []
-          reply.toolCalls.push({ id: tc.id, name: tc.name, arguments: tc.arguments })
+          live.toolCalls = live.toolCalls || []
+          live.toolCalls.push({ id: tc.id, name: tc.name, arguments: tc.arguments })
           scrollBottom()
         },
         onToolResult: (tr) => {
-          const tc = reply.toolCalls?.find(t => t.id === tr.id)
+          const tc = live.toolCalls?.find(t => t.id === tr.id)
           if (tc) tc.result = tr.result
           scrollBottom()
           throttledPersist()
         },
+        onApprovalRequest: (ar) => {
+          const tc = live.toolCalls?.find(t => t.id === ar.id)
+          if (tc) tc.approval = 'pending'
+          scrollBottom()
+        },
+        onApprovalResolved: (ar) => {
+          // 超时场景由后端通知收尾；用户自己点击的场景与本地状态一致（幂等）
+          const tc = live.toolCalls?.find(t => t.id === ar.id)
+          if (tc && tc.approval === 'pending') tc.approval = ar.outcome
+          scrollBottom()
+        },
       })
     } catch (e: any) {
       if (e?.name === 'AbortError') {
-        if (!reply.content) reply.content = '（已停止）'
+        if (!live.content) live.content = '（已停止）'
+        // 中断时未决的审批卡片定格为已取消（后端断开兜底会作废审批）
+        for (const tc of live.toolCalls || []) {
+          if (tc.approval === 'pending') tc.approval = 'declined'
+        }
       } else {
-        reply.content = reply.content || '⚠ ' + (e?.message || '请求失败')
+        live.content = live.content || '⚠ ' + (e?.message || '请求失败')
         showToast(e?.message || 'AI 请求失败')
       }
     } finally {
@@ -318,6 +373,24 @@ export function useAIChat(onScrollBottom?: () => void) {
   function copyMessage(m: ChatMessage) {
     copyToClipboard(m.content)
     showToast('已复制')
+  }
+
+  // 用户对写工具调用的审批决定（Human-in-the-loop）：
+  // 先更新本地卡片状态（防重复点击），提交失败回滚为待确认允许重试
+  async function approveToolCall(id: string, approved: boolean) {
+    const mark = (val: 'pending' | 'approved' | 'declined') => {
+      for (const m of messages.value) {
+        const tc = m.toolCalls?.find(t => t.id === id)
+        if (tc) tc.approval = val
+      }
+    }
+    mark(approved ? 'approved' : 'declined')
+    try {
+      await approveAITool(id, approved)
+    } catch (e: any) {
+      showToast(e?.msg || e?.message || '提交失败，请重试')
+      mark('pending')
+    }
   }
 
   async function regenerate() {
@@ -352,7 +425,8 @@ export function useAIChat(onScrollBottom?: () => void) {
   const userInitial = computed(() => (currentUser.value?.userName || 'U').charAt(0).toUpperCase())
 
   function isStreamingTail(i: number): boolean {
-    return streaming.value && i === messages.value.length - 1 && messages.value[i].role === 'assistant'
+    // i 为 visibleMessages 索引（尾部与 messages 对齐）
+    return streaming.value && i === visibleMessages.value.length - 1 && visibleMessages.value[i]?.role === 'assistant'
   }
 
   const openReasoning = ref(new Set<number>())
@@ -382,6 +456,7 @@ export function useAIChat(onScrollBottom?: () => void) {
 
   return {
     aiEnabled, aiModel, messages, input, streaming,
+    visibleMessages, hiddenCount, showMore,
     pendingCtxFiles, showFilePicker,
     dbSessionId, sessions, sessionsOpen, sessionsLoading,
     openReasoning,
@@ -389,7 +464,7 @@ export function useAIChat(onScrollBottom?: () => void) {
     send, stopStreaming, askWith,
     removeCtxFile, onPickFiles,
     toggleSessions, loadSessions, loadSession, removeSession, clearChat, timeAgo,
-    copyMessage, regenerate, saveReplyAsFile,
+    copyMessage, regenerate, saveReplyAsFile, approveToolCall,
     isStreamingTail, toggleReasoning, renderMd, userInitial,
     onInputKeydown,
   }

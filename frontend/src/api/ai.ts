@@ -3,7 +3,9 @@
 import { apiCall, authFetch, clearAuthState } from '../lib/common'
 
 // 工具调用（Agent 模式，后端 aitools.go 执行）：
-// 展示态字段 —— result 到达前表示"执行中"
+// 展示态字段 —— result 到达前表示"执行中"。
+// 写类工具（write_file / update_task）带审批状态（Human-in-the-loop）：
+// pending 等待用户确认 → approved/declined（用户决定）→ timeout（60s 未确认）
 export interface ToolCallView {
   id: string
   name: string
@@ -11,6 +13,8 @@ export interface ToolCallView {
   arguments: string
   /** 工具执行结果（undefined = 尚未返回） */
   result?: unknown
+  /** 写类工具的审批状态（读类工具无此字段） */
+  approval?: 'pending' | 'approved' | 'declined' | 'timeout'
 }
 
 // 对话消息（OpenAI chat 格式 + 前端展示扩展）
@@ -88,6 +92,16 @@ export async function deleteAISession(id: number): Promise<void> {
   return apiCall(`/api/ai/sessions/${id}`, { method: 'DELETE' })
 }
 
+// 审批写类工具调用 — POST /api/ai/approval（Agent 模式 Human-in-the-loop）：
+// id 为 approval_request 事件携带的 tool_call ID
+export async function approveAITool(id: string, approved: boolean): Promise<void> {
+  return apiCall('/api/ai/approval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, approved }),
+  })
+}
+
 // 查询 AI 是否可用及当前模型（决定前端是否显示 AI 入口）
 export async function getAIStatus(): Promise<AIStatus> {
   const resp = await authFetch('/api/ai/status')
@@ -124,6 +138,8 @@ export async function chatStream(
     onReasoning?: (text: string) => void
     onToolCall?: (tc: { id: string; name: string; arguments: string }) => void
     onToolResult?: (tr: { id: string; name: string; result: unknown }) => void
+    onApprovalRequest?: (ar: { id: string; name: string; arguments: string }) => void
+    onApprovalResolved?: (ar: { id: string; outcome: 'approved' | 'declined' | 'timeout' }) => void
     signal?: AbortSignal
     qaId?: string
     sessionId?: string
@@ -188,6 +204,14 @@ export async function chatStream(
         }
         if (ev === 'tool_result') {
           opts.onToolResult?.({ id: obj?.id || '', name: obj?.name || '', result: obj?.result })
+          continue
+        }
+        if (ev === 'approval_request') {
+          opts.onApprovalRequest?.({ id: obj?.id || '', name: obj?.name || '', arguments: obj?.arguments || '' })
+          continue
+        }
+        if (ev === 'approval_resolved') {
+          opts.onApprovalResolved?.({ id: obj?.id || '', outcome: obj?.outcome || 'declined' })
           continue
         }
         if (ev === 'error') {

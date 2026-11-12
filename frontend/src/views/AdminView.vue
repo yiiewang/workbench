@@ -76,9 +76,9 @@ const saving = ref(false)
 const deleting = ref(false)
 
 // 新建表单
-const createForm = ref({ org: '', name: '', password: '', roleId: 2, mobile: '' })
+const createForm = ref({ org: '', name: '', password: '', roleId: 2, mobile: '', email: '' })
 // 编辑表单
-const editForm = ref({ name: '', mobile: '', roleId: 2 })
+const editForm = ref({ name: '', mobile: '', email: '', roleId: 2 })
 // 重置密码表单
 const pwdForm = ref('')
 
@@ -103,6 +103,7 @@ watch(createVisible, (v) => {
     password: '',
     roleId: 2,
     mobile: '',
+    email: '',
   }
 })
 
@@ -126,6 +127,7 @@ async function submitCreate() {
       password: createForm.value.password,
       roleId: createForm.value.roleId,
       mobile: createForm.value.mobile.trim(),
+      email: createForm.value.email.trim(),
     })
     showToast('User created')
     closeCreate()
@@ -142,7 +144,7 @@ async function submitCreate() {
 function openEdit() {
   const u = selectedUser.value
   if (!u) return
-  editForm.value = { name: u.name, mobile: u.mobile || '', roleId: u.roleId }
+  editForm.value = { name: u.name, mobile: u.mobile || '', email: (u as any).email || '', roleId: u.roleId }
   editVisible.value = true
 }
 
@@ -158,6 +160,7 @@ async function submitEdit() {
     await adminApi.updateUser(u.id, {
       name: editForm.value.name.trim(),
       mobile: editForm.value.mobile.trim(),
+      email: editForm.value.email.trim(),
       roleId: editForm.value.roleId,
     })
     showToast('User updated')
@@ -327,6 +330,10 @@ async function onDelete() {
             <label class="form-label">Mobile</label>
             <input v-model="createForm.mobile" class="form-input" placeholder="optional" />
           </div>
+          <div class="form-row">
+            <label class="form-label">Email</label>
+            <input v-model="createForm.email" class="form-input" placeholder="optional，接收任务提醒" />
+          </div>
         </div>
         <div class="modal-actions">
           <button class="btn" @click="closeCreate()">Cancel</button>
@@ -347,6 +354,10 @@ async function onDelete() {
           <div class="form-row">
             <label class="form-label">Mobile</label>
             <input v-model="editForm.mobile" class="form-input" placeholder="optional" />
+          </div>
+          <div class="form-row">
+            <label class="form-label">Email</label>
+            <input v-model="editForm.email" class="form-input" placeholder="optional，接收任务提醒" />
           </div>
           <div class="form-row">
             <label class="form-label">Role</label>

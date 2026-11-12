@@ -21,11 +21,12 @@ const {
   pendingCtxFiles, showFilePicker,
   dbSessionId, sessions, sessionsOpen, sessionsLoading,
   openReasoning,
+  visibleMessages, hiddenCount, showMore,
   maybeRestoreLastSession,
   send, stopStreaming, askWith,
   removeCtxFile, onPickFiles,
   toggleSessions, loadSessions, loadSession, removeSession, clearChat, timeAgo,
-  copyMessage, regenerate, saveReplyAsFile,
+  copyMessage, regenerate, saveReplyAsFile, approveToolCall,
   isStreamingTail, toggleReasoning, renderMd, userInitial,
   onInputKeydown: onKeydown,
 } = useAIChat(scrollToBottom)
@@ -60,13 +61,59 @@ function onExternalOpen() {
   scrollToBottom()
 }
 
+// ---- 消息目录刻度：跳转 + 摘要预览 + 滚动律动 ----
+const tocHover = ref(-1)
+// 当前视口对应的消息索引：刻度条随滚动实时高亮（律动跟随）
+const activeToc = ref(0)
+let tocRaf = 0
+
+function jumpTo(i: number) {
+  listEl.value?.querySelector(`[data-idx="${i}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+// 滚动同步：视口顶端可见的第一条消息 → activeToc（rAF 节流）
+function onListScroll() {
+  if (tocRaf) return
+  tocRaf = requestAnimationFrame(() => {
+    tocRaf = 0
+    const list = listEl.value
+    if (!list) return
+    const listTop = list.getBoundingClientRect().top
+    const threshold = listTop + 60
+    let idx = 0
+    list.querySelectorAll<HTMLElement>('[data-idx]').forEach(n => {
+      if (n.getBoundingClientRect().top <= threshold) {
+        idx = Number(n.getAttribute('data-idx')) || 0
+      }
+    })
+    activeToc.value = idx
+  })
+}
+
+// 刻度条宽度：活跃条最长最显眼，相邻按距离衰减（律动），其余基础长
+function tocBarStyle(m: { content: string }, i: number) {
+  if (i === activeToc.value) return { width: '38px' }
+  const d = Math.abs(i - activeToc.value)
+  const w = Math.max(8, 20 - d * 4)
+  return { width: w + 'px' }
+}
+
+function tocSummary(m: { role: string; content: string; toolCalls?: readonly unknown[] }): string {
+  if (m.toolCalls?.length && !m.content) return `[工具调用 ×${m.toolCalls.length}]`
+  const s = (m.content || '').replace(/\s+/g, ' ').trim()
+  return s.slice(0, 60) + (s.length > 60 ? '…' : '') || '（空）'
+}
+
 onMounted(() => {
   window.addEventListener('workbench:ai-ask', onExternalAsk as EventListener)
   window.addEventListener('workbench:ai-open', onExternalOpen)
+  listEl.value?.addEventListener('scroll', onListScroll, { passive: true })
 })
 onUnmounted(() => {
   window.removeEventListener('workbench:ai-ask', onExternalAsk as EventListener)
   window.removeEventListener('workbench:ai-open', onExternalOpen)
+  listEl.value?.removeEventListener('scroll', onListScroll)
+  if (tocRaf) cancelAnimationFrame(tocRaf)
 })
 
 // ---- 面板宽度拖拽（左缘），localStorage 持久化 ----
@@ -167,7 +214,27 @@ function onResizeStart(e: MouseEvent) {
         </div>
       </div>
 
+      <!-- 消息目录刻度（固定于消息区左缘，不随滚动移动；滚动时律动跟随） -->
+      <div v-if="messages.length > 6 && !sessionsOpen" class="ai-toc">
+        <div
+          v-for="(m, i) in visibleMessages"
+          :key="'toc' + i"
+          class="ai-toc-item"
+          :class="{ active: i === activeToc }"
+          @click="jumpTo(i)"
+          @mouseenter="tocHover = i"
+          @mouseleave="tocHover = -1"
+        >
+          <span class="ai-toc-bar" :class="m.role" :style="tocBarStyle(m, i)"></span>
+          <div v-if="tocHover === i" class="ai-toc-tip">{{ tocSummary(m) }}</div>
+        </div>
+      </div>
+
       <div v-show="!sessionsOpen" ref="listEl" class="ai-list">
+        <button v-if="hiddenCount" class="ai-load-more" @click="showMore">
+          加载更早的 {{ hiddenCount }} 条消息
+        </button>
+
         <div v-if="messages.length === 0" class="ai-empty">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
@@ -175,11 +242,11 @@ function onResizeStart(e: MouseEvent) {
           <div>有问题尽管问，Enter 发送</div>
         </div>
 
-        <div v-for="(m, i) in messages" :key="i" class="ai-msg" :class="m.role">
+        <div v-for="(m, i) in visibleMessages" :key="i" :data-idx="i" class="ai-msg" :class="m.role">
           <!-- hover 工具条：复制 / 重新生成（末尾回复）/ 保存为文件 -->
           <div class="ai-msg-actions">
             <button
-              v-if="m.role === 'assistant' && !streaming && i === messages.length - 1 && m.content"
+              v-if="m.role === 'assistant' && !streaming && i === visibleMessages.length - 1 && m.content"
               class="ai-act" title="重新生成" @click="regenerate"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
@@ -206,8 +273,8 @@ function onResizeStart(e: MouseEvent) {
           <!-- 气泡：assistant 走 markdown 渲染，user 纯文本 -->
           <div class="ai-bubble" :class="m.role">
             <template v-if="m.role === 'assistant'">
-              <!-- 工具调用（Agent 模式）：每次调用一张可折叠卡片 -->
-              <ToolCallList v-if="m.toolCalls?.length" :calls="m.toolCalls" />
+              <!-- 工具调用（Agent 模式）：每次调用一张可折叠卡片（写类带审批确认） -->
+              <ToolCallList v-if="m.toolCalls?.length" :calls="m.toolCalls" @approve="approveToolCall" />
               <!-- 思考过程（推理模型）：默认折叠，流式中标题显示"思考中…" -->
               <div v-if="m.reasoning" class="ai-reasoning">
                 <button class="ai-reasoning-toggle" @click="toggleReasoning(i)">
@@ -323,6 +390,56 @@ function onResizeStart(e: MouseEvent) {
   border-radius: 12px;
   box-shadow: -8px 0 24px rgba(0, 0, 0, .08), 0 8px 32px rgba(0, 0, 0, .16);
   overflow: hidden;
+}
+
+/* ---- 消息目录刻度：固定在消息区左缘，hover 预览摘要，点击跳转 ---- */
+.ai-toc {
+  position: absolute;
+  left: 2px;
+  top: 48px;
+  bottom: 106px;
+  width: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  overflow: hidden auto;
+  z-index: 2;
+}
+.ai-toc-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 1px 2px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-toc-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background .15s, width .15s;
+}
+.ai-toc-item:hover .ai-toc-bar { background: var(--accent); }
+.ai-toc-item.active .ai-toc-bar { background: var(--text); opacity: 1; }
+.ai-toc-bar.user { background: var(--accent); opacity: .45; }
+.ai-toc-item:hover .ai-toc-bar.user { opacity: 1; }
+.ai-toc-tip {
+  position: absolute;
+  left: 20px;
+  top: -10px;
+  width: 260px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+  padding: 9px 11px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: normal;
+  word-break: break-all;
+  z-index: 3;
 }
 
 /* 左缘拖拽调宽：默认隐形细条，hover/拖拽时淡显居中线 */
@@ -475,7 +592,7 @@ function onResizeStart(e: MouseEvent) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px;
+  padding: 14px 14px 14px 24px;
   display: flex;
   flex-direction: column;
   gap: 14px;

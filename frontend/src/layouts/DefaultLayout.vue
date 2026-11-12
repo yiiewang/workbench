@@ -44,6 +44,7 @@ const isExplorerActive = computed(() =>
 )
 const isSharesActive = computed(() => route.path === '/shares')
 const isTodoActive = computed(() => route.path === '/todo')
+const isJobsActive = computed(() => route.path === '/jobs')
 const isAdminActive = computed(() => route.path === '/admin')
 
 // 首页（/）无侧栏：隐藏 sidebar/resizer/toggle，主区域占满
@@ -102,6 +103,7 @@ function handleHomeClick() { router.push('/') }
 function handleExplorerClick() { router.push('/file'); ensureMobileDrawer() }
 function handleShareClick() { router.push('/shares'); ensureMobileDrawer() }
 function handleTodoClick() { router.push('/todo'); ensureMobileDrawer() }
+function handleJobsClick() { router.push('/jobs'); ensureMobileDrawer() }
 function handleAdminClick() { router.push('/admin'); ensureMobileDrawer() }
 
 // 用户信息弹窗显隐
@@ -154,6 +156,10 @@ async function onSwitchOrg(orgId: number) {
   <div v-if="hasFeature('todo')" class="activity-item" :class="{ active: isTodoActive }" title="Todo 看板" @click="handleTodoClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
     <span class="activity-label">Todo</span>
+  </div>
+  <div v-if="loggedIn" class="activity-item" :class="{ active: isJobsActive }" title="定时任务" @click="handleJobsClick">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+    <span class="activity-label">定时</span>
   </div>
   <div v-if="canManageUsers" class="activity-item" :class="{ active: isAdminActive }" title="用户管理" @click="handleAdminClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>

@@ -625,6 +625,10 @@
 #todo-app .form-field { margin-bottom: 14px; }
 #todo-app .form-field label { display: block; font-size: 11px; color: var(--text-dim); font-weight: 600; margin-bottom: 5px; text-transform: uppercase; letter-spacing: .5px; }
 
+/* ---- 精确提醒时刻（开始/截止 HH:mm，可选）---- */
+#todo-app .task-time-row { display: flex; align-items: center; gap: 8px; }
+#todo-app .task-time-sep { font-size: 12px; color: var(--text-dim); }
+
 /* ---- 关联文件（todo ↔ file 联动）：label 行 + chips / 空态占位 ---- */
 #todo-app .task-files-label-row {
     display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;

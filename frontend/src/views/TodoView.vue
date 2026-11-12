@@ -293,9 +293,9 @@ export default {
                             </div>
                             <div class="form-field">
                                 <label>时间范围 <span class="required">*</span></label>
-                                <el-date-picker v-model="editingDateRange" type="daterange" range-separator="至"
-                                    start-placeholder="计划" end-placeholder="截止" format="YYYY-MM-DD"
-                                    value-format="YYYY-MM-DD" size="default"
+                                <el-date-picker v-model="editingDateRange" type="datetimerange"
+                                    range-separator="至" start-placeholder="计划" end-placeholder="截止"
+                                    format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DD HH:mm" size="default"
                                     @change="onEditingDateRangeChange"></el-date-picker>
                             </div>
                             <div class="form-field" v-if="!isCreating">

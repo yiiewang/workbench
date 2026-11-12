@@ -18,11 +18,12 @@ const {
   pendingCtxFiles, showFilePicker,
   dbSessionId, sessions, sessionsOpen, sessionsLoading,
   openReasoning,
+  visibleMessages, hiddenCount, showMore,
   maybeRestoreLastSession,
   send, stopStreaming,
   removeCtxFile, onPickFiles,
   toggleSessions, loadSessions, loadSession, removeSession, clearChat, timeAgo,
-  copyMessage, regenerate, saveReplyAsFile,
+  copyMessage, regenerate, saveReplyAsFile, approveToolCall,
   isStreamingTail, toggleReasoning, renderMd, userInitial,
   onInputKeydown,
 } = useAIChat(scrollToBottom)
@@ -97,10 +98,13 @@ onMounted(() => {
         <div>有问题尽管问，输入 @ 可引用文件</div>
       </div>
 
-      <div v-for="(m, i) in messages" :key="i" class="ai-msg" :class="m.role">
+      <button v-if="hiddenCount" class="ai-load-more" @click="showMore">
+        加载更早的 {{ hiddenCount }} 条消息
+      </button>
+      <div v-for="(m, i) in visibleMessages" :key="i" class="ai-msg" :class="m.role">
         <div class="ai-msg-actions">
           <button
-            v-if="m.role === 'assistant' && !streaming && i === messages.length - 1 && m.content"
+            v-if="m.role === 'assistant' && !streaming && i === visibleMessages.length - 1 && m.content"
             class="ai-act" title="重新生成" @click="regenerate"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
@@ -125,7 +129,7 @@ onMounted(() => {
 
         <div class="ai-bubble" :class="m.role">
           <template v-if="m.role === 'assistant'">
-            <ToolCallList v-if="m.toolCalls?.length" :calls="m.toolCalls" />
+            <ToolCallList v-if="m.toolCalls?.length" :calls="m.toolCalls" @approve="approveToolCall" />
             <div v-if="m.reasoning" class="ai-reasoning">
               <button class="ai-reasoning-toggle" @click="toggleReasoning(i)">
                 {{ openReasoning.has(i) ? '收起思考' : (isStreamingTail(i) && !m.content ? '思考中…' : '思考过程') }}

@@ -40,6 +40,7 @@ export interface UserInfo {
     userId: number
     userName: string
     mobile: string
+    email: string
     isPlatformAdmin: boolean
   }
   orgs: OrgInfo[]
@@ -51,6 +52,15 @@ export interface UserInfo {
 // 聚合接口：一次返回用户全部上下文（GET /api/userinfo）
 export async function fetchUserInfo(): Promise<UserInfo> {
   return apiCall('/api/userinfo')
+}
+
+// 修改自己的通知邮箱（POST /api/profile/email，空串 = 清空不再接收提醒）
+export async function updateMyEmail(email: string): Promise<void> {
+  return apiCall('/api/profile/email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
 }
 
 // 组织切换（POST /api/org/switch）

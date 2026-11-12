@@ -8,6 +8,7 @@ export interface AdminUser {
   orgName: string
   name: string
   mobile: string
+  email: string
   roleId: number
   role: string
   createdAt: string
@@ -45,6 +46,7 @@ export async function createUser(body: {
   password: string
   roleId: number
   mobile?: string
+  email?: string
 }): Promise<AdminUser> {
   return apiCall('/api/admin/users', {
     method: 'POST',
@@ -56,7 +58,7 @@ export async function createUser(body: {
 // 更新用户（PATCH /api/admin/users/{id}），可选字段传哪个改哪个
 export async function updateUser(
   id: number,
-  body: { name?: string; mobile?: string; password?: string; roleId?: number },
+  body: { name?: string; mobile?: string; email?: string; password?: string; roleId?: number },
 ): Promise<AdminUser> {
   return apiCall(`/api/admin/users/${id}`, {
     method: 'PATCH',

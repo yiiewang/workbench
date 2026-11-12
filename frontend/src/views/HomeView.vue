@@ -55,6 +55,13 @@ const cards = computed<FeatureCard[]>(() => {
       path: '/todo',
       icon: '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
     })
+    list.push({
+      key: 'jobs',
+      title: 'AI 定时任务',
+      desc: '到点让 AI 自动执行并邮件送达',
+      path: '/jobs',
+      icon: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>',
+    })
   }
   if (canManageUsers.value) {
     list.push({

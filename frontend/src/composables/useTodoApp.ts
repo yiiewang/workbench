@@ -262,6 +262,9 @@ export function setupTodoApp() {
         ...calendar,
         // 编辑弹窗域
         ...editor,
+        // 编辑弹窗状态（store refs 经 ctx 传入各域模块，模块不再转发——此处补齐导出，
+        // TodoView 的 watch(ShowModal)/模板 v-if/isCreating/editingTask 直接使用）
+        showModal, isCreating, editingTask, editingDateRange, activeTaskId,
         // 纯工具转发（模板直接使用）
         formatDateShort, dayOffset, isOverdue, overdueDays,
         priorityLabel, statusIcon, getStatusLabel,

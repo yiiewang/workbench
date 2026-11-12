@@ -17,37 +17,48 @@ func TestDueMailContent(t *testing.T) {
 		DueDate:     "2026-11-11",
 		OverdueDays: 0,
 	}
-	subject, body := dueMailContent(ev)
+	subject, text, html := dueMailContent(ev)
 	if !strings.Contains(subject, "写周报") || !strings.Contains(subject, "今天截止") {
 		t.Fatalf("subject = %q", subject)
 	}
-	if !strings.Contains(body, "截止日期：2026-11-11") || !strings.Contains(body, "写周报") {
-		t.Fatalf("body = %q", body)
+	if !strings.Contains(text, "截止日期：2026-11-11") || !strings.Contains(text, "写周报") {
+		t.Fatalf("text = %q", text)
+	}
+	if !strings.Contains(html, "写周报") || !strings.Contains(html, "今天截止") {
+		t.Fatalf("html = %q", html)
 	}
 
 	ev.OverdueDays = 3
-	subject, _ = dueMailContent(ev)
+	subject, _, html = dueMailContent(ev)
 	if !strings.Contains(subject, "已逾期 3 天") {
 		t.Fatalf("overdue subject = %q", subject)
+	}
+	if !strings.Contains(html, "已逾期 <b>3 天</b>") {
+		t.Fatalf("overdue html = %q", html)
 	}
 }
 
 func TestBuildMail(t *testing.T) {
-	msg := buildMail("from@ex.com", "Workbench Robot", "to@ex.com", "主题", "正文内容")
-	// 必备头 + base64 编码的主题与正文
+	msg := buildMail("from@ex.com", "Workbench Robot", "to@ex.com", "主题", "正文内容", "<p>正文</p>")
+	// 必备头 + multipart 结构
 	for _, want := range []string{
 		"From: Workbench Robot <from@ex.com>",
 		"To: <to@ex.com>",
 		"Subject: =?UTF-8?B?",
+		"Content-Type: multipart/alternative; boundary=",
 		"Content-Type: text/plain; charset=UTF-8",
+		"Content-Type: text/html; charset=UTF-8",
 		"Content-Transfer-Encoding: base64",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("mail missing %q:\n%s", want, msg)
 		}
 	}
+	// multipart 边界闭合
+	if !strings.Contains(msg, "\r\n--") {
+		t.Error("multipart boundary lines missing")
+	}
 	// encoded-word 必须完整闭合：Subject 行不能以未闭合的编码词结尾
-	// （此前的缺陷：b64() 尾随换行混入 encoded-word，收件方无法解码原样显示）
 	if !strings.Contains(msg, "?=\r\nDate:") {
 		t.Errorf("subject encoded-word not closed before Date header:\n%s", msg)
 	}
@@ -59,9 +70,34 @@ func TestBuildMail(t *testing.T) {
 	}
 
 	// 中文显示名 → RFC 2047 编码
-	msg = buildMail("from@ex.com", "工作台机器人", "to@ex.com", "s", "b")
+	msg = buildMail("from@ex.com", "工作台机器人", "to@ex.com", "s", "b", "<p>b</p>")
 	if !strings.Contains(msg, "From: =?UTF-8?B?") {
 		t.Errorf("non-ASCII display name should be RFC2047 encoded:\n%s", msg)
+	}
+}
+
+// mdToHTML：标题/列表/粗体/转义
+func TestMdToHTML(t *testing.T) {
+	md := "# 日报\n\n今天完成 **3 项** 任务。\n\n- 修复审批\n- 发布版本\n\n<script>alert(1)</script>"
+	html := string(mdToHTML(md))
+	// 标题
+	if !strings.Contains(html, "font-weight:600") || !strings.Contains(html, "日报") {
+		t.Errorf("heading missing: %s", html)
+	}
+	// 粗体
+	if !strings.Contains(html, "<b>3 项</b>") {
+		t.Errorf("bold missing: %s", html)
+	}
+	// 列表
+	if !strings.Contains(html, "· 修复审批") {
+		t.Errorf("list missing: %s", html)
+	}
+	// XSS 转义
+	if strings.Contains(html, "<script>") {
+		t.Errorf("script tag not escaped: %s", html)
+	}
+	if !strings.Contains(html, "&lt;script&gt;") {
+		t.Errorf("escaped script missing: %s", html)
 	}
 }
 

@@ -25,8 +25,9 @@ import (
 // schedule 包不依赖 server，保持单向依赖）
 type LLMCaller func(ctx context.Context, prompt string) (string, error)
 
-// aiJobTimeout 单个 AI 任务执行超时（LLM 生成 + 数据组装）
-const aiJobTimeout = 2 * time.Minute
+// aiJobTimeout 单个 AI 任务执行超时（LLM 生成 + 数据组装）。
+// 推理模型生成日报类长文（reasoning + 数百字输出）实测可达数分钟。
+const aiJobTimeout = 5 * time.Minute
 
 // NewAIJobsRunnerJob AI 定时任务调度入口（每分钟 tick）
 func NewAIJobsRunnerJob(database *db.DB, llm LLMCaller, loc *time.Location) (*Job, error) {
@@ -156,6 +157,9 @@ func buildAIJobPrompt(job db.AIJobWithOwner, tasks []db.TaskItem) string {
 	}
 	b.WriteString("\n## 任务指令\n")
 	b.WriteString(job.Prompt)
-	b.WriteString("\n\n请直接输出结果内容（将作为邮件正文发送给用户），不要输出多余的解释或寒暄。")
+	b.WriteString("\n\n输出格式要求（结果将作为 HTML 邮件正文发送）：\n" +
+		"1. 使用 Markdown：用「## 小节标题」分节，用「- 」列表列举条目，用「**粗体**」强调关键信息；\n" +
+		"2. 不要使用中文序号（一、二、）或「·」作列表符号；\n" +
+		"3. 直接输出结果内容，不要输出多余的解释或寒暄。")
 	return b.String()
 }

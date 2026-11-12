@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workbench 邮件模板预览</title>
+</head>
+<body style="margin: 0; padding: 48px 16px; background: #f4f5f7; font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;">
+
+<!-- 预览说明 -->
+<div style="max-width: 640px; margin: 0 auto 32px; padding: 14px 18px; background: #eef4ff; border: 1px solid #c8dbff; border-radius: 10px; font-size: 13px; color: #3b5b8c; line-height: 1.7;">
+  <b>新版预览</b>：AI 报告邮件（标题去掉前缀；正文分节加粗 + 列表，来自 mdToHTML 对 markdown/中文序号的渲染）。另附任务提醒样式。
+</div>
+
+<!-- ============ 示例 1：AI 报告（新版） ============ -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width: 560px; margin: 0 auto 36px; background: #ffffff; border-radius: 10px; padding: 32px 36px;">
+  <tr>
+    <td style="font-size: 11px; color: #9aa1ab; letter-spacing: .8px; padding-bottom: 20px;">
+      WORKBENCH · AI 定时任务 · 每日工作总结
+    </td>
+  </tr>
+  <tr>
+    <td style="font-size: 18px; font-weight: 600; color: #1a1f27; line-height: 1.5; padding-bottom: 4px;">
+      今日工作日报
+    </td>
+  </tr>
+  <tr>
+    <td style="font-size: 12px; color: #9aa1ab; line-height: 1.7; padding-bottom: 20px;">
+      2026-11-12 · 由 AI 自动生成
+    </td>
+  </tr>
+  <tr>
+    <td style="font-size: 14px; color: #374151; line-height: 1.9;">
+
+      <!-- 概览段 -->
+      今天你共有 <b>6</b> 项任务，完成 <b>3</b> 项，进行中 2 项，逾期 1 项，整体完成率 <b>50%</b>。<br><br>
+
+      <!-- ## 小节（mdToHTML 渲染 markdown 标题 / 中文序号兜底） -->
+      <div style="font-weight:600;color:#1a1f27;margin:14px 0 6px;">今日完成与进展</div>
+
+      <!-- - 列表 -->
+      <div style="padding:2px 0;">
+        · 完成邮件模板设计评审（HTML 简约版上线）<br>
+        · 修复 AI 对话审批超时问题（60s → 5 分钟）<br>
+        · AI 定时任务系统联调通过，失败兜底通知正常<br>
+      </div>
+
+      <div style="font-weight:600;color:#1a1f27;margin:14px 0 6px;">明日优先事项</div>
+
+      <div style="padding:2px 0;">
+        · <b>完成项目周报</b>（已逾期 3 天，建议最先处理）<br>
+        · RAG 知识库技术方案设计<br>
+        · 整理 v1.4.0 发版清单<br>
+      </div>
+
+      <div style="font-weight:600;color:#1a1f27;margin:14px 0 6px;">建议</div>
+
+      逾期任务集中在文档类，建议每天 18:00 前集中清一波。
+
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <div style="height: 1px; background: #f0f1f3; margin: 24px 0 14px;"></div>
+      <div style="font-size: 11px; color: #b0b6bf; line-height: 1.7;">
+        可在「定时」页面管理此任务 · 2026-11-12 18:07 执行
+      </div>
+    </td>
+  </tr>
+</table>
+
+<!-- ============ 示例 2：任务到期提醒（对照） ============ -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width: 560px; margin: 0 auto 36px; background: #ffffff; border-radius: 10px; padding: 32px 36px;">
+  <tr>
+    <td style="font-size: 11px; color: #9aa1ab; letter-spacing: .8px; padding-bottom: 20px;">
+      WORKBENCH · 任务到期提醒
+    </td>
+  </tr>
+  <tr>
+    <td style="font-size: 18px; font-weight: 600; color: #1a1f27; line-height: 1.5; padding-bottom: 8px;">
+      完成项目周报并同步给团队
+    </td>
+  </tr>
+  <tr>
+    <td style="font-size: 13px; color: #6b7280; line-height: 1.7; padding-bottom: 20px;">
+      已逾期 <b style="color: #d54646;">3 天</b> · 截止 2026-11-09 · 进行中 · 高优先级 · 进度 60%
+    </td>
+  </tr>
+  <tr>
+    <td style="font-size: 13px; color: #4b5563; line-height: 1.8; padding-bottom: 24px;">
+      汇总本周各模块进展，数据从项目管理面板导出，抄送相关负责人。
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <div style="height: 1px; background: #f0f1f3; margin-bottom: 14px;"></div>
+      <div style="font-size: 11px; color: #b0b6bf; line-height: 1.7;">
+        完成任务后不再提醒 · 2026-11-12 18:10
+      </div>
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>

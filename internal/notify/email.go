@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/smtp"
 	"strings"
@@ -72,8 +73,8 @@ func (n *EmailNotifier) onTaskDue(ctx context.Context, evt schedule.Event) {
 		return
 	}
 
-	subject, body := dueMailContent(ev)
-	if err := n.send(ctx, to, subject, body); err != nil {
+	subject, text, html := dueMailContent(ev)
+	if err := n.send(ctx, to, subject, text, html); err != nil {
 		slog.Error("email notify: send failed", "to", to, "task", ev.Task.ID, "err", err)
 		return
 	}
@@ -96,7 +97,20 @@ func (n *EmailNotifier) onUserNotify(ctx context.Context, evt schedule.Event) {
 		slog.Info("email notify: user has no email, skip", "user", ev.UserID, "subject", ev.Subject)
 		return
 	}
-	if err := n.send(ctx, to, ev.Subject, ev.Body); err != nil {
+	kind := "WORKBENCH · 用户通知"
+	title := ev.Subject
+	if strings.HasPrefix(ev.Subject, "[定时任务") {
+		kind = "WORKBENCH · AI 定时任务"
+		// 类型标识已在顶部灰字，标题去掉 "[定时任务] " 前缀避免重复
+		title = strings.TrimSpace(strings.TrimPrefix(ev.Subject, "[定时任务]"))
+	}
+	html := renderEmailHTML(emailContent{
+		Kind:     kind,
+		Title:    title,
+		BodyHTML: mdToHTML(ev.Body),
+		Footer:   "Workbench · " + time.Now().Format("2006-01-02 15:04"),
+	})
+	if err := n.send(ctx, to, ev.Subject, ev.Body, html); err != nil {
 		slog.Error("email notify: send failed", "to", to, "subject", ev.Subject, "err", err)
 		return
 	}
@@ -117,58 +131,117 @@ func (n *EmailNotifier) onTaskReminder(ctx context.Context, evt schedule.Event) 
 	if to == "" {
 		return
 	}
-	subject, body := reminderMailContent(ev)
-	if err := n.send(ctx, to, subject, body); err != nil {
+	subject, text, html := reminderMailContent(ev)
+	if err := n.send(ctx, to, subject, text, html); err != nil {
 		slog.Error("email notify: send failed", "to", to, "kind", ev.Kind, "err", err)
 		return
 	}
 	slog.Info("email notify: sent (task.reminder)", "to", to, "kind", ev.Kind, "task", string(ev.Task.ID))
 }
 
-// reminderMailContent 组装精确时间提醒邮件：kind= start（计划开始）| due（截止）
-func reminderMailContent(ev schedule.TaskReminderEvent) (subject, body string) {
+// reminderMailContent 组装精确时间提醒：主题 + 纯文本 + HTML（简约模板）
+func reminderMailContent(ev schedule.TaskReminderEvent) (subject, text, html string) {
 	var head, action string
 	if ev.Kind == "start" {
 		head, action = "计划开始", "计划开始时间已到"
 	} else {
 		head, action = "即将截止", "截止时间已到"
 	}
-	subject = fmt.Sprintf("[Workbench] %s提醒：%s（%s）", head, ev.Task.Title, ev.At)
+	subject = fmt.Sprintf("%s提醒：%s（%s）", head, ev.Task.Title, ev.At)
+
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("你的任务「%s」%s（%s）。\n\n", ev.Task.Title, action, ev.At))
+	b.WriteString(fmt.Sprintf("你的任务「%s」%s（%s）。\n", ev.Task.Title, action, ev.At))
 	b.WriteString(fmt.Sprintf("计划日期：%s　截止日期：%s\n", ev.Task.Scheduled, ev.Task.Due))
 	b.WriteString(fmt.Sprintf("状态：%s　优先级：%s　进度：%d%%\n", ev.Task.Status, ev.Task.Priority, ev.Task.Progress))
-	b.WriteString("\n—— Workbench 定时提醒")
-	return subject, b.String()
+
+	meta := fmt.Sprintf("%s · <b>%s</b> · %s", action, escHTML(ev.At), statusLabel(ev.Task.Status))
+	if ev.Task.Priority != "" {
+		meta += " · " + priorityLabel(ev.Task.Priority) + "优先级"
+	}
+	html = renderEmailHTML(emailContent{
+		Kind:     "WORKBENCH · 定时提醒",
+		Title:    ev.Task.Title,
+		Meta:     template.HTML(meta),
+		BodyHTML: mdToHTML(ev.Task.Content),
+		Footer:   "到点自动发送 · " + ev.At,
+	})
+	return subject, b.String(), html
 }
 
-// dueMailContent 组装到期提醒的主题与正文（纯文本）
-func dueMailContent(ev schedule.TaskDueEvent) (subject, body string) {
+// dueMailContent 组装到期提醒：主题 + 纯文本 + HTML（简约模板）
+func dueMailContent(ev schedule.TaskDueEvent) (subject, text, html string) {
 	var head string
 	if ev.OverdueDays == 0 {
 		head = "今天截止"
 	} else {
 		head = fmt.Sprintf("已逾期 %d 天", ev.OverdueDays)
 	}
-	subject = fmt.Sprintf("[Workbench] 任务提醒：%s（%s）", ev.Task.Title, head)
+	subject = fmt.Sprintf("任务提醒：%s（%s）", ev.Task.Title, head)
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("你的任务「%s」%s。\n\n", ev.Task.Title, head))
+	b.WriteString(fmt.Sprintf("你的任务「%s」%s。\n", ev.Task.Title, head))
 	b.WriteString(fmt.Sprintf("截止日期：%s\n", ev.DueDate))
 	b.WriteString(fmt.Sprintf("状态：%s　优先级：%s　进度：%d%%\n", ev.Task.Status, ev.Task.Priority, ev.Task.Progress))
+	content := ""
 	if ev.Task.Content != "" {
-		content := ev.Task.Content
+		content = ev.Task.Content
 		if len(content) > 500 {
 			content = content[:500] + "…"
 		}
-		b.WriteString(fmt.Sprintf("\n备注：\n%s\n", content))
+		b.WriteString("\n备注：\n" + content + "\n")
 	}
-	b.WriteString("\n—— Workbench 自动提醒，完成任务后不再提醒")
-	return subject, b.String()
+
+	meta := fmt.Sprintf("已逾期 <b>%d 天</b> · 截止 %s · %s · %s优先级 · 进度 %d%%",
+		ev.OverdueDays, ev.DueDate, statusLabel(ev.Task.Status), priorityLabel(ev.Task.Priority), ev.Task.Progress)
+	if ev.OverdueDays == 0 {
+		meta = fmt.Sprintf("<b>今天截止</b> · %s · %s · %s优先级 · 进度 %d%%",
+			ev.DueDate, statusLabel(ev.Task.Status), priorityLabel(ev.Task.Priority), ev.Task.Progress)
+	}
+	html = renderEmailHTML(emailContent{
+		Kind:     "WORKBENCH · 任务到期提醒",
+		Title:    ev.Task.Title,
+		Meta:     template.HTML(meta),
+		BodyHTML: mdToHTML(content),
+		Footer:   "完成任务后不再提醒 · " + time.Now().Format("2006-01-02 15:04"),
+	})
+	return subject, b.String(), html
 }
 
-// send 经 SMTP 587 STARTTLS 投递（USER/PASS 认证，环境变量 EMAIL_PASS）
-func (n *EmailNotifier) send(ctx context.Context, to, subject, body string) error {
+// statusLabel/priorityLabel 中文标签
+func statusLabel(s string) string {
+	switch s {
+	case "todo":
+		return "待办"
+	case "progress":
+		return "进行中"
+	case "done":
+		return "已完成"
+	}
+	return s
+}
+
+func priorityLabel(p string) string {
+	switch p {
+	case "high":
+		return "高"
+	case "medium":
+		return "中"
+	case "low":
+		return "低"
+	}
+	return p
+}
+
+// escHTML 极简 HTML 转义（meta 行拼接用）
+func escHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
+}
+
+// send 经 SMTP 587 STARTTLS 投递（multipart/alternative：HTML + 纯文本兜底）
+func (n *EmailNotifier) send(ctx context.Context, to, subject, textBody, htmlBody string) error {
 	pass := emailPass()
 	if pass == "" {
 		return fmt.Errorf("EMAIL_PASS not set")
@@ -208,7 +281,7 @@ func (n *EmailNotifier) send(ctx context.Context, to, subject, body string) erro
 	if err != nil {
 		return err
 	}
-	msg := buildMail(n.from(), n.fromName(), to, subject, body)
+	msg := buildMail(n.from(), n.fromName(), to, subject, textBody, htmlBody)
 	if _, err = w.Write([]byte(msg)); err != nil {
 		return err
 	}
@@ -223,18 +296,30 @@ func (n *EmailNotifier) fromName() string {
 	return "Workbench"
 }
 
-// buildMail 组装 RFC 5322 报文（UTF-8，base64 编码正文/主题/含非 ASCII 的显示名）
-func buildMail(from, fromName, to, subject, body string) string {
+// buildMail 组装 RFC 5322 报文：multipart/alternative（HTML + 纯文本兜底，
+// 邮件客户端按能力自动选择；UTF-8，base64 编码正文/主题/含非 ASCII 的显示名）
+func buildMail(from, fromName, to, subject, textBody, htmlBody string) string {
 	const layout = "Mon, 02 Jan 2006 15:04:05 -0700"
+	const boundary = "----=_wb_part_7f3a"
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("From: %s <%s>\r\n", encodeDisplayName(fromName), from))
 	b.WriteString(fmt.Sprintf("To: <%s>\r\n", to))
 	b.WriteString("Subject: " + encodeWord(subject) + "\r\n")
 	b.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format(layout)))
 	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n\r\n")
+
+	b.WriteString("--" + boundary + "\r\n")
 	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	b.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
-	b.WriteString(b64(body))
+	b.WriteString(b64(textBody))
+
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+	b.WriteString(b64(htmlBody))
+
+	b.WriteString("--" + boundary + "--\r\n")
 	return b.String()
 }
 

@@ -5,6 +5,29 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`ai` 配置结构嵌套化（破坏性变更）**：聊天配置收进 `ai.chat` 子段（`ai.base_url/api_key/model/tools` → `ai.chat.*`），与 `ai.embedding` 子段对称——两者常指向不同服务。旧平铺写法不再识别，存量 config.yaml 需手动迁移；环境变量（`AI_BASE_URL`/`AI_API_KEY`/`AI_MODEL`/`AI_TOOLS`）不受影响
+
+### Added
+
+- **AI 对话 token 消耗显示**：请求上游时携带 `stream_options.include_usage`（流式响应末尾携带 usage 分片），后端解析并**聚合 Agent 多轮**消耗后在 [DONE] 前以自定义 SSE 事件 `usage` 推给前端；assistant 气泡底部右对齐小字显示 `prompt 1.2K · completion 800 · 共 2.1K tokens`（>1000 缩写 K）。usage 随消息持久化到会话快照（历史回看保留）；上游网关不支持 include_usage 时分片缺失，不显示（无害降级）。PC 面板与移动端同步
+- **混合检索（FTS5 关键词路 + RRF 融合）**：向量 KNN（语义路）之外增加 FTS5 trigram 全文检索（关键词路），双路召回（各 topK×4）经 Reciprocal Rank Fusion（`score = Σ 1/(60+rank)`）融合取 topK——**专有名词/函数名/错误码的精确匹配不再受向量距离阈值误杀**（阈值只作用于语义路候选，FTS 命中按 bm25 直接入围），两路同时命中的块显著加权；query <3 字符（trigram 无 gram）自然降级纯向量；FTS 失败降级纯向量。迁移 000015 建 `file_chunk_fts`（trigram 分词，中英文通用子串匹配；unicode61 对中文是整段单 token 不可用）+ 存量回填；写删路径事务内同步维护；mattn 驱动需 build tag `sqlite_fts5`（Makefile 全部构建入口统一携带）；ragclean --reset 同步清 FTS
+
+### Added
+
+- **RAG 引用卡片（编号引用 + 行级定位跳转）**：AI 回答基于检索片段作答时，底部展示可折叠的"引用来源"列表——每条含编号、文件路径（可点击）、起始行号、命中的原文片段（引用了哪句话直接可见，不依赖模型转述）：
+  - **编号引用制**：注入 prompt 的片段按 `[1]…[n]` 编号，要求模型以 `[n]` 标注结论出处（比让模型复述路径稳定）；命中数据经 SSE 自定义事件 `rag_hits` 一次性推给前端，挂在当前回答上
+  - **行号链路**：迁移 000014 `file_chunks` 加 `start_line` 列；chunker 切分时记录每块原文起始行（1-based，重叠块锚定新正文）；**行号定位是粘性的**——文件内容异步加载完成前到达的定位请求会保留重试
+  - **跳转**：点击路径 → PC 端 `#/路径#L12` hash（`useIndexApp` 新增 `route.hash` 活页 watcher，顺带修复 markdown 内链在已打开页面不生效的问题）→ 展开目录树 + 打开 tab + `CodePreview` 滚动到目标行居中并闪烁高亮（自动展开覆盖该行的折叠区；超大文件降级时仅打开）；移动端走 `/m/file?path=&line=` query
+  - 前端新组件 `RagCitations`（PC 面板与移动端共用）；`ChatMessage` 类型加 `ragHits` 字段（会话历史快照一并持久化）
+- **RAG 文件语义检索**（`ai.embedding` 配置段启用；迁移 000013）：AI 对话自动检索用户个人文件——提问时以最新一条 user 消息做向量检索，命中片段以独立 system 消息注入上下文（含来源路径，模型按相关性取舍，与前端"引用文件"机制并存），全程零手动 `@` 引用：
+  - **向量基建**：SQLite 驱动从 modernc（纯 Go）换 mattn/go-sqlite3（cgo）+ sqlite-vec v0.1.6 静态扩展（源码 vendor 于 `internal/sqlitevec/`，配套 sqlite3.h 复制自 mattn 的 sqlite3-binding.h，与实际链接的 sqlite 版本严格一致，升级 mattn 后 `make sync-vec-headers` 刷新）；vec0 虚拟表按 org:user 分区（partition key），KNN 查询只扫本人分区（无跨用户泄漏）；构建需 `CGO_ENABLED=1`（Makefile 已内建），交叉编译走既有 xgo 流程
+  - **索引链路**（`internal/rag`）：文本类扩展名白名单（md/txt/json/yaml/go/py 等，≤2MB）→ SHA-256 整文件幂等判重（内容未变零 embed 成本）→ 按空行段落边界切分（目标 ~800 字 + 相邻块 100 字重叠，超长段按句末标点硬切）→ OpenAI 兼容 `/embeddings` 批量向量化（`dimensions` 参数下发 Matryoshka 降维，批 16 条）→ 替换式事务写表（`file_chunks` 存原文 + `file_chunk_vec` 存向量 + `file_index_state` 存状态）
+  - **写钩子自动索引**：上传（编辑器保存统一走 /api/upload）、AI `write_file`、删除/重命名/移动（fsops，含目录前缀递归）三处钩子维护索引；写钩子异步执行不阻塞主流程；embedding 失败记 error 状态行，下次钩子或全量重建时重试；非文本/超限文件若已有索引自动清理（文件被替换场景）
+  - **检索与重建**：对话前置检索 top-5，8s 超时静默降级（对话可用性优先于检索完整性）；`POST /api/ai/reindex` 手动全量重建（幂等，hash 未变跳过；同用户并发触发 409）
+  - **配置**：`ai.embedding.{base_url, api_key, model, dim}` 独立于聊天网关（Qwen3-Embedding-8B 原生 4096 维，默认降 1024——精度损失很小，存储与 KNN 扫描量降 1/4）；dim 与库中记录不一致时自动 DROP 向量表并作废全部索引状态（等全量重建）；环境变量 `AI_EMBEDDING_BASE_URL / AI_EMBEDDING_API_KEY / AI_EMBEDDING_MODEL / AI_EMBEDDING_DIM` 同名覆盖
+
 ### Removed
 
 - **访问统计（visit_logs）**（迁移 000012 drop 表）：移除 `GET /api/stats` 接口与每请求的 visit_logs INSERT（无谓写放大）；文本访问日志（access log 文件）保留。历史统计数据随表删除，需要时可经 down 迁移恢复表结构重新启用
@@ -44,8 +67,35 @@
   - SSE 新增 `approval_request` / `approval_resolved` 事件；拒绝/超时以说明性结果作为 tool 消息回传模型，由模型向用户解释原因后继续对话
   - 前端：工具卡片待确认态显示「批准/拒绝」按钮与状态徽标（待确认/已批准/已拒绝/已超时），本地先更新防重复点击、提交失败回滚可重试；中断生成时未决审批定格为已拒绝；PC 面板与移动端共用 `ToolCallList`
   - 新增审批协调器单测（决定传递/归属校验/一次性/作废语义），首版实现"先删后校验归属"的缺陷由测试暴露后修复
+- **回复时序渲染与过程折叠**：Agent 多步回答从"类别堆叠"（工具卡片全在顶部）改为按发生顺序的时间线——思考 → 调工具 → 分析结果 → 继续调工具 → 最终回答。消息新增 `steps` 时序数组（SSE 回调按序追加，相邻同类增量合并），渲染时连续过程步骤归入可折叠"思考与工具调用"块（标题显示工具步数，流式执行中默认展开、完成后折叠，手动 toggle 覆盖），正文片段独立渲染（中间轮说明文本自然穿插在过程块之间）；旧会话快照无 steps 时从扁平字段归一化重建，历史回看不受影响；原思考过程独立折叠条移除（并入过程块）。PC 面板与移动端同步
+- **RAG 引用编号悬浮预览**：正文中模型标注的 `[n]` 引用编号渲染为可悬浮的角标元素——hover 显示浮动卡片（文件路径可点击跳转 + 起始行号 + 命中原文片段，可滚动），不用展开底部引用列表即可核对出处。实现：`linkRagRefs` 对渲染后 HTML 做 DOM 后处理注入 `data-*`（跳过代码块、编号前字符边界检查排除 `a[1]` 数组下标误伤、超编号的幻觉引用不处理）；全局单例 `RagRefTooltip` 组件 document 级委托（PC/移动共用，z-index 高于剧场模式）；底部"引用来源"列表同步简化为仅文件清单（编号/路径/行号可点击），原文详情收敛到悬浮卡片一处；跳转逻辑提取共用 `lib/ragNav.ts`
+- **AI 面板剧场模式**：面板头部新增切换按钮——开启后面板脱离右下角锚定，视口居中放大（宽 `min(1100px, 100vw-80px)`、高 `min(820px, 100vh-60px)`），背景可见不遮挡全屏；Esc 或再点按钮退出；移动端不提供（面板本就近乎全宽），窗口缩到移动断点自动退出剧场态；宽度拖拽在剧场模式下隐藏（尺寸由视口决定）
+- **Agent 工具 `search_files`（语义检索）**：模型可按自然语言问题主动检索用户文件（query + topK≤10），返回带路径/起始行号/原文的片段列表——检索片段不足以回答时模型换关键词多轮检索，替代此前"猜路径盲调 read_file"的失败模式（RAG 未启用时返回明确错误）
+- **Agent 系统提示补检索纪律**：文件内容类问题优先用语义检索片段；不够时 search_files 换关键词，read_file 只用于已确认存在的具体文件
+- **Agent 系统提示加停止准则（用户实测：多轮对话中反复 search_files"确认细节"）**：新增规则——本会话已检索到/已读取过的内容视为已知，足以回答时直接总结作答，不为确认细节反复检索；只有关键内容确有缺口才再检索，同一问题换关键词不超过两次
+- **RAG 全量重建进度可观测**：`GET /api/ai/reindex/status` 返回进度快照（running/total/processed/indexed/skipped/failed/currentPath/startedAt/updatedAt，保留最近一次已完成记录）；`ReindexTree` 重构为"先收集后处理"两阶段——预扫描全部可索引文件得到准确 total（进度分母），处理阶段逐文件更新快照并每 20 个输出周期日志（`rag: reindex progress`，tail 日志可观测）。快照按 org:user 维度互斥存取，多用户并发互不覆盖
+- **RAG 文件级摘要卡（两层索引，可选）**：`ai.embedding.digest_model` 配置 flash 级小模型——索引时为每个文件生成语义摘要卡（是什么/核心内容/关键点，80~150 字），作为特殊块（`chunk_index=-1`）与原文块**同表共存、同等参与 KNN 检索**（表结构零迁移）：宏观问题（"这个项目怎么做的"）命中摘要卡，token 极省且无源码噪音；细节问题（"那行配置具体怎么写"）继续走原文块 + 引用行号定位。摘要只在文件内容变化时重新生成（hash 幂等保证），生成失败降级只索引原文块；输入截 3000 字控制成本。Env: `AI_EMBEDDING_DIGEST_MODEL`
+- **RAG LLM 相关性预判（可选）**：`ai.embedding.judge_model` 配置 flash 级小模型（如 deepseek-flash，复用 embedding 网关的 base_url/api_key 走 /chat/completions）——检索命中过完距离阈值后，把问题 + 候选片段（各截 300 字）一次调用批量判断实际相关性（结构化输出相关编号），拦住阈值拦不住的语义无关命中（中文 embedding 空间各向异性）。判断标准写明"仅主题相近、词面重合但答非所问的不算"；失败/超时降级保留阈值结果（预判不拖垮对话可用性）；模型明确判定全不相关返回空（有效结论）；留空 = 关闭。Env: `AI_EMBEDDING_JUDGE_MODEL`
 
 ### Fixed
+
+- **AI 对话刷新后不自动恢复上一次会话**：点「新对话」设置的 sessionStorage 标记（`NEW_CHAT_FLAG`，语义"用户明确要空白"）在后续新提问落库后从不清除——同一浏览器 tab 内只要点过一次"新对话"，之后刷新页面就永远不自动恢复历史（尽管库里有最新会话）。修复：`persistSession` 成功保存后清除标记（新内容已产生，空白语义失效；标记只在"明确开了新会话且还没说话"时有效）
+- **刷新后 token 消耗丢失**：`persistSession` 的防重入竞态——流末的最终保存（含 usage）恰逢节流保存进行中时被 `if (persisting) return` 直接丢弃，库停留在无 usage 的中途快照。改为排队补一轮：被挡时置队列标记，当前保存完成后自动重存拿到最新数据（含 usage 与最后的增量）
+- **中断的回复没有重新生成按钮（用户实测：中断发生在思考/工具阶段时操作行消失）**：操作行显示条件依赖 `m.content`，中断在思考/工具阶段时正文为空 → 连保存/复制也没有，用户只能重新手打问题。修复：① 新增 `hasReplyContent`（正文/思考/工具/时序步骤任一存在即算有产出），重新生成按钮条件放宽——中断消息可直接点 ↻ 重问；② 流结束兜底放宽为"无正文即补"（此前有工具调用时不补"（已中断）"，中断发生在工具阶段时气泡只有一个思考折叠条、看不出被打断）
+- **流式中断后对话卡死（用户实测：中断的空 assistant 消息导致后续提问整体 400 "content is empty"）**：两条路径漏兜底——① 上游静默断流（EOF 无内容不抛错）时 content 为空落库（`（已停止）`兜底只在 catch 分支）；② 流式中途的节流持久化已把空 assistant 写进会话，中断后残留。修复：finally 统一兜底（content 空且无工具调用 → 补"（已中断）"文本步）；`toPayloadMessages` 跳过空 assistant（历史脏数据不再发给上游，存量会话无需手动清理即恢复可用）
+- **ragclean 直连 go run 报 no such module: fts5**：FTS5 是 mattn 驱动的编译期 build tag，Makefile 的 build/test 已统一携带但独立 go run 入口天然缺 tag。加 `make ragclean [ARGS=--reset]` target 统一携带（tag 管理收敛 Makefile 一处），工具头注释同步更新
+- **FTS5 段式存储惰性删除（与 vec0 同款，用户实测 --reset 后仍占 18.5MB）**：FTS5 的 DELETE 是标记式删除，VACUUM 只回收空闲页、影子表内已删数据仍占页——`--reset` 改为整表 DROP；启动时 `EnsureFTS` 自动重建（表缺失即建 + 回填存量，与 EnsureVecIndex 双信号思路一致），FTS 重建失败仅降级纯向量不挡 RAG。实测 --reset 后 18.5MB → 404KB
+- **短问题跨话题歧义命中（用户实测："v5 版本怎么使用"命中另一项目的 v5 报告）**：短 query 的指代（"v5"指 minibridge 的 v5）依赖对话上下文，孤立检索会命中库中其他项目的话题相近内容，且向量/关键词两路同时命中被 RRF 加权放大。修复：当前问题 <30 字时拼接上一条 user 消息前缀（80 字）补充语境（"minibridge 是什么 v5 版本怎么使用"可精确命中 minibridge/README）；引用来源列表改为**只展示模型实际引用的片段**（正文出现对应 `[n]` 才显示）——检索命中 ≠ 被引用，模型判定无关忽略的命中不再上墙
+- **RAG 索引清理工具 `scripts/ragclean.go`**（`go run` 单文件，build tag ignore 不参与常规构建）：系统 sqlite3 CLI 缺 vec0 模块无法直接操作虚拟表，本工具复用项目驱动（mattn + sqlite-vec）执行。两种模式：默认按排除规则清垃圾；`--reset` 全量重置——**vec0 v0.1.6 的 DELETE 是标记失效位的惰性删除，向量 blob 空间不回收**（实测 3.3 万垃圾块删除后 196MB blob 残留、VACUUM 无效），只有 DROP 整表重建才能真正释放（实测 251MB → 352KB）。重置后服务启动自动重建空表（EnsureVecIndex），reindex 重新灌入
+- **ragclean --reset 后 reindex 全部失败（用户实测：`file_index_state` 全空）**：`--reset` 只 DROP 了 vec0 表但残留 `rag_meta` 的维度记录，`EnsureVecIndex` 见"维度一致"误判表已存在而跳过建表，后续写入全部 no such table。修复：一致性判定改为**双信号**（meta 记录与表实际存在缺一即重建），表缺失重建时顺带作废 `file_index_state`（防 hash 命中跳过导致向量永远缺失）；工具 `--reset` 同步清 meta。新增回归用例（DROP 表 + meta 残留 → 自动重建可写）
+- **RAG 误索引依赖/隐藏目录**（用户实测：reindex 逐个向量化 `.venv` 里的 site-packages）：遍历排除规则——隐藏目录（`.` 前缀，覆盖 .venv/.git/.idea）与依赖/构建目录（node_modules/\_\_pycache\_\_/vendor/target）整个子树跳过；隐藏文件（.env/.gitignore 等）同步排除（Indexable 层，上传钩子一致生效）。依赖产物无知识价值且数量庞大（一个 .venv 上千文件，纯浪费 embed 费用）
+- **RAG HTML 索引正文提取（去标签噪音）**：`.html`/`.htm` 此前按源码原样切分——`<div>`/`<style>` 等高频标签污染 embedding 向量（检索质量下降）且浪费注入 token。索引前经 `golang.org/x/net/html` 提取可见正文：跳过 script/style/svg 等无语义子树，`<head>` 只取 `<title>`（页面主题锚点），块级元素空行分段（与 chunker 段落边界天然对齐）、行内文本空格拼接；提取后文本与源码行号无法映射，HTML 命中的引用行号记 0（跳转只打开文件不定位行），代码/markdown 类行号定位不受影响；文件变更检测仍用原始内容 hash（提取消耗不影响幂等）。顺带修复 chunk_test 一处 vet 格式错误；依赖锁定 go 1.25 兼容版本（x/net v0.43.0）
+- **RAG 全量索引不覆盖符号链接**（用户实测：软链目录整个子树零索引）：`filepath.WalkDir` 默认不跟随符号链接，链接到别处的目录（如 blog_example）被静默跳过，而文件浏览器/AI read_file 在 `allow_symlink=true` 下能正常访问——同一文件"能读却搜不到"。`ReindexTree` 改为自写递归遍历：跟随开关与 `server.allow_symlink` 语义一致（关闭时严格限定根内、链接条目跳过），跟随时解析真实路径去重防循环链接（A→B→A 死循环），索引路径记用户视角的链接侧路径，内容读真实文件
+- **RAG 检索相关度阈值过滤**：KNN 没有"不相关"概念——问天气这类库中完全没有相关内容的提问，也会返回"距离最近的 topK 个垃圾片段"（截图案例：天气问题引用了 5 个测试报告）。`ai.embedding.max_distance`（默认 0.9，归一化向量 L2 距离 ≈ 余弦相似度 0.6）以上的命中直接丢弃，KNN 按距离升序返回故首个超阈值即可截断；`rag_hits` 事件与注入 prompt 同源过滤。中文 embedding 空间各向异性（无关文本距离普遍 <1.0），首版默认 1.1 实测拦不住无关命中，收紧至 0.9；`rag: context injected` 日志同步输出每条命中的实际 distance（阈值调参依据）。Env: `AI_EMBEDDING_MAX_DISTANCE`
+- **RAG 全链路自查优化（6 项）**：① chunker 超长段切分的行号统计 O(n²)——无空行的 MB 级单行文件（minified js）索引卡死，改为增量计数 O(n)（含句子边界回退时 [cut, i] 换行的补偿计算）；② CodePreview 行定位用 scrollIntoView 会连带滚动整个页面，改为仅滚代码容器自身（rect 差值计算居中）；③ 定位请求 pendingLocate 在切换 tab 时不丢弃，旧文件的定位会错误落到新文件上；④ RagRefTooltip 状态/委托从实例级闭包提升为模块级单例（双实例共存时后挂载实例的 handler 未注册、tooltip 失效），实例卸载改引用计数；⑤ search_files 工具 topK=10 全中文长块逼近 32KB 工具结果上限（超限整个结果变错误提示），片段截断 500 字；⑥ RAG 检索 query 无长度限制（超长问题直发 embedding API 可能 4xx），截断 2000 字
+- **Agent 工具轮次用尽后"只有工具卡片没有回答"**：达到 5 轮上限时模型往往仍在请求调工具，被掐断后直接补发 [DONE]，整次回答零文本。改为上限轮不再携带 tools（模型只能文本输出），并在进入上限轮前注入 system 提示"轮次已达上限，基于已获得的工具结果直接回答，不足部分明确说明"
+
+- **AI 对话流式期间"思考过程"无法滚动**：每个 reasoning/正文增量回调都无条件把消息列表拉到底部（每秒数十次），用户展开思考过程往上滚立即被拉回底部。改为 stick-to-bottom——scroll 事件感知用户上滚（距底 >40px 即暂停跟随，滚回底部自动恢复；程序拉底自带 120ms 事件窗口防误判）；发消息/载入会话/流结束等用户主动场景仍无条件拉底并恢复跟随（`scrollBottom(force)` 分级）。首版纯距离阈值方案（距底 >80px 才暂停）在高频增量拉底下用户单次滚轮滚不出逃逸距离，表现为"完全滚不动"，故废弃
 
 - **邮件主题显示原始编码（`=?UTF-8?B?...`）**：`b64()` 对最后一段也补 `\r\n`，主题 encoded-word 被裸换行截断且无 `?=` 闭合，收件方无法解码原样显示。新增 `encodeWord`（RFC 2047）：按 ~40 字节切段（回退 UTF-8 字符边界防切断中文）、每段独立闭合、段间 CRLF+空格续行折叠；显示名同样处理（支持中文）
 - **AI 定时任务执行成功但邮件查询失败（context canceled）**：`runAIJob` 的 `runCtx` 在函数 return 时被 `defer cancel()` 取消，而 `bus.Publish` 的邮件 handler 是异步 goroutine——LLM 完成后主流程毫秒级返回并取消 ctx，handler 的查库请求被打断（竞态）。发布事件改用独立长生命周期 ctx（事件分发不绑定发布方生命周期）

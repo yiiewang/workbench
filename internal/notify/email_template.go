@@ -43,7 +43,9 @@ func renderEmailHTML(c emailContent) string {
 }
 
 // mdToHTML 极简 markdown → HTML 转换（AI 定时任务输出用）：
-//   #/##/### 标题 → 加粗段；- / 1. 列表行；**text** 粗体；空行分段。
+//
+//	#/##/### 标题 → 加粗段；- / 1. 列表行；**text** 粗体；空行分段。
+//
 // 不求完备（AI 输出邮件场景够用），未识别格式按段落原样（转义后）输出。
 func mdToHTML(md string) template.HTML {
 	esc := func(s string) string {

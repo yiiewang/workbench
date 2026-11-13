@@ -69,16 +69,16 @@ func (d *DB) ScanTimeReminders(ctx context.Context, today, hhmm string) ([]TimeR
 
 // AIJob AI 定时任务
 type AIJob struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	CronExpr  string `json:"cronExpr"`
-	Prompt    string `json:"prompt"`
-	Enabled   bool   `json:"enabled"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	CronExpr string `json:"cronExpr"`
+	Prompt   string `json:"prompt"`
+	Enabled  bool   `json:"enabled"`
 	// IsGlobal 全局公共任务（user_id IS NULL，只存一条，执行时按用户展开）
-	IsGlobal bool `json:"isGlobal,omitempty"`
-	LastRunAt string `json:"lastRunAt,omitempty"`
+	IsGlobal   bool   `json:"isGlobal,omitempty"`
+	LastRunAt  string `json:"lastRunAt,omitempty"`
 	LastStatus string `json:"lastStatus,omitempty"`
-	CreatedAt string `json:"createdAt,omitempty"`
+	CreatedAt  string `json:"createdAt,omitempty"`
 }
 
 // scanAIJobRow 列序：id, name, cron_expr, prompt, enabled, last_run_at, last_status, created_at, user_id(可 NULL)

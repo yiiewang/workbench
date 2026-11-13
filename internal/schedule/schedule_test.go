@@ -97,7 +97,9 @@ func TestRunDueScan_DedupAndPublish(t *testing.T) {
 	var events []TaskDueEvent
 	bus.Subscribe(TopicTaskDue, func(ctx context.Context, evt Event) {
 		if e, ok := evt.Payload.(TaskDueEvent); ok {
-			mu.Lock(); events = append(events, e); mu.Unlock()
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
 		}
 	})
 

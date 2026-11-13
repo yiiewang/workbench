@@ -46,7 +46,7 @@ func TestMigrate_LegacyDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
 
 	// 用 000001 baseline 构造阶段 A 前存量库（模拟「已应用 baseline 但未纳入 golang-migrate 管理」）
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		t.Fatalf("open legacy db: %v", err)
 	}

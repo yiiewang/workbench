@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/sqlite"
+	"github.com/golang-migrate/migrate/v4/database/sqlite3"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 )
 
@@ -42,7 +42,7 @@ func (d *DB) migrate() error {
 
 	// NoTxWrap=true：SQLite 的 PRAGMA foreign_keys 在事务内是 no-op，
 	// 删列等表重建迁移（000003）需要在事务外执行。
-	driver, err := sqlite.WithInstance(d.conn, &sqlite.Config{NoTxWrap: true})
+	driver, err := sqlite3.WithInstance(d.conn, &sqlite3.Config{NoTxWrap: true})
 	if err != nil {
 		return fmt.Errorf("init sqlite driver: %w", err)
 	}

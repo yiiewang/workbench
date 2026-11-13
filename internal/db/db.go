@@ -8,7 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/yiiewang/workbench/internal/sqlitevec"
 )
 
 // FlexString 兼容 JSON 中 string 和 number 两种类型的字符串字段
@@ -59,13 +60,13 @@ type DB struct {
 
 // TaskItem 任务条目
 type TaskItem struct {
-	ID             FlexString `json:"id"`
-	Title          string     `json:"title"`
-	Content        string     `json:"content,omitempty"`
-	Status         string     `json:"status"`
-	Priority       string     `json:"priority"`
-	Scheduled      string     `json:"scheduled"`
-	Due            string     `json:"due"`
+	ID        FlexString `json:"id"`
+	Title     string     `json:"title"`
+	Content   string     `json:"content,omitempty"`
+	Status    string     `json:"status"`
+	Priority  string     `json:"priority"`
+	Scheduled string     `json:"scheduled"`
+	Due       string     `json:"due"`
 	// ScheduledTime/DueTime 精确时刻（HH:mm，空 = 无精确时间，仅按日期粒度提醒）：
 	// scheduled_time 到点发"开始提醒"，due_time 到点且未完成发"到期提醒"
 	ScheduledTime  string     `json:"scheduledTime,omitempty"`
@@ -97,7 +98,11 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("create db directory %s: %w", dir, err)
 	}
 
-	conn, err := sql.Open("sqlite", fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=%d&_foreign_keys=on", dbPath, sqliteBusyTimeoutMs))
+	// 进程级注册 sqlite-vec 扩展（vec0 虚拟表）：此后所有新连接自动加载。
+	// cgo 驱动（mattn/go-sqlite3）的代价是交叉编译需 xgo，换来向量 KNN 原生能力。
+	sqlitevec.Auto()
+
+	conn, err := sql.Open("sqlite3", fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=%d&_foreign_keys=on", dbPath, sqliteBusyTimeoutMs))
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

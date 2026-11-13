@@ -10,6 +10,10 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # Go 源码（排除测试文件）
 GO_SRC := $(shell find cmd internal -name '*.go' ! -name '*_test.go' 2>/dev/null)
 
+# mattn/go-sqlite3 的 FTS5（混合检索全文索引）需显式启用；
+# 所有构建/检查入口统一携带
+GO_TAGS := sqlite_fts5
+
 # ============================================================
 # 本地构建（每次都重新构建前端 + Go，确保 dist 是最新的）
 # ============================================================
@@ -18,7 +22,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' ! -name '*_test.go' 2>/dev/null
 .PHONY: build
 build: frontend
 	@mkdir -p $(OUT_DIR)
-	go build -ldflags="$(LDFLAGS)" -o $(LOCAL) ./cmd/workbench/
+	CGO_ENABLED=1 go build -tags "$(GO_TAGS)" -ldflags="$(LDFLAGS)" -o $(LOCAL) ./cmd/workbench/
 	@echo "$(BINARY) built -> $(LOCAL)"
 
 .PHONY: run
@@ -49,7 +53,7 @@ all: build
 # ============================================================
 .PHONY: vet
 vet:
-	go vet ./...
+	CGO_ENABLED=1 go vet -tags "$(GO_TAGS)" ./...
 
 .PHONY: lint
 lint:
@@ -57,10 +61,26 @@ lint:
 
 .PHONY: test
 test:
-	go test ./...
+	CGO_ENABLED=1 go test -tags "$(GO_TAGS)" ./...
 
 .PHONY: check
 check: vet lint test
+
+# 同步 internal/sqlitevec/sqlite3.h（升级 mattn/go-sqlite3 版本后执行，
+# 保证 vendor 头文件与实际链接的 sqlite 版本一致）
+.PHONY: sync-vec-headers
+sync-vec-headers:
+	@V=$$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3) && \
+		cp $$V/sqlite3-binding.h internal/sqlitevec/sqlite3.h && \
+		echo "synced internal/sqlitevec/sqlite3.h <- $$V/sqlite3-binding.h"
+
+# RAG 索引清理（必须经此入口：file_chunk_fts 需要 sqlite_fts5 build tag，
+# 直接 go run 不带 tag 会报 no such module: fts5）
+#   make ragclean              # 按排除规则清垃圾
+#   make ragclean ARGS=--reset # 全量重置（推倒重建，释放 vec0 惰性删除残留）
+.PHONY: ragclean
+ragclean:
+	CGO_ENABLED=1 go run -tags "$(GO_TAGS)" scripts/ragclean.go $(ARGS)
 
 # ============================================================
 # 跨平台构建 + 打包（使用 xgo + Docker）
@@ -69,7 +89,7 @@ check: vet lint test
 build-all: frontend
 	@mkdir -p $(OUT_DIR)
 	go install src.techknowlogick.com/xgo@latest
-	xgo -ldflags="$(LDFLAGS)" \
+	xgo -tags="$(GO_TAGS)" -ldflags="$(LDFLAGS)" \
 		--targets=linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64 \
 		-out $(OUT_DIR)/$(BINARY)-$(VERSION) ./cmd/workbench/
 	@cd $(OUT_DIR) && for f in $(BINARY)-$(VERSION)-*; do \

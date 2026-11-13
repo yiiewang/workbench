@@ -17,11 +17,11 @@ type TimeReminderRow struct {
 	Kind string
 }
 
-// ScanTimeReminders 查询某日某时刻命中的精确提醒：
+// ScanTimeReminders 查询某日某时刻命中的精确提醒（已完成任务一律跳过）：
 //   - scheduled = today 且 scheduled_time = hhmm → start
-//   - due = today 且 due_time = hhmm 且 status != done → due
+//   - due = today 且 due_time = hhmm → due
 //
-// 同一任务两个条件都命中时返回两行（各自独立去重投递）。
+// 两条件同时命中只返回一行（start 优先判定）——完成状态的任务不再发提醒邮件。
 func (d *DB) ScanTimeReminders(ctx context.Context, today, hhmm string) ([]TimeReminderRow, error) {
 	rows, err := d.conn.QueryContext(ctx, `
 		SELECT t.id, t.title, t.content, t.status, t.priority, t.scheduled, t.due,
@@ -29,9 +29,9 @@ func (d *DB) ScanTimeReminders(ctx context.Context, today, hhmm string) ([]TimeR
 		       t.auto_postponed, t.sort_order, t.files, t.user_id, t.org_id
 		FROM tasks t
 		JOIN users u ON u.id = t.user_id
-		WHERE (
+		WHERE t.status != 'done' AND (
 		      (t.scheduled = ? AND t.scheduled_time = ?)
-		   OR (t.due = ? AND t.due_time = ? AND t.status != 'done')
+		   OR (t.due = ? AND t.due_time = ?)
 		)
 	`, today, hhmm, today, hhmm)
 	if err != nil {

@@ -314,6 +314,29 @@ func (s *Server) handleAIReindexStatus(ctx iris.Context) {
 }
 
 // ============================================================
+// GET /api/ai/index-status — 文件索引状态（汇总 + 明细）
+// ============================================================
+
+func (s *Server) handleAIIndexStatus(ctx iris.Context) {
+	if s.rag == nil {
+		writeFail(ctx, http.StatusServiceUnavailable, CodeAINotConfigured)
+		return
+	}
+	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
+	summary, err := s.db.FileIndexSummaryOf(ctx.Request().Context(), orgID, userID)
+	if err != nil {
+		serverError(ctx, "index summary failed", err)
+		return
+	}
+	items, err := s.db.ListFileIndexState(ctx.Request().Context(), orgID, userID, 500)
+	if err != nil {
+		serverError(ctx, "index list failed", err)
+		return
+	}
+	writeOK(ctx, map[string]any{"summary": summary, "items": items})
+}
+
+// ============================================================
 // POST /api/ai/chat — SSE 流式对话代理（可选 Agent 循环）
 //
 // 纯对话模式（ai.tools=false）：上游 SSE 逐行透传（行为与历史版本一致）。
@@ -540,6 +563,19 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 // ============================================================
 // 非流式单次调用（AI 定时任务等后台场景用）
 // ============================================================
+
+// aiJobLLM 定时任务的 LLM 调用（LLMCaller 装配，见 schedule.NewAIJobsRunnerJob）：
+// RAG 前置检索注入——日报/总结类 prompt 与用户文件语义相关（周报文档、项目
+// 笔记），以任务归属用户身份检索命中片段拼进 prompt。检索失败静默降级
+// （定时任务可用性优先）。签名匹配 schedule.LLMCaller。
+func (s *Server) aiJobLLM(ctx context.Context, orgID, userID int64, prompt string) (string, error) {
+	if s.rag != nil {
+		if hits, err := s.rag.Search(ctx, orgID, userID, prompt, 3); err == nil && len(hits) > 0 {
+			prompt = rag.ReferencePrompt(hits) + "\n\n" + prompt
+		}
+	}
+	return s.aiChatOnce(ctx, prompt)
+}
 
 // aiChatOnce 非流式调用上游 /chat/completions，返回首个回复文本。
 // 不走 Agent 循环/工具（定时任务是后台生成型任务，无需交互）。

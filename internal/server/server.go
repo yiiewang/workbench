@@ -98,8 +98,9 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 			return nil, fmt.Errorf("init time reminder job: %w", terr)
 		}
 		sched.AddJob(timeJob)
-		// AI 定时任务执行（用户自建，cron 命中 → LLM 生成 → 邮件通知）
-		aiJobsRunner, ajerr := schedule.NewAIJobsRunnerJob(database, srv.aiChatOnce, loc)
+		// AI 定时任务执行（用户自建，cron 命中 → LLM 生成 → 邮件通知）；
+		// aiJobLLM 在调用前按任务归属用户做 RAG 检索注入（日报可引用个人文件）
+		aiJobsRunner, ajerr := schedule.NewAIJobsRunnerJob(database, srv.aiJobLLM, loc)
 		if ajerr != nil {
 			return nil, fmt.Errorf("init ai jobs runner: %w", ajerr)
 		}
@@ -207,6 +208,8 @@ func (s *Server) App() *iris.Application {
 	api.Post("/ai/reindex", auth, s.handleAIReindex)
 	// 全量重建进度查询（running/total/processed/failed/currentPath）
 	api.Get("/ai/reindex/status", auth, s.handleAIReindexStatus)
+	// 文件索引状态（汇总 files/chunks/errors + 明细列表）
+	api.Get("/ai/index-status", auth, s.handleAIIndexStatus)
 	// AI 定时任务 CRUD（用户自建"到点让 AI 执行 prompt"）
 	api.Get("/ai/jobs", auth, s.handleAIJobsList)
 	api.Post("/ai/jobs", auth, s.handleAIJobCreate)

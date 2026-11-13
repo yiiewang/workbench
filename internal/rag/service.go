@@ -522,6 +522,17 @@ func rrfFuse(vec, fts []db.ChunkHit, topK int) []db.ChunkHit {
 	return out
 }
 
+// ReferencePrompt 把命中片段拼成参考上下文（定时任务等后台场景，
+// 无编号标注要求——不需要模型在产出里标 [n]）
+func ReferencePrompt(hits []Hit) string {
+	var b strings.Builder
+	b.WriteString("以下是用户个人文件中与本次任务语义相关的参考片段（含来源路径），可按需引用：\n")
+	for _, h := range hits {
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", h.Path, h.Content)
+	}
+	return b.String()
+}
+
 // ContextPrompt 把命中片段拼成注入 AI 对话的上下文消息（编号引用制）。
 // 作为独立 system 消息追加在消息序列末尾：与前端"引用文件"机制并存，
 // 模型按相关性自行取舍。模型只需输出稳定的 [n] 编号，路径/行号由前端

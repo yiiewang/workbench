@@ -22,8 +22,9 @@ import (
 )
 
 // LLMCaller 非流式 LLM 调用（由 server 装配注入，复用上游 AI 配置；
-// schedule 包不依赖 server，保持单向依赖）
-type LLMCaller func(ctx context.Context, prompt string) (string, error)
+// schedule 包不依赖 server，保持单向依赖）。orgID/userID 为任务归属用户
+// （全局公共任务展开后的实际执行者）——server 侧据此做 RAG 按用户分区检索
+type LLMCaller func(ctx context.Context, orgID, userID int64, prompt string) (string, error)
 
 // aiJobTimeout 单个 AI 任务执行超时（LLM 生成 + 数据组装）。
 // 推理模型生成日报类长文（reasoning + 数百字输出）实测可达数分钟。
@@ -106,7 +107,7 @@ func runAIJob(ctx context.Context, job db.AIJobWithOwner, database *db.DB, llm L
 		return
 	}
 
-	output, err := llm(ctx, buildAIJobPrompt(job, tasks))
+	output, err := llm(ctx, job.OrgID, job.UserID, buildAIJobPrompt(job, tasks))
 	if err != nil {
 		_ = database.MarkAIJobRun(ctx, job.ID, "error: "+err.Error(), "")
 		slog.Error("ai job llm failed", "job", job.Name, "err", err)

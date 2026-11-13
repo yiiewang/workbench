@@ -21,11 +21,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/kataras/iris/v12"
 	"github.com/google/uuid"
+	"github.com/kataras/iris/v12"
 	"github.com/yiiewang/workbench/internal/db"
+	"github.com/yiiewang/workbench/internal/rag"
 	"github.com/yiiewang/workbench/internal/schedule"
 )
 
@@ -37,6 +39,67 @@ const aiMaxBodyBytes = 512 * 1024
 
 // aiStreamTimeout 单次对话上游流式响应的最长等待时间。
 const aiStreamTimeout = 10 * time.Minute
+
+// ragSearchTopK RAG 前置检索取回的文本块数。取多了稀释上下文、
+// 取少了覆盖不足；5 块 × ~800 字 ≈ 4K 字，对个人知识库场景够用。
+const ragSearchTopK = 5
+
+// lastUserContent 取消息序列中最后一条 user 消息文本（RAG 检索 query）
+func lastUserContent(msgs []aiMessage) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" && strings.TrimSpace(msgs[i].Content) != "" {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
+
+// ragQueryMinRunes 短问题阈值：低于它视为依赖对话上下文（指代词如
+// "v5 怎么用"），拼接上一条 user 消息前缀补充语境
+const ragQueryMinRunes = 30
+
+// ragQueryPrevPrefixRunes 上下文前缀截断长度
+const ragQueryPrevPrefixRunes = 80
+
+// ragQueryFrom 消息序列提取 RAG 检索 query：
+//  1. @ 引用文件时消息为「【引用文件内容】…全文…【引用文件结束】问题」——
+//     全文会主导 embedding 向量，只取结束标记后的问题部分；
+//  2. 当前问题较短时拼接上一条 user 消息前缀——短问题里的指代
+//     （"v5 怎么用"）依赖对话上下文，孤立检索会命中话题歧义内容
+//     （库里另一个项目的 v5 报告）。
+func ragQueryFrom(msgs []aiMessage) string {
+	cur := ragQuery(lastUserContent(msgs))
+	if runeLen(cur) >= ragQueryMinRunes {
+		return cur
+	}
+	for i := len(msgs) - 2; i >= 0; i-- {
+		if msgs[i].Role != "user" {
+			continue
+		}
+		prev := ragQuery(msgs[i].Content)
+		if prev == "" {
+			break
+		}
+		if r := []rune(prev); len(r) > ragQueryPrevPrefixRunes {
+			prev = string(r[:ragQueryPrevPrefixRunes])
+		}
+		return prev + " " + cur
+	}
+	return cur
+}
+
+// ragQuery 剥离引用文件全文（见上），返回实际检索文本
+func ragQuery(userContent string) string {
+	const endMark = "【引用文件结束】"
+	if idx := strings.LastIndex(userContent, endMark); idx >= 0 {
+		if q := strings.TrimSpace(userContent[idx+len(endMark):]); q != "" {
+			return q
+		}
+	}
+	return strings.TrimSpace(userContent)
+}
+
+func runeLen(s string) int { return len([]rune(s)) }
 
 // aiClient 上游 HTTP 客户端：不设整体超时（流式长连接），仅设拨号/TLS/头超时。
 var aiClient = &http.Client{
@@ -86,8 +149,8 @@ type aiChatRequest struct {
 func (s *Server) handleAIStatus(ctx iris.Context) {
 	writeOK(ctx, map[string]any{
 		"enabled": s.cfg.AI.Enabled(),
-		"model":   s.cfg.AI.Model,
-		"tools":   s.cfg.AI.Tools,
+		"model":   s.cfg.AI.Chat.Model,
+		"tools":   s.cfg.AI.Chat.Tools,
 	})
 }
 
@@ -206,6 +269,51 @@ func (s *Server) handleAISessionDelete(ctx iris.Context) {
 }
 
 // ============================================================
+// POST /api/ai/reindex — 手动触发当前用户文件全量重建向量索引
+// ============================================================
+
+// ragReindexing 全量重建进行中标记（org:user 维度）：全量 embed 成本高，
+// 同用户重复触发直接 409，完成后自动清除。
+var ragReindexing sync.Map
+
+func (s *Server) handleAIReindex(ctx iris.Context) {
+	if s.rag == nil {
+		writeFail(ctx, http.StatusServiceUnavailable, CodeAINotConfigured)
+		return
+	}
+	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
+	key := fmt.Sprintf("%d:%d", orgID, userID)
+	if _, running := ragReindexing.LoadOrStore(key, struct{}{}); running {
+		writeFail(ctx, iris.StatusConflict, CodeReindexRunning)
+		return
+	}
+	root := s.userRoot(ctx)
+	go func() {
+		defer ragReindexing.Delete(key)
+		stats, err := s.rag.ReindexTree(context.Background(), orgID, userID, root, s.cfg.Server.AllowSymlink)
+		if err != nil {
+			slog.Error("rag: reindex failed", "err", err, "user", userID)
+			return
+		}
+		slog.Info("rag: reindex done", "user", userID,
+			"indexed", stats.Indexed, "skipped", stats.Skipped, "failed", stats.Failed)
+	}()
+	writeOK(ctx, map[string]any{"started": true})
+}
+
+// ============================================================
+// GET /api/ai/reindex/status — 全量重建进度（含最近一次已完成记录）
+// ============================================================
+
+func (s *Server) handleAIReindexStatus(ctx iris.Context) {
+	if s.rag == nil {
+		writeFail(ctx, http.StatusServiceUnavailable, CodeAINotConfigured)
+		return
+	}
+	writeOK(ctx, s.rag.ProgressOf(currentOrgID(ctx), currentUserID(ctx)))
+}
+
+// ============================================================
 // POST /api/ai/chat — SSE 流式对话代理（可选 Agent 循环）
 //
 // 纯对话模式（ai.tools=false）：上游 SSE 逐行透传（行为与历史版本一致）。
@@ -233,7 +341,9 @@ func aiSystemPrompt(now time.Time) string {
 		"1. 执行写操作（创建/修改任务、写文件、发通知、安排定时任务）前，先用一两句话向用户说明你的计划（要做什么、关键参数如日期时刻），再发起工具调用等待批准；一次只安排一个写操作，等确认后再进行下一个。\n" +
 		"2. 创建/修改任务时给全时间范围参数：用户说了开始与截止就都填；只说截止则 scheduled 与 due 相同；都没说则默认都为当天。涉及具体钟点（如\"晚上 8 点\"）时同时给对应的 Time 参数，到点会自动邮件提醒。\n" +
 		"3. 用户消息中引用的文件内容已附在消息里，无需再调用 read_file。\n" +
-		"4. 回答保持简洁，直接给出结果。"
+		"4. 文件内容类问题优先依据语义检索片段（消息末尾的编号片段）；片段不足以回答时用 search_files 换关键词检索，不要猜测路径盲调 read_file；read_file 只用于已确认存在的具体文件（路径取自检索结果）。\n" +
+		"5. 避免重复检索：本会话中已检索到、已读取过的内容视为已知信息，足以回答时直接总结作答，不要为\"确认细节\"反复检索；只有信息确有缺口（关键内容完全缺失）才再检索，且同一问题换关键词不超过两次。\n" +
+		"6. 回答保持简洁，直接给出结果。"
 }
 
 func (s *Server) handleAIChat(ctx iris.Context) {
@@ -260,13 +370,37 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 	// 组装上游请求（OpenAI 兼容 /chat/completions，stream=true）。
 	// base_url 兼容两种写法：网关根（…/v1，自动追加 /chat/completions）
 	// 或完整端点（…/v1/chat/completions，原样使用），避免配置歧义导致 404。
-	upstreamURL := normalizeAIEndpoint(s.cfg.AI.BaseURL)
-	toolsOn := s.cfg.AI.Tools
+	upstreamURL := normalizeAIEndpoint(s.cfg.AI.Chat.BaseURL)
+	toolsOn := s.cfg.AI.Chat.Tools
 	msgs := req.Messages
 	// Agent 模式注入系统提示：平台角色 + 当前时间（模型无时间感知，
 	// 此前任务日期全靠猜）+ 写操作前置说明要求（先解释计划再请求确认）
 	if toolsOn {
 		msgs = append([]aiMessage{{Role: "system", Content: aiSystemPrompt(time.Now())}}, msgs...)
+	}
+	// RAG 前置检索：用最新一条 user 消息在其个人文件中做语义检索，
+	// 命中片段以独立 system 消息追加（与前端"引用文件"机制并存）。
+	// 检索失败/超时静默降级——对话可用性优先于检索完整性。
+	var ragHits []rag.Hit
+	if s.rag != nil {
+		if q := ragQueryFrom(req.Messages); q != "" {
+			hits, err := s.rag.Search(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), q, ragSearchTopK)
+			switch {
+			case err != nil:
+				slog.Warn("rag: search failed, fallback to no context", "err", err)
+			case len(hits) > 0:
+				// 可观测性：哪些回答参考了哪些文件 + 实际距离
+				// （distance 观测值是 max_distance 阈值调参的唯一依据）
+				files := make([]string, len(hits))
+				for i, h := range hits {
+					files[i] = fmt.Sprintf("%s(%.3f)", h.Path, h.Distance)
+				}
+				slog.Info("rag: context injected", "user", currentUserID(ctx),
+					"query", truncateStr(q, 100), "hits", len(hits), "files", files)
+				ragHits = hits
+				msgs = append(msgs, aiMessage{Role: "system", Content: rag.ContextPrompt(hits)})
+			}
+		}
 	}
 
 	// 绑定请求上下文：客户端断开 → 上游取消
@@ -275,14 +409,21 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 
 	w := ctx.ResponseWriter()
 	wroteHeader := false
+	usageSum := aiUsage{} // Agent 多轮 token 消耗累加
 
 	for round := 0; ; round++ {
+		// 工具轮次用尽后不再携带 tools：模型只能文本回答。
+		// 否则上限轮模型仍可能请求调工具被掐断，表现为"只有工具卡片没有回答"。
+		forceAnswer := round >= aiMaxToolRounds
 		payload := map[string]any{
-			"model":    s.cfg.AI.Model,
+			"model":    s.cfg.AI.Chat.Model,
 			"messages": msgs,
 			"stream":   true,
+			// 流式响应末尾带 usage 分片（token 消耗统计）；网关不支持时
+			// 分片缺失，前端不显示消耗（无害降级）
+			"stream_options": map[string]any{"include_usage": true},
 		}
-		if toolsOn {
+		if toolsOn && !forceAnswer {
 			payload["tools"] = aiToolsPayload()
 			payload["tool_choice"] = "auto"
 		}
@@ -298,7 +439,7 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 			return
 		}
 		upReq.Header.Set("Content-Type", "application/json")
-		upReq.Header.Set("Authorization", "Bearer "+s.cfg.AI.APIKey)
+		upReq.Header.Set("Authorization", "Bearer "+s.cfg.AI.Chat.APIKey)
 		upReq.Header.Set("Accept", "text/event-stream")
 		// 链路排障三件套：每次模型调用新生成 Request-Id；QA/Session 由前端传入后透传
 		upReq.Header.Set("X-Model-Request-Id", uuid.NewString())
@@ -317,7 +458,7 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 				sseWriteEvent(w, "error", map[string]string{"msg": "ai upstream request failed"})
 				return
 			}
-			serverError(ctx, "ai upstream request failed", err, "model", s.cfg.AI.Model)
+			serverError(ctx, "ai upstream request failed", err, "model", s.cfg.AI.Chat.Model)
 			return
 		}
 
@@ -326,7 +467,7 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			resp.Body.Close()
 			msg := fmt.Sprintf("upstream %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
-			slog.Error("ai upstream error", "status", resp.StatusCode, "model", s.cfg.AI.Model)
+			slog.Error("ai upstream error", "status", resp.StatusCode, "model", s.cfg.AI.Chat.Model)
 			if wroteHeader {
 				sseWriteEvent(w, "error", map[string]string{"msg": msg})
 				return
@@ -341,6 +482,12 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 			ctx.Header("X-Accel-Buffering", "no")
 			ctx.StatusCode(iris.StatusOK)
 			wroteHeader = true
+			// RAG 引用卡片数据（编号/路径/起始行/原文）：SSE header 就绪后
+			// 立刻推给前端（一次性），前端挂在当前回答气泡上
+			if ragHits != nil {
+				sseWriteEvent(w, "rag_hits", map[string]any{"hits": ragHits})
+				ragHits = nil
+			}
 		}
 
 		// 转发 + 解析本轮流式响应
@@ -350,9 +497,15 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 		if !alive {
 			return // 客户端已断开
 		}
+		// 聚合本轮 token 消耗（Agent 多轮累加）
+		if res.Usage != nil {
+			usageSum.PromptTokens += res.Usage.PromptTokens
+			usageSum.CompletionTokens += res.Usage.CompletionTokens
+			usageSum.TotalTokens += res.Usage.TotalTokens
+		}
 
 		// 工具轮：模型请求调工具 → SSE 通知前端 → 后端执行 → 结果回传 → 下一轮
-		if toolsOn && res.FinishReason == "tool_calls" && len(res.ToolCalls) > 0 && round < aiMaxToolRounds {
+		if toolsOn && !forceAnswer && res.FinishReason == "tool_calls" && len(res.ToolCalls) > 0 {
 			msgs = append(msgs, aiMessage{Role: "assistant", Content: res.Content, ToolCalls: res.ToolCalls})
 			for _, call := range res.ToolCalls {
 				sseWriteEvent(w, "tool_call", call)
@@ -365,10 +518,17 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 				resultJSON, _ := json.Marshal(result)
 				msgs = append(msgs, aiMessage{Role: "tool", ToolCallID: call.ID, Content: string(resultJSON)})
 			}
+			// 下一轮即上限轮：提醒模型收尾，避免轮次耗尽仍无文本输出
+			if round+1 >= aiMaxToolRounds {
+				msgs = append(msgs, aiMessage{Role: "system", Content: "工具调用轮次已达上限。请停止调用工具，基于以上已获得的工具结果直接回答用户问题；信息不足的部分明确说明，不要编造。"})
+			}
 			continue
 		}
 
-		// 最终轮（stop / 无工具请求 / 达到轮数上限）：补发统一结束标记
+		// 最终轮（stop / 无工具请求 / 达到轮数上限）：usage 事件 + 统一结束标记
+		if usageSum.TotalTokens > 0 {
+			sseWriteEvent(w, "usage", usageSum)
+		}
 		if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr != nil {
 			return
 		}
@@ -388,7 +548,7 @@ func (s *Server) aiChatOnce(ctx context.Context, prompt string) (string, error) 
 		return "", fmt.Errorf("AI not configured (ai.api_key / AI_BASE_URL)")
 	}
 	payload, err := json.Marshal(map[string]any{
-		"model": s.cfg.AI.Model,
+		"model": s.cfg.AI.Chat.Model,
 		"messages": []aiMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -396,12 +556,12 @@ func (s *Server) aiChatOnce(ctx context.Context, prompt string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, normalizeAIEndpoint(s.cfg.AI.BaseURL), bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, normalizeAIEndpoint(s.cfg.AI.Chat.BaseURL), bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.cfg.AI.APIKey)
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AI.Chat.APIKey)
 	req.Header.Set("X-Model-Request-Id", uuid.NewString())
 
 	resp, err := aiClient.Do(req)
@@ -673,6 +833,14 @@ type aiRoundResult struct {
 	Content      string       // 本轮增量文本（多轮拼接后即最终回答）
 	FinishReason string       // stop | tool_calls | length | ...
 	ToolCalls    []aiToolCall // 按 index 升序、分片已拼接完成的工具调用
+	Usage        *aiUsage     // 本轮 token 消耗（stream_options.include_usage，末尾分片携带）
+}
+
+// aiUsage 上游 usage 分片（Agent 多轮由调用方累加）
+type aiUsage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
 }
 
 // aiStreamDelta 上游流式分片中需要解析的增量字段
@@ -688,12 +856,13 @@ type aiStreamDelta struct {
 	} `json:"tool_calls,omitempty"`
 }
 
-// aiStreamChunk 上游 SSE data 行的结构（只取 choices[0]）
+// aiStreamChunk 上游 SSE data 行的结构（只取 choices[0]；usage 分片 choices 为空）
 type aiStreamChunk struct {
 	Choices []struct {
 		Delta        aiStreamDelta `json:"delta"`
 		FinishReason string        `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *aiUsage `json:"usage"`
 }
 
 // aiStreamWriter SSE 输出流：写增量 + 立即 flush（iris 的 ResponseWriter 满足此接口）
@@ -753,6 +922,9 @@ func parseAIDataLine(line string, res *aiRoundResult, acc map[int]*aiToolCall) {
 	var chunk aiStreamChunk
 	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 		return // 错误分片/未知格式：透传已做，解析忽略
+	}
+	if chunk.Usage != nil {
+		res.Usage = chunk.Usage
 	}
 	for _, ch := range chunk.Choices {
 		if ch.FinishReason != "" {

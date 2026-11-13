@@ -43,7 +43,7 @@ type aiTool struct {
 	Desc   string
 	Params map[string]any
 	// NeedApproval 写类工具标记：执行前需经用户确认（见 aiapproval.go），
-// 审批不通过时模型收到的结果是拒绝说明，由模型向用户解释。
+	// 审批不通过时模型收到的结果是拒绝说明，由模型向用户解释。
 	NeedApproval bool
 	Exec         func(s *Server, ctx iris.Context, args map[string]any) any
 }
@@ -79,6 +79,25 @@ var aiTools = []aiTool{
 			"required": []string{"path"},
 		},
 		Exec: execReadFile,
+	},
+	{
+		Name: "search_files",
+		Desc: "语义检索用户文件（RAG）：按自然语言问题返回最相关的文本片段（含文件路径与起始行号）。回答文件内容类问题时优先使用；前置检索的片段不够时，换关键词再次调用，不要猜测路径盲读文件",
+		Params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{
+					"type":        "string",
+					"description": "检索内容：关键词或自然语言问题描述",
+				},
+				"topK": map[string]any{
+					"type":        "integer",
+					"description": "返回片段数，1-10，默认 5",
+				},
+			},
+			"required": []string{"query"},
+		},
+		Exec: execSearchFiles,
 	},
 	{
 		Name: "list_tasks",
@@ -164,15 +183,15 @@ var aiTools = []aiTool{
 					"type":        "string",
 					"description": "任务 ID（可用 list_tasks 查询），必填",
 				},
-				"title":     map[string]any{"type": "string", "description": "新标题"},
-				"content":   map[string]any{"type": "string", "description": "新详细说明"},
-				"status":    map[string]any{"type": "string", "enum": []string{"todo", "progress", "done"}, "description": "新状态"},
-				"priority":  map[string]any{"type": "string", "enum": []string{"high", "medium", "low"}, "description": "新优先级"},
-				"scheduled": map[string]any{"type": "string", "description": "新计划开始日期 YYYY-MM-DD"},
-				"due":       map[string]any{"type": "string", "description": "新截止日期 YYYY-MM-DD"},
-				"dueTime":  map[string]any{"type": "string", "description": "截止时刻 HH:mm，到点自动邮件提醒；传空串清除"},
+				"title":         map[string]any{"type": "string", "description": "新标题"},
+				"content":       map[string]any{"type": "string", "description": "新详细说明"},
+				"status":        map[string]any{"type": "string", "enum": []string{"todo", "progress", "done"}, "description": "新状态"},
+				"priority":      map[string]any{"type": "string", "enum": []string{"high", "medium", "low"}, "description": "新优先级"},
+				"scheduled":     map[string]any{"type": "string", "description": "新计划开始日期 YYYY-MM-DD"},
+				"due":           map[string]any{"type": "string", "description": "新截止日期 YYYY-MM-DD"},
+				"dueTime":       map[string]any{"type": "string", "description": "截止时刻 HH:mm，到点自动邮件提醒；传空串清除"},
 				"scheduledTime": map[string]any{"type": "string", "description": "计划开始时刻 HH:mm，到点自动邮件提醒；传空串清除"},
-				"progress": map[string]any{"type": "integer", "description": "进度百分比 0-100"},
+				"progress":      map[string]any{"type": "integer", "description": "进度百分比 0-100"},
 			},
 			"required": []string{"taskId"},
 		},
@@ -316,7 +335,7 @@ func (s *Server) execAITool(ctx iris.Context, call aiToolCall) (result any) {
 	result = tool.Exec(s, ctx, args)
 	if b, err := json.Marshal(result); err == nil && len(b) > aiToolMaxResult {
 		return map[string]any{
-			"error":    "tool result too large, please narrow the query",
+			"error":     "tool result too large, please narrow the query",
 			"truncated": string(b[:aiToolMaxResult]),
 		}
 	}
@@ -396,6 +415,48 @@ func execReadFile(s *Server, ctx iris.Context, args map[string]any) any {
 		content = content[:aiReadFileMaxBytes] + "\n…（内容过长，已截断）"
 	}
 	return map[string]any{"path": cleanRel, "size": info.Size(), "content": content}
+}
+
+// execSearchFiles 语义检索用户文件（RAG）：query → 向量 KNN → 片段列表
+// （含路径与起始行号）。片段自带原文，不会像 read_file 全文那样撞截断；
+// 命中为空提示模型换关键词重试。
+func execSearchFiles(s *Server, ctx iris.Context, args map[string]any) any {
+	if s.rag == nil {
+		return map[string]any{"error": "RAG not enabled (ai.embedding not configured)"}
+	}
+	query, _ := args["query"].(string)
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return map[string]any{"error": "query is required"}
+	}
+	topK := 5
+	if v, ok := args["topK"].(float64); ok && v >= 1 && v <= 10 {
+		topK = int(v)
+	}
+	hits, err := s.rag.Search(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), query, topK)
+	if err != nil {
+		return map[string]any{"error": "search failed: " + err.Error()}
+	}
+	if len(hits) == 0 {
+		return map[string]any{"ok": true, "hits": []any{}, "hint": "无命中，换关键词重试"}
+	}
+	// 片段截断：topK=10 全中文长块会逼近 32KB 工具结果上限（截断=整个结果变错误提示）
+	const quoteMax = 500
+	trimmed := make([]map[string]any, len(hits))
+	for i, h := range hits {
+		content := h.Content
+		if len([]rune(content)) > quoteMax {
+			content = string([]rune(content)[:quoteMax]) + "…"
+		}
+		trimmed[i] = map[string]any{
+			"path": h.Path, "startLine": h.StartLine, "content": content,
+		}
+	}
+	return map[string]any{
+		"ok":   true,
+		"hits": trimmed,
+		"hint": "片段含文件路径与起始行号；需要更大上下文时对该文件 read_file（路径取自 hits）",
+	}
 }
 
 // execListTasks 查任务：默认只返回未完成，可选包含已完成，上限 100 条
@@ -623,8 +684,6 @@ func execDeleteAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	return map[string]any{"ok": true, "deleted": cur.Name}
 }
 
-
-
 // execListEvents 总线内省（只读）：KnownTopics 注册表 + 实时订阅者数。
 // 让 AI 知道总线上"能触发什么、谁在听"。
 func execListEvents(s *Server, ctx iris.Context, args map[string]any) any {
@@ -635,10 +694,10 @@ func execListEvents(s *Server, ctx iris.Context, args map[string]any) any {
 	events := make([]map[string]any, 0, len(schedule.KnownTopics))
 	for _, kt := range schedule.KnownTopics {
 		events = append(events, map[string]any{
-			"topic":        kt.Topic,
-			"description":  kt.Desc,
-			"subscribers":  subs[kt.Topic],
-			"publishable":  kt.Topic == schedule.TopicUserNotify, // AI 当前仅可发布用户通知
+			"topic":       kt.Topic,
+			"description": kt.Desc,
+			"subscribers": subs[kt.Topic],
+			"publishable": kt.Topic == schedule.TopicUserNotify, // AI 当前仅可发布用户通知
 		})
 	}
 	return map[string]any{"events": events}
@@ -671,9 +730,9 @@ func execNotifyUser(s *Server, ctx iris.Context, args map[string]any) any {
 	})
 	slog.Info("ai tool publish user.notify", "user", currentUserID(ctx), "subject", subject)
 	return map[string]any{
-		"ok":     true,
-		"topic":  schedule.TopicUserNotify,
-		"note":   "事件已发布，投递异步进行（用户未配置邮箱时跳过）",
+		"ok":    true,
+		"topic": schedule.TopicUserNotify,
+		"note":  "事件已发布，投递异步进行（用户未配置邮箱时跳过）",
 	}
 }
 
@@ -723,6 +782,10 @@ func execWriteFile(s *Server, ctx iris.Context, args map[string]any) any {
 	}
 	if err := os.WriteFile(dst, []byte(content), 0644); err != nil {
 		return map[string]any{"error": "write file failed: " + err.Error()}
+	}
+	// RAG 索引钩子：AI 写入的文件同样进语义索引
+	if s.rag != nil {
+		s.rag.HandleWrite(currentOrgID(ctx), currentUserID(ctx), dst, parentRel+"/"+name)
 	}
 	return map[string]any{
 		"ok":          true,

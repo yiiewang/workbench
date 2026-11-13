@@ -38,7 +38,8 @@ const (
 	CodeAINotConfigured = 50301 // AI 功能未配置（config.yaml ai 段缺失 api_key/base_url）
 
 	// 409 冲突
-	CodeTaskConflict = 40901 // 任务乐观锁冲突（baseRevision 落后于服务端 revision）
+	CodeTaskConflict   = 40901 // 任务乐观锁冲突（baseRevision 落后于服务端 revision）
+	CodeReindexRunning = 40902 // 全量重建已在进行中（防重复触发）
 )
 
 // errMsgMap 错误字典：业务码 → 默认消息
@@ -70,6 +71,7 @@ var errMsgMap = map[int]string{
 	CodeInternalError:      "Internal server error",
 	CodeAINotConfigured:    "AI service not configured",
 	CodeTaskConflict:       "Task conflict: outdated baseRevision, server copy returned",
+	CodeReindexRunning:     "Reindex already running",
 }
 
 // errMsg 返回业务码对应的默认消息，未注册时返回兜底消息

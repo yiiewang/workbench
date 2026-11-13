@@ -1,32 +1,76 @@
 <script setup lang="ts">
 // 移动端 AI 对话页：全屏形态，核心逻辑复用 composables/useAIChat（与 PC 面板共用），
 // 消息区样式复用全局 styles/ai-chat.css（类名与 PC 一致）。
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, reactive, nextTick, onMounted } from 'vue'
 import { useAIChat } from '../../composables/useAIChat'
 import FilePickerModal from '../../components/modal/FilePickerModal.vue'
 import ToolCallList from '../../components/ai/ToolCallList.vue'
+import RagCitations from '../../components/ai/RagCitations.vue'
+import RagRefTooltip from '../../components/ai/RagRefTooltip.vue'
 
 const listEl = ref<HTMLElement | null>(null)
 
-async function scrollToBottom() {
+// scrollToBottom(force?) force=true 无条件拉底（发消息/载入会话/流结束）。
+// 流式增量遵循 stick-to-bottom：用户上滚（scroll 事件距底 >40px）即暂停跟随，
+// 滚回底部自动恢复。不能用纯距离阈值判定——高频增量拉底下用户单次滚轮
+// 滚不出逃逸距离，表现为"完全滚不动"。
+const stickBottom = ref(true)
+let lastProgScroll = 0
+
+function onStickScroll() {
+  if (Date.now() - lastProgScroll < 120) return
+  const el = listEl.value
+  if (!el) return
+  stickBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+}
+
+async function scrollToBottom(force = false) {
   await nextTick()
-  if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
+  const el = listEl.value
+  if (!el) return
+  if (!force && !stickBottom.value) return
+  stickBottom.value = true // 强制拉底场景（发消息等）恢复跟随
+  lastProgScroll = Date.now()
+  el.scrollTop = el.scrollHeight
 }
 
 const {
   aiEnabled, aiModel, messages, input, streaming,
   pendingCtxFiles, showFilePicker,
   dbSessionId, sessions, sessionsOpen, sessionsLoading,
-  openReasoning,
   visibleMessages, hiddenCount, showMore,
   maybeRestoreLastSession,
   send, stopStreaming,
   removeCtxFile, onPickFiles,
   toggleSessions, loadSessions, loadSession, removeSession, clearChat, timeAgo,
   copyMessage, regenerate, saveReplyAsFile, approveToolCall,
-  isStreamingTail, toggleReasoning, renderMd, userInitial,
+  isStreamingTail, messageSegments, renderTextMd, usageText, hasCitedRefs, hasReplyContent, userInitial,
   onInputKeydown,
 } = useAIChat(scrollToBottom)
+
+// ---- 过程块折叠状态（key = 消息idx:段idx），与 PC 面板同逻辑 ----
+const processManual = reactive(new Map<string, boolean>())
+
+function processOpen(i: number, si: number): boolean {
+  const manual = processManual.get(`${i}:${si}`)
+  if (manual !== undefined) return manual
+  return isStreamingTail(i)
+}
+
+function toggleProcess(i: number, si: number) {
+  processManual.set(`${i}:${si}`, !processOpen(i, si))
+}
+
+function processRunning(i: number, si: number): boolean {
+  const segs = messageSegments(visibleMessages.value[i])
+  return isStreamingTail(i) && si === segs.length - 1 && segs[si]?.kind === 'process'
+}
+
+function processTitle(seg: { kind: string; steps: { kind: string }[] }, i: number, si: number): string {
+  if (processRunning(i, si)) return '思考与工具调用中…'
+  const tools = seg.steps.filter(s => s.kind === 'tool').length
+  return tools > 0 ? `思考与工具调用（${tools} 步）` : '思考过程'
+}
 
 // 进入页面即对话场景：自动接上最近会话
 onMounted(() => {
@@ -90,7 +134,7 @@ onMounted(() => {
     </div>
 
     <!-- 消息列表（消息区结构与样式复用全局 ai-chat.css 类） -->
-    <div v-show="!sessionsOpen" ref="listEl" class="mai-list">
+    <div v-show="!sessionsOpen" ref="listEl" class="mai-list" @scroll.passive="onStickScroll">
       <div v-if="messages.length === 0" class="mai-hello">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
@@ -104,7 +148,7 @@ onMounted(() => {
       <div v-for="(m, i) in visibleMessages" :key="i" class="ai-msg" :class="m.role">
         <div class="ai-msg-actions">
           <button
-            v-if="m.role === 'assistant' && !streaming && i === visibleMessages.length - 1 && m.content"
+            v-if="m.role === 'assistant' && !streaming && i === visibleMessages.length - 1 && hasReplyContent(m)"
             class="ai-act" title="重新生成" @click="regenerate"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
@@ -129,15 +173,28 @@ onMounted(() => {
 
         <div class="ai-bubble" :class="m.role">
           <template v-if="m.role === 'assistant'">
-            <ToolCallList v-if="m.toolCalls?.length" :calls="m.toolCalls" @approve="approveToolCall" />
-            <div v-if="m.reasoning" class="ai-reasoning">
-              <button class="ai-reasoning-toggle" @click="toggleReasoning(i)">
-                {{ openReasoning.has(i) ? '收起思考' : (isStreamingTail(i) && !m.content ? '思考中…' : '思考过程') }}
-              </button>
-              <div v-show="openReasoning.has(i)" class="ai-reasoning-body">{{ m.reasoning }}</div>
-            </div>
-            <div v-if="m.content" class="ai-md" v-html="renderMd(m.content)"></div>
-            <span v-else-if="isStreamingTail(i) && !m.reasoning" class="ai-cursor">▍</span>
+            <template v-for="(seg, si) in messageSegments(m)" :key="si">
+              <!-- 过程块（思考 + 工具调用，时间序）：默认折叠，流式尾消息展开 -->
+              <div v-if="seg.kind === 'process'" class="ai-process">
+                <button class="ai-process-toggle" @click="toggleProcess(i, si)">
+                  <span :class="{ dim: processRunning(i, si) }">{{ processTitle(seg, i, si) }}</span>
+                  <svg class="ai-process-chevron" :class="{ open: processOpen(i, si) }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+                <div v-show="processOpen(i, si)" class="ai-process-body">
+                  <template v-for="(s, ki) in seg.steps" :key="ki">
+                    <div v-if="s.kind === 'reasoning'" class="ai-process-reasoning">{{ s.text }}</div>
+                    <ToolCallList v-else-if="s.call" :calls="[s.call]" @approve="approveToolCall" />
+                  </template>
+                </div>
+              </div>
+              <!-- 正文段（Agent 中间轮说明文本 / 最终回答） -->
+              <div v-else-if="seg.text" class="ai-md" v-html="renderTextMd(seg.text, m)"></div>
+            </template>
+            <span v-if="isStreamingTail(i)" class="ai-cursor">▍</span>
+            <!-- RAG 引用来源：只展示模型实际引用的片段（正文出现对应 [n]） -->
+            <RagCitations v-if="hasCitedRefs(m)" :hits="m.ragHits" />
+            <!-- token 消耗（Agent 多轮已聚合；上游不支持 usage 时缺省不显示） -->
+            <div v-if="usageText(m)" class="ai-usage">{{ usageText(m) }}</div>
           </template>
           <template v-else>
             {{ m.content }}
@@ -186,6 +243,9 @@ onMounted(() => {
       @confirm="onPickFiles"
       @close="showFilePicker = false"
     />
+
+    <!-- RAG 引用编号悬浮预览（移动端触屏无 hover，仍支持触控笔/鼠标场景） -->
+    <RagRefTooltip />
   </template>
 </div>
 </template>

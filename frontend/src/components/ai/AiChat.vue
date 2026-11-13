@@ -1,18 +1,40 @@
 <script setup lang="ts">
 // PC 端 AI 对话浮动面板：核心对话逻辑在 composables/useAIChat（与移动端 MAI 共用），
 // 本组件只保留面板形态特有部分：fab/开关、宽度拖拽、外部事件监听。
-import { ref, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, nextTick, onMounted, onUnmounted } from 'vue'
 import { loggedIn } from '../../stores/auth'
 import { showToast } from '../../lib/common'
 import { useAIChat } from '../../composables/useAIChat'
 import FilePickerModal from '../modal/FilePickerModal.vue'
 import ToolCallList from './ToolCallList.vue'
+import RagCitations from './RagCitations.vue'
+import RagRefTooltip from './RagRefTooltip.vue'
 
 const listEl = ref<HTMLElement | null>(null)
 
-async function scrollToBottom() {
+// scrollToBottom(force?) force=true 无条件拉底（发消息/载入会话/流结束）。
+// 流式增量遵循 stick-to-bottom：用户上滚（scroll 事件距底 >40px）即暂停跟随，
+// 滚回底部自动恢复。不能用纯距离阈值判定——高频增量拉底下用户单次滚轮
+// 滚不出逃逸距离，表现为"完全滚不动"。
+const stickBottom = ref(true)
+let lastProgScroll = 0
+
+function onStickScroll() {
+  // 程序拉底自身触发的 scroll 事件不算用户交互（120ms 窗口）
+  if (Date.now() - lastProgScroll < 120) return
+  const el = listEl.value
+  if (!el) return
+  stickBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+}
+
+async function scrollToBottom(force = false) {
   await nextTick()
-  if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
+  const el = listEl.value
+  if (!el) return
+  if (!force && !stickBottom.value) return
+  stickBottom.value = true // 强制拉底场景（发消息等）恢复跟随
+  lastProgScroll = Date.now()
+  el.scrollTop = el.scrollHeight
 }
 
 // ---- 对话核心（composable） ----
@@ -20,19 +42,69 @@ const {
   aiEnabled, aiModel, messages, input, streaming,
   pendingCtxFiles, showFilePicker,
   dbSessionId, sessions, sessionsOpen, sessionsLoading,
-  openReasoning,
   visibleMessages, hiddenCount, showMore,
   maybeRestoreLastSession,
   send, stopStreaming, askWith,
   removeCtxFile, onPickFiles,
   toggleSessions, loadSessions, loadSession, removeSession, clearChat, timeAgo,
   copyMessage, regenerate, saveReplyAsFile, approveToolCall,
-  isStreamingTail, toggleReasoning, renderMd, userInitial,
+  isStreamingTail, messageSegments, renderTextMd, usageText, hasCitedRefs, hasReplyContent, userInitial,
   onInputKeydown: onKeydown,
 } = useAIChat(scrollToBottom)
 
+// ---- 过程块折叠状态（key = 消息idx:段idx）----
+// 默认：流式尾消息展开（看得见执行中），其余折叠；手动 toggle 覆盖默认值
+const processManual = reactive(new Map<string, boolean>())
+
+function processKey(i: number, si: number): string {
+  return `${i}:${si}`
+}
+
+function processOpen(i: number, si: number): boolean {
+  const manual = processManual.get(processKey(i, si))
+  if (manual !== undefined) return manual
+  return isStreamingTail(i)
+}
+
+function toggleProcess(i: number, si: number) {
+  processManual.set(processKey(i, si), !processOpen(i, si))
+}
+
+// 块标题：流式执行中显示动态态；完成后显示工具步数
+function processRunning(i: number, si: number): boolean {
+  const segs = messageSegments(visibleMessages.value[i])
+  return isStreamingTail(i) && si === segs.length - 1 && segs[si]?.kind === 'process'
+}
+
+function processTitle(seg: { kind: string; steps: { kind: string }[] }, i: number, si: number): string {
+  if (processRunning(i, si)) return '思考与工具调用中…'
+  const tools = seg.steps.filter(s => s.kind === 'tool').length
+  return tools > 0 ? `思考与工具调用（${tools} 步）` : '思考过程'
+}
+
 // ---- 面板特有：开关 / 自动恢复 ----
 const panelOpen = ref(false)
+
+// 剧场模式：面板脱离 fab 锚定，视口居中放大（宽 ~1100px、高 ~85vh），
+// Esc 或再点按钮退出；移动端不提供（面板本就近乎全宽）
+const theater = ref(false)
+const isMobile = ref(window.innerWidth <= 900)
+
+function onWindowResize() {
+  isMobile.value = window.innerWidth <= 900
+  if (isMobile.value) theater.value = false
+}
+window.addEventListener('resize', onWindowResize)
+
+function toggleTheater() {
+  theater.value = !theater.value
+  scrollToBottom()
+}
+
+function onEsc(e: KeyboardEvent) {
+  if (e.key === 'Escape' && theater.value) theater.value = false
+}
+window.addEventListener('keydown', onEsc)
 
 function togglePanel() {
   panelOpen.value = !panelOpen.value
@@ -94,6 +166,7 @@ function jumpTo(i: number) {
 
 // 滚动同步：视口顶端可见的第一条消息 → activeToc（rAF 节流）
 function onListScroll() {
+  onStickScroll() // stick-to-bottom 状态维护（用户上滚暂停跟随）
   if (tocRaf) return
   tocRaf = requestAnimationFrame(() => {
     tocRaf = 0
@@ -132,6 +205,8 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('workbench:ai-ask', onExternalAsk as EventListener)
   window.removeEventListener('workbench:ai-open', onExternalOpen)
+  window.removeEventListener('resize', onWindowResize)
+  window.removeEventListener('keydown', onEsc)
   if (tocRaf) cancelAnimationFrame(tocRaf)
 })
 
@@ -175,8 +250,8 @@ function onResizeStart(e: MouseEvent) {
       </svg>
     </button>
 
-    <!-- 对话面板：锚定在按钮上方 -->
-    <div v-if="panelOpen" class="ai-panel" :style="{ width: panelWidth + 'px' }">
+    <!-- 对话面板：锚定在按钮上方；剧场模式 = 视口居中大面板 -->
+    <div v-if="panelOpen" class="ai-panel" :class="{ theater }" :style="theater ? undefined : { width: panelWidth + 'px' }">
       <!-- 左缘拖拽调宽 -->
       <div class="ai-resizer" :class="{ active: resizing }" @mousedown="onResizeStart"></div>
 
@@ -186,6 +261,14 @@ function onResizeStart(e: MouseEvent) {
           <span v-if="aiModel" class="ai-model">{{ aiModel }}</span>
         </div>
         <div class="ai-header-actions">
+          <button v-if="!isMobile" class="ai-icon-btn" :class="{ active: theater }" :title="theater ? '退出剧场模式 (Esc)' : '剧场模式'" @click="toggleTheater">
+            <svg v-if="!theater" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>
+            </svg>
+            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M14 10l7-7"/><path d="M3 21l7-7"/>
+            </svg>
+          </button>
           <button class="ai-icon-btn" :class="{ active: sessionsOpen }" title="历史会话" @click="toggleSessions">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
@@ -276,7 +359,7 @@ function onResizeStart(e: MouseEvent) {
           <!-- hover 工具条：复制 / 重新生成（末尾回复）/ 保存为文件 -->
           <div class="ai-msg-actions">
             <button
-              v-if="m.role === 'assistant' && !streaming && i === visibleMessages.length - 1 && m.content"
+              v-if="m.role === 'assistant' && !streaming && i === visibleMessages.length - 1 && hasReplyContent(m)"
               class="ai-act" title="重新生成" @click="regenerate"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
@@ -300,25 +383,37 @@ function onResizeStart(e: MouseEvent) {
             </svg>
           </div>
 
-          <!-- 气泡：assistant 走 markdown 渲染，user 纯文本 -->
+          <!-- 气泡：assistant 按时序分段渲染（过程块可折叠 + 正文段），user 纯文本 -->
           <div class="ai-bubble" :class="m.role">
             <template v-if="m.role === 'assistant'">
-              <!-- 工具调用（Agent 模式）：每次调用一张可折叠卡片（写类带审批确认） -->
-              <ToolCallList v-if="m.toolCalls?.length" :calls="m.toolCalls" @approve="approveToolCall" />
-              <!-- 思考过程（推理模型）：默认折叠，流式中标题显示"思考中…" -->
-              <div v-if="m.reasoning" class="ai-reasoning">
-                <button class="ai-reasoning-toggle" @click="toggleReasoning(i)">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M9.1 12a3 3 0 1 0 5.8 1c.6-1.8-1-2.4-1-4A3 3 0 0 0 12 6"/>
-                    <circle cx="12" cy="3" r=".8" fill="currentColor"/><circle cx="5" cy="12" r=".8" fill="currentColor"/><circle cx="19" cy="12" r=".8" fill="currentColor"/>
-                  </svg>
-                  {{ openReasoning.has(i) ? '收起思考' : (isStreamingTail(i) && !m.content ? '思考中…' : '思考过程') }}
-                </button>
-                <div v-show="openReasoning.has(i)" class="ai-reasoning-body">{{ m.reasoning }}</div>
-              </div>
-              <div v-if="m.content" class="ai-md" v-html="renderMd(m.content)"></div>
-              <span v-else-if="isStreamingTail(i) && !m.reasoning" class="ai-cursor">▍</span>
-              <span v-else-if="isStreamingTail(i) && m.reasoning && !openReasoning.has(i)" class="ai-cursor ai-cursor-dim">▍</span>
+              <template v-for="(seg, si) in messageSegments(m)" :key="si">
+                <!-- 过程块（思考 + 工具调用，时间序）：默认折叠，流式尾消息展开 -->
+                <div v-if="seg.kind === 'process'" class="ai-process">
+                  <button class="ai-process-toggle" @click="toggleProcess(i, si)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M9.1 12a3 3 0 1 0 5.8 1c.6-1.8-1-2.4-1-4A3 3 0 0 0 12 6"/>
+                      <circle cx="12" cy="3" r=".8" fill="currentColor"/><circle cx="5" cy="12" r=".8" fill="currentColor"/><circle cx="19" cy="12" r=".8" fill="currentColor"/>
+                    </svg>
+                    <span :class="{ dim: processRunning(i, si) }">
+                      {{ processTitle(seg, i, si) }}
+                    </span>
+                    <svg class="ai-process-chevron" :class="{ open: processOpen(i, si) }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+                  </button>
+                  <div v-show="processOpen(i, si)" class="ai-process-body">
+                    <template v-for="(s, ki) in seg.steps" :key="ki">
+                      <div v-if="s.kind === 'reasoning'" class="ai-process-reasoning">{{ s.text }}</div>
+                      <ToolCallList v-else-if="s.call" :calls="[s.call]" @approve="approveToolCall" />
+                    </template>
+                  </div>
+                </div>
+                <!-- 正文段（Agent 中间轮说明文本 / 最终回答） -->
+                <div v-else-if="seg.text" class="ai-md" v-html="renderTextMd(seg.text, m)"></div>
+              </template>
+              <span v-if="isStreamingTail(i)" class="ai-cursor">▍</span>
+              <!-- RAG 引用来源：只展示模型实际引用的片段（正文出现对应 [n]） -->
+              <RagCitations v-if="hasCitedRefs(m)" :hits="m.ragHits" />
+              <!-- token 消耗（Agent 多轮已聚合；上游不支持 usage 时缺省不显示） -->
+              <div v-if="usageText(m)" class="ai-usage">{{ usageText(m) }}</div>
             </template>
             <template v-else>
               {{ m.content }}
@@ -378,6 +473,9 @@ function onResizeStart(e: MouseEvent) {
   @confirm="onPickFiles"
   @close="showFilePicker = false"
 />
+
+<!-- RAG 引用编号悬浮预览（全局委托，body teleport） -->
+<RagRefTooltip />
 </template>
 
 <style scoped>
@@ -421,6 +519,20 @@ function onResizeStart(e: MouseEvent) {
   box-shadow: -8px 0 24px rgba(0, 0, 0, .08), 0 8px 32px rgba(0, 0, 0, .16);
   overflow: hidden;
 }
+
+/* 剧场模式：脱离 fab 锚定，视口居中放大（不遮挡整个屏幕，背景仍可见） */
+.ai-panel.theater {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  right: auto;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+  width: min(1100px, calc(100vw - 80px));
+  height: min(820px, calc(100vh - 60px));
+  z-index: 1500;
+}
+.ai-panel.theater .ai-resizer { display: none; }
 
 /* ---- 消息目录刻度：固定在消息区左缘，hover 预览摘要（Teleport body），点击跳转 ---- */
 .ai-toc {

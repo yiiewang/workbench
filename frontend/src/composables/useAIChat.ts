@@ -7,17 +7,25 @@ import {
   getAIStatus, chatStream, approveAITool,
   listAISessions, getAISession, createAISession, updateAISession, deleteAISession,
   type ChatMessage, type AISessionSummary, type AiPayloadMessage,
+  type MsgStep, type ToolCallView,
 } from '../api/ai'
 import { getFile, createDir, uploadFiles } from '../api/files'
 import { showToast, isBinaryExt, extFromPath, copyToClipboard } from '../lib/common'
-import { renderMarkdown } from '../lib/markdownRenderer'
+import { renderMarkdown, linkRagRefs } from '../lib/markdownRenderer'
 
 function newId(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
   return 'xxxxxxx-xxxx-4xxx'.replace(/x/g, () => Math.floor(Math.random() * 16).toString(16))
 }
 
-export function useAIChat(onScrollBottom?: () => void) {
+// 消息渲染段：连续的过程步骤（思考/工具）归为一个可折叠过程块，正文片段独立成段
+export interface MsgSegment {
+  kind: 'process' | 'text'
+  steps: MsgStep[]
+  text?: string
+}
+
+export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   const aiEnabled = ref(false)
   const aiModel = ref('')
   const messages = ref<ChatMessage[]>([])
@@ -45,8 +53,11 @@ export function useAIChat(onScrollBottom?: () => void) {
   const pendingCtxFiles = ref<string[]>([])
   const showFilePicker = ref(false)
 
-  function scrollBottom() {
-    onScrollBottom?.()
+  // scrollBottom(force?) 滚动到消息列表底部。force=true 用于用户主动行为
+  // （发消息/载入会话/流结束）无条件拉底；流式增量回调不传 force——由视图层
+  // 做贴底检测（用户上滚阅读思考过程时不打断），解决"思考过程无法滚动"。
+  function scrollBottom(force = false) {
+    onScrollBottom?.(force)
   }
 
   async function fetchStatus() {
@@ -105,23 +116,39 @@ export function useAIChat(onScrollBottom?: () => void) {
   const sessionsLoading = ref(false)
 
   let persisting = false
+  let persistQueued = false
   async function persistSession() {
-    if (persisting) return
+    // 防重入 + 排队补一轮：流末的最终保存（含 usage）可能与节流保存竞态，
+    // 直接丢弃会让库停留在中途快照（usage 丢失、刷新后看不到 token 消耗）。
+    // 被挡时置队列标记，当前保存完成后自动再存一轮拿到最新数据
+    if (persisting) {
+      persistQueued = true
+      return
+    }
     persisting = true
     try {
-      const msgs = messages.value
-      if (!msgs.length) return
-      if (dbSessionId.value == null) {
-        const firstUser = msgs.find(m => m.role === 'user')
-        const data = await createAISession({
-          title: (firstUser?.content || '新对话').slice(0, 30),
-          messages: msgs,
-        })
-        dbSessionId.value = data.id
-      } else {
-        await updateAISession(dbSessionId.value, { messages: msgs })
+      for (;;) {
+        persistQueued = false
+        const msgs = messages.value
+        if (!msgs.length) return
+        try {
+          if (dbSessionId.value == null) {
+            const firstUser = msgs.find(m => m.role === 'user')
+            const data = await createAISession({
+              title: (firstUser?.content || '新对话').slice(0, 30),
+              messages: msgs,
+            })
+            dbSessionId.value = data.id
+          } else {
+            await updateAISession(dbSessionId.value, { messages: msgs })
+          }
+          // 新内容已落库："点过新对话"的空白语义失效——不清除的话，
+          // 该 tab 内刷新页面将永远不自动恢复历史（标记只在明确空白时有效）
+          try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
+        } catch { /* 保存失败静默 */ return }
+        if (!persistQueued) return // 保存期间无新请求：完成
       }
-    } catch { /* 保存失败静默 */ } finally {
+    } finally {
       persisting = false
     }
   }
@@ -161,7 +188,7 @@ export function useAIChat(onScrollBottom?: () => void) {
       visibleCount.value = INITIAL_VISIBLE
       sessionsOpen.value = false
       try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
-      scrollBottom()
+      scrollBottom(true)
     } catch (e: any) {
       showToast('载入会话失败：' + (e?.message || ''))
     }
@@ -233,9 +260,12 @@ export function useAIChat(onScrollBottom?: () => void) {
   // 展示态消息 → 上游 payload 消息：
   // 带工具调用的 assistant 消息展开为 assistant(tool_calls) + 逐条 tool(结果)，
   // 模型多轮决策需要看到自己调过什么、拿到了什么结果。
+  // content 为空且无工具调用的 assistant 消息（历史中断的脏数据）跳过——
+  // 上游拒绝空 content 的 assistant 消息，会导致后续提问整体 400。
   function toPayloadMessages(msgs: ChatMessage[]): AiPayloadMessage[] {
     const out: AiPayloadMessage[] = []
     for (const m of msgs) {
+      if (m.role === 'assistant' && !m.content && !m.toolCalls?.length) continue
       if (m.role === 'assistant' && m.toolCalls?.length) {
         out.push({
           role: 'assistant',
@@ -283,13 +313,27 @@ export function useAIChat(onScrollBottom?: () => void) {
   }
 
   async function streamReply(userMsg: ChatMessage) {
-    const reply: ChatMessage = { role: 'assistant', content: '', reasoning: '', toolCalls: [] }
+    const reply: ChatMessage = { role: 'assistant', content: '', reasoning: '', toolCalls: [], steps: [] }
     messages.value.push(reply)
     // 关键：push 后取响应式代理再操作——直接改原始对象（raw）不会触发
     // 视图更新（审批按钮/工具卡片依赖此处的实时变更）
     const live = messages.value[messages.value.length - 1]
     streaming.value = true
-    scrollBottom()
+    scrollBottom(true)
+
+    // 时序步骤维护：reasoning/tool/text 按发生顺序追加进 steps（相邻同类增量合并
+    // 到同一步），渲染层按此还原"思考 → 调工具 → 分析 → 回答"的时间线
+    function appendStep(kind: MsgStep['kind'], text: string): MsgStep {
+      const steps = live.steps!
+      const last = steps[steps.length - 1]
+      if (last && last.kind === kind) {
+        last.text = (last.text || '') + text
+        return last
+      }
+      const step: MsgStep = { kind, text }
+      steps.push(step)
+      return step
+    }
 
     abortCtrl = new AbortController()
     const qaId = newId()
@@ -309,17 +353,27 @@ export function useAIChat(onScrollBottom?: () => void) {
         sessionId,
         onReasoning: (delta) => {
           live.reasoning = (live.reasoning || '') + delta
+          appendStep('reasoning', delta)
           scrollBottom()
           throttledPersist()
         },
+        onRagHits: (hits) => {
+          live.ragHits = hits
+        },
+        onUsage: (u) => {
+          live.usage = u
+        },
         onDelta: (delta) => {
           live.content += delta
+          appendStep('text', delta)
           scrollBottom()
           throttledPersist()
         },
         onToolCall: (tc) => {
           live.toolCalls = live.toolCalls || []
-          live.toolCalls.push({ id: tc.id, name: tc.name, arguments: tc.arguments })
+          const call: ToolCallView = { id: tc.id, name: tc.name, arguments: tc.arguments }
+          live.toolCalls.push(call)
+          live.steps!.push({ kind: 'tool', call })
           scrollBottom()
         },
         onToolResult: (tr) => {
@@ -342,19 +396,32 @@ export function useAIChat(onScrollBottom?: () => void) {
       })
     } catch (e: any) {
       if (e?.name === 'AbortError') {
-        if (!live.content) live.content = '（已停止）'
+        if (!live.content) {
+          live.content = '（已停止）'
+          appendStep('text', '（已停止）')
+        }
         // 中断时未决的审批卡片定格为已取消（后端断开兜底会作废审批）
         for (const tc of live.toolCalls || []) {
           if (tc.approval === 'pending') tc.approval = 'declined'
         }
       } else {
-        live.content = live.content || '⚠ ' + (e?.message || '请求失败')
+        const msg = '⚠ ' + (e?.message || '请求失败')
+        live.content = live.content || msg
+        if (!live.steps!.some(s => s.kind === 'text')) appendStep('text', msg)
         showToast(e?.message || 'AI 请求失败')
       }
     } finally {
       streaming.value = false
       abortCtrl = null
-      scrollBottom()
+      // 兜底：中断/静默断流后无正文（哪怕已有思考与工具调用）——补"（已中断）"
+      // 文本：让用户知道回复被打断；空 assistant 落库会让下次提问 400
+      if (!live.content) {
+        live.content = '（已中断）'
+        const last = live.steps![live.steps!.length - 1]
+        if (last?.kind === 'text') last.text = '（已中断）'
+        else live.steps!.push({ kind: 'text', text: '（已中断）' })
+      }
+      scrollBottom(true)
       persistSession()
     }
   }
@@ -429,17 +496,76 @@ export function useAIChat(onScrollBottom?: () => void) {
     return streaming.value && i === visibleMessages.value.length - 1 && visibleMessages.value[i]?.role === 'assistant'
   }
 
-  const openReasoning = ref(new Set<number>())
-  function toggleReasoning(i: number) {
-    const s = new Set(openReasoning.value)
-    if (s.has(i)) s.delete(i)
-    else s.add(i)
-    openReasoning.value = s
+  // ---- 回复时序分段：steps（或缺省时从扁平字段归一化重建）→ 交替的
+  // "过程块（思考+工具，可折叠）"与"正文段"。text 步骤切断过程块——
+  // Agent 中间轮的说明文本自然显示在两块过程之间。
+  function legacySteps(m: ChatMessage): MsgStep[] {
+    const steps: MsgStep[] = []
+    if (m.reasoning) steps.push({ kind: 'reasoning', text: m.reasoning })
+    for (const c of m.toolCalls || []) steps.push({ kind: 'tool', call: c })
+    if (m.content) steps.push({ kind: 'text', text: m.content })
+    return steps
   }
 
-  // markdown → HTML（共享渲染层，含脚本类标签剔除兜底）
-  function renderMd(text: string): string {
-    return renderMarkdown(text)
+  function messageSegments(m: ChatMessage): MsgSegment[] {
+    const steps = m.steps?.length ? m.steps : legacySteps(m)
+    const out: MsgSegment[] = []
+    let cur: MsgStep[] = []
+    for (const s of steps) {
+      if (s.kind === 'text') {
+        if (cur.length) out.push({ kind: 'process', steps: cur })
+        cur = []
+        out.push({ kind: 'text', steps: [], text: s.text || '' })
+      } else {
+        cur.push(s)
+      }
+    }
+    if (cur.length) out.push({ kind: 'process', steps: cur })
+    return out
+  }
+
+  // markdown → HTML（共享渲染层，含脚本类标签剔除兜底）；
+  // 带 RAG 命中时把正文 [n] 编号替换为可悬浮预览的引用元素
+  function renderMessageMd(m: ChatMessage): string {
+    const html = renderMarkdown(m.content || '')
+    return m.ragHits?.length ? linkRagRefs(html, m.ragHits) : html
+  }
+
+  // 正文片段渲染（时序分段中的 text 段），同样应用 RAG 引用装饰
+  function renderTextMd(text: string, m: ChatMessage): string {
+    const html = renderMarkdown(text || '')
+    return m.ragHits?.length ? linkRagRefs(html, m.ragHits) : html
+  }
+
+  // token 消耗展示：>1000 缩写为 K（气泡底部小字）
+  function fmtTokens(n: number): string {
+    if (n <= 0) return '0'
+    if (n < 1000) return String(n)
+    return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K'
+  }
+
+  function usageText(m: ChatMessage): string {
+    const u = m.usage
+    if (!u || !u.totalTokens) return ''
+    return `prompt ${fmtTokens(u.promptTokens)} · completion ${fmtTokens(u.completionTokens)} · 共 ${fmtTokens(u.totalTokens)} tokens`
+  }
+
+  // assistant 消息是否有任何产出（正文/思考/工具/时序步骤任一）：
+  // 中断的消息可能只有思考与工具调用、无正文——操作行（重新生成）仍应显示
+  function hasReplyContent(m: ChatMessage): boolean {
+    return !!(m.content || m.reasoning || m.toolCalls?.length || m.steps?.length)
+  }
+
+  // 模型是否实际引用了检索片段：正文出现 [n]（n ≤ 命中数）才算——
+  // 检索命中 ≠ 被引用（模型判定无关而忽略时，引用来源列表不应展示垃圾命中）
+  function hasCitedRefs(m: ChatMessage): boolean {
+    if (!m.ragHits?.length) return false
+    const re = /\[(\d{1,2})\]/g
+    let match: RegExpExecArray | null
+    while ((match = re.exec(m.content || ''))) {
+      if (Number(match[1]) <= m.ragHits.length) return true
+    }
+    return false
   }
 
   function onInputKeydown(e: KeyboardEvent) {
@@ -459,13 +585,12 @@ export function useAIChat(onScrollBottom?: () => void) {
     visibleMessages, hiddenCount, showMore,
     pendingCtxFiles, showFilePicker,
     dbSessionId, sessions, sessionsOpen, sessionsLoading,
-    openReasoning,
     fetchStatus, maybeRestoreLastSession,
     send, stopStreaming, askWith,
     removeCtxFile, onPickFiles,
     toggleSessions, loadSessions, loadSession, removeSession, clearChat, timeAgo,
     copyMessage, regenerate, saveReplyAsFile, approveToolCall,
-    isStreamingTail, toggleReasoning, renderMd, userInitial,
+    isStreamingTail, messageSegments, renderMessageMd, renderTextMd, usageText, hasCitedRefs, hasReplyContent, userInitial,
     onInputKeydown,
   }
 }

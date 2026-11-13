@@ -1,9 +1,10 @@
 <script setup lang="ts">
 // PC 端 AI 对话浮动面板：核心对话逻辑在 composables/useAIChat（与移动端 MAI 共用），
 // 本组件只保留面板形态特有部分：fab/开关、宽度拖拽、外部事件监听。
-import { ref, reactive, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { loggedIn } from '../../stores/auth'
 import { showToast } from '../../lib/common'
+import { getAIIndexStatus, type AIIndexStatus } from '../../api/ai'
 import { useAIChat } from '../../composables/useAIChat'
 import FilePickerModal from '../modal/FilePickerModal.vue'
 import ToolCallList from './ToolCallList.vue'
@@ -80,6 +81,33 @@ function processTitle(seg: { kind: string; steps: { kind: string }[] }, i: numbe
   if (processRunning(i, si)) return '思考与工具调用中…'
   const tools = seg.steps.filter(s => s.kind === 'tool').length
   return tools > 0 ? `思考与工具调用（${tools} 步）` : '思考过程'
+}
+
+// ---- 索引状态抽屉（RAG 可视化：哪些文件已索引/失败）----
+const indexOpen = ref(false)
+const indexLoading = ref(false)
+const indexData = ref<AIIndexStatus | null>(null)
+
+function toggleIndexPanel() {
+  indexOpen.value = !indexOpen.value
+  if (indexOpen.value) {
+    sessionsOpen.value = false // 与历史会话抽屉互斥
+    loadIndexStatus()
+  }
+}
+
+// 反向互斥：打开历史会话时收起索引抽屉
+watch(sessionsOpen, (v) => { if (v) indexOpen.value = false })
+
+async function loadIndexStatus() {
+  indexLoading.value = true
+  try {
+    indexData.value = await getAIIndexStatus()
+  } catch (e: any) {
+    showToast('读取索引状态失败：' + (e?.msg || e?.message || ''))
+  } finally {
+    indexLoading.value = false
+  }
 }
 
 // ---- 面板特有：开关 / 自动恢复 ----
@@ -261,6 +289,11 @@ function onResizeStart(e: MouseEvent) {
           <span v-if="aiModel" class="ai-model">{{ aiModel }}</span>
         </div>
         <div class="ai-header-actions">
+          <button class="ai-icon-btn" :class="{ active: indexOpen }" title="文件索引状态" @click="toggleIndexPanel">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>
+            </svg>
+          </button>
           <button v-if="!isMobile" class="ai-icon-btn" :class="{ active: theater }" :title="theater ? '退出剧场模式 (Esc)' : '剧场模式'" @click="toggleTheater">
             <svg v-if="!theater" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>
@@ -282,6 +315,34 @@ function onResizeStart(e: MouseEvent) {
           <button class="ai-icon-btn" title="收起" @click="panelOpen = false">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
           </button>
+        </div>
+      </div>
+
+      <!-- 文件索引状态（覆盖消息区：RAG 可视化，哪些文件已索引/失败） -->
+      <div v-if="indexOpen" class="ai-sessions ai-index">
+        <div class="ai-sessions-head">
+          <span>文件索引状态</span>
+          <button class="ai-icon-btn" title="刷新" @click="loadIndexStatus">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
+          </button>
+        </div>
+        <div class="ai-index-summary">
+          <template v-if="indexData">
+            <span>{{ indexData.summary.files }} 个文件</span>
+            <span>{{ indexData.summary.chunks }} 个文本块</span>
+            <span :class="{ err: indexData.summary.errors > 0 }">{{ indexData.summary.errors }} 个失败</span>
+          </template>
+        </div>
+        <div class="ai-sessions-list">
+          <div v-if="indexLoading && !indexData" class="ai-sessions-empty">加载中…</div>
+          <div v-else-if="!indexData?.items?.length" class="ai-sessions-empty">
+            暂无索引（上传文本文件或触发全量重建）
+          </div>
+          <div v-for="it in indexData?.items" :key="it.path" class="ai-index-item" :title="it.error ? it.path + '：' + it.error : it.path">
+            <span class="ai-index-dot" :class="it.status"></span>
+            <span class="ai-index-path">{{ it.path }}</span>
+            <span class="ai-index-meta">{{ it.status === 'ok' ? it.chunkCount + ' 块' : '失败' }}</span>
+          </div>
         </div>
       </div>
 
@@ -665,6 +726,28 @@ function onResizeStart(e: MouseEvent) {
 .ai-icon-btn svg { width: 15px; height: 15px; }
 
 /* 历史会话列表（覆盖消息区） */
+/* 文件索引状态抽屉（复用 ai-sessions 骨架） */
+.ai-index-summary {
+  display: flex; gap: 14px; padding: 6px 12px;
+  font-size: 11px; color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.ai-index-summary .err { color: #c04040; }
+.ai-index-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 12px; font-size: 11px; cursor: default;
+}
+.ai-index-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: #4caf50;
+}
+.ai-index-dot.error { background: #c04040; }
+.ai-index-path {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono, monospace); color: var(--text);
+}
+.ai-index-meta { flex: none; color: var(--text-dim); }
+
 .ai-sessions {
   flex: 1;
   min-height: 0;

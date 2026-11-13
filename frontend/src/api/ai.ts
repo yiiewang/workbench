@@ -288,3 +288,19 @@ export async function chatStream(
     }
   }
 }
+
+// 文件索引状态（汇总 + 明细）— GET /api/ai/index-status
+export interface FileIndexItem {
+  path: string
+  status: string
+  chunkCount: number
+  error?: string
+  indexedAt: string
+}
+export interface AIIndexStatus {
+  summary: { files: number; chunks: number; errors: number }
+  items: FileIndexItem[]
+}
+export async function getAIIndexStatus(): Promise<AIIndexStatus> {
+  return apiCall('/api/ai/index-status')
+}

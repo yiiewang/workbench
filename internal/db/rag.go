@@ -164,6 +164,54 @@ type FileIndexState struct {
 	IndexedAt   string
 }
 
+// FileIndexItem 索引状态明细（索引状态页展示）
+type FileIndexItem struct {
+	Path       string `json:"path"`
+	Status     string `json:"status"`
+	ChunkCount int    `json:"chunkCount"`
+	Error      string `json:"error,omitempty"`
+	IndexedAt  string `json:"indexedAt"`
+}
+
+// FileIndexSummary 索引状态汇总
+type FileIndexSummary struct {
+	Files  int `json:"files"`  // 已索引文件数
+	Chunks int `json:"chunks"` // 文本块总数（含摘要卡）
+	Errors int `json:"errors"` // 失败文件数
+}
+
+// ListFileIndexState 索引状态明细（按路径排序，limit 截断）
+func (d *DB) ListFileIndexState(ctx context.Context, orgID, userID int64, limit int) ([]FileIndexItem, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT path, status, chunk_count, error, indexed_at
+		 FROM file_index_state WHERE org_id = ? AND user_id = ? ORDER BY path LIMIT ?`,
+		orgID, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FileIndexItem
+	for rows.Next() {
+		var it FileIndexItem
+		if err := rows.Scan(&it.Path, &it.Status, &it.ChunkCount, &it.Error, &it.IndexedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+	}
+	return items, rows.Err()
+}
+
+// FileIndexSummaryOf 索引状态汇总（文件数/块数/失败数）
+func (d *DB) FileIndexSummaryOf(ctx context.Context, orgID, userID int64) (FileIndexSummary, error) {
+	var s FileIndexSummary
+	err := d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(chunk_count),0),
+		        COALESCE(SUM(CASE WHEN status != 'ok' THEN 1 ELSE 0 END),0)
+		 FROM file_index_state WHERE org_id = ? AND user_id = ?`,
+		orgID, userID).Scan(&s.Files, &s.Chunks, &s.Errors)
+	return s, err
+}
+
 // GetFileIndexState 查文件索引状态；不存在时 exists=false
 func (d *DB) GetFileIndexState(ctx context.Context, orgID, userID int64, path string) (FileIndexState, bool, error) {
 	var st FileIndexState

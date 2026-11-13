@@ -11,6 +11,8 @@
 
 ### Added
 
+- **AI 定时任务注入 RAG 检索**：`LLMCaller` 签名扩展任务归属用户身份（全局公共任务展开后的实际执行者），执行 prompt 前以该用户身份做 RAG 前置检索（top-3），命中片段（`ReferencePrompt`，无编号标注要求）拼进 prompt——日报/总结类定时任务可自动引用个人文件（周报文档、项目笔记）；检索失败静默降级
+- **文件索引状态可视化**：`GET /api/ai/index-status`（汇总 files/chunks/errors + 明细 500 条）；AI 面板头部新增数据库图标按钮，抽屉式展示（绿点=ok 红点=失败、路径/块数/错误悬浮提示，与历史会话抽屉互斥，可刷新）
 - **AI 对话 token 消耗显示**：请求上游时携带 `stream_options.include_usage`（流式响应末尾携带 usage 分片），后端解析并**聚合 Agent 多轮**消耗后在 [DONE] 前以自定义 SSE 事件 `usage` 推给前端；assistant 气泡底部右对齐小字显示 `prompt 1.2K · completion 800 · 共 2.1K tokens`（>1000 缩写 K）。usage 随消息持久化到会话快照（历史回看保留）；上游网关不支持 include_usage 时分片缺失，不显示（无害降级）。PC 面板与移动端同步
 - **混合检索（FTS5 关键词路 + RRF 融合）**：向量 KNN（语义路）之外增加 FTS5 trigram 全文检索（关键词路），双路召回（各 topK×4）经 Reciprocal Rank Fusion（`score = Σ 1/(60+rank)`）融合取 topK——**专有名词/函数名/错误码的精确匹配不再受向量距离阈值误杀**（阈值只作用于语义路候选，FTS 命中按 bm25 直接入围），两路同时命中的块显著加权；query <3 字符（trigram 无 gram）自然降级纯向量；FTS 失败降级纯向量。迁移 000015 建 `file_chunk_fts`（trigram 分词，中英文通用子串匹配；unicode61 对中文是整段单 token 不可用）+ 存量回填；写删路径事务内同步维护；mattn 驱动需 build tag `sqlite_fts5`（Makefile 全部构建入口统一携带）；ragclean --reset 同步清 FTS
 

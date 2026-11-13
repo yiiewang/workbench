@@ -100,6 +100,10 @@ func (s *Server) handleUpload(ctx iris.Context) {
 			continue
 		}
 		data.Uploaded = append(data.Uploaded, uploadItem{Name: name, Size: size})
+		// RAG 索引钩子：异步重建该文件的向量索引（编辑器保存也走本接口）
+		if s.rag != nil {
+			s.rag.HandleWrite(currentOrgID(ctx), currentUserID(ctx), dst, relPath+"/"+name)
+		}
 		// 命中 hidden 规则（如 .js、点开头文件）的文件树里不可见，单独报告
 		if s.isHidden(name) {
 			data.HiddenNames = append(data.HiddenNames, name)

@@ -151,6 +151,10 @@ func (s *Server) handleDeleteFile(ctx iris.Context) {
 		serverError(ctx, "delete failed", err, "path", cleanRel)
 		return
 	}
+	// RAG 索引同步清理（目录递归删前缀）
+	if s.rag != nil {
+		s.rag.HandleDelete(currentOrgID(ctx), currentUserID(ctx), cleanRel, info.IsDir())
+	}
 
 	slog.Info("fsop delete", "user", currentUserID(ctx), "org", currentOrgID(ctx), "path", cleanRel, "isDir", info.IsDir())
 	writeOK(ctx, map[string]interface{}{"path": cleanRel, "isDir": info.IsDir()})
@@ -179,7 +183,8 @@ func (s *Server) handleRename(ctx iris.Context) {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidPath)
 		return
 	}
-	if _, err := os.Lstat(srcFs); err != nil {
+	info, err := os.Lstat(srcFs)
+	if err != nil {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return
 	}
@@ -193,6 +198,11 @@ func (s *Server) handleRename(ctx iris.Context) {
 	if err := os.Rename(srcFs, dst); err != nil {
 		serverError(ctx, "rename failed", err, "path", srcRel, "newName", newName)
 		return
+	}
+	newRel := strings.TrimSuffix(filepath.Dir(srcRel), "/") + "/" + newName
+	// RAG 索引路径改写（内容与向量不变）
+	if s.rag != nil {
+		s.rag.HandleRename(currentOrgID(ctx), currentUserID(ctx), srcRel, newRel, info.IsDir())
 	}
 
 	slog.Info("fsop rename", "user", currentUserID(ctx), "org", currentOrgID(ctx), "path", srcRel, "newName", newName)
@@ -222,7 +232,8 @@ func (s *Server) handleMove(ctx iris.Context) {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidPath)
 		return
 	}
-	if _, err := os.Lstat(srcFs); err != nil {
+	info, err := os.Lstat(srcFs)
+	if err != nil {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return
 	}
@@ -255,6 +266,10 @@ func (s *Server) handleMove(ctx iris.Context) {
 	}
 
 	newPath := strings.TrimSuffix(dstRel, "/") + "/" + name
+	// RAG 索引路径改写（内容与向量不变）
+	if s.rag != nil {
+		s.rag.HandleRename(currentOrgID(ctx), currentUserID(ctx), srcRel, newPath, info.IsDir())
+	}
 	slog.Info("fsop move", "user", currentUserID(ctx), "org", currentOrgID(ctx), "path", srcRel, "dest", dstRel)
 	writeOK(ctx, map[string]interface{}{"path": newPath})
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/yiiewang/workbench/internal/config"
 	"github.com/yiiewang/workbench/internal/db"
 	"github.com/yiiewang/workbench/internal/notify"
+	"github.com/yiiewang/workbench/internal/rag"
 	"github.com/yiiewang/workbench/internal/schedule"
 )
 
@@ -44,6 +45,9 @@ type Server struct {
 	scheduler *schedule.Scheduler
 	// bus 事件总线（AI 工具 list_events/notify_user 消费；订阅者在 New 中注册）
 	bus *schedule.EventBus
+	// rag 文件语义检索服务（ai.embedding 配置启用时非 nil；nil = RAG 关闭，
+	// 各写钩子与对话前置检索据此静默跳过）
+	rag *rag.Service
 }
 
 // New 创建 Server 实例
@@ -104,6 +108,22 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 		srv.scheduler = sched
 		slog.Info("scheduler started", "timezone", loc.String(), "jobs", sched.Jobs(),
 			"todoDueCron", cfg.Schedule.TodoDueCron)
+	}
+
+	// RAG 语义检索：ai.embedding 配置齐全才启用。vec0 表维度取自配置，
+	// 与库中已存维度不一致时 EnsureVecIndex 内部作废旧向量（触发全量重建）。
+	// 建表失败不致命（RAG 降级关闭），但要有醒目日志。
+	if cfg.AI.Embedding.Enabled() {
+		if err := database.EnsureVecIndex(cfg.AI.Embedding.Dim); err != nil {
+			slog.Error("rag: ensure vec index failed, RAG disabled", "err", err, "dim", cfg.AI.Embedding.Dim)
+		} else if err := database.EnsureFTS(); err != nil {
+			// FTS 失败不致命（检索降级纯向量），但要有醒目日志
+			slog.Error("rag: ensure fts table failed, hybrid search degraded", "err", err)
+			srv.rag = rag.NewService(database, cfg.AI.Embedding)
+		} else {
+			srv.rag = rag.NewService(database, cfg.AI.Embedding)
+			slog.Info("rag enabled", "model", cfg.AI.Embedding.Model, "dim", cfg.AI.Embedding.Dim)
+		}
 	}
 
 	return srv, nil
@@ -183,6 +203,10 @@ func (s *Server) App() *iris.Application {
 	api.Post("/ai/chat", auth, s.handleAIChat)
 	// 写类工具审批决定（Agent 模式，Human-in-the-loop）
 	api.Post("/ai/approval", auth, s.handleAIApproval)
+	// 手动触发当前用户文件全量重建向量索引（RAG 未启用时 50301）
+	api.Post("/ai/reindex", auth, s.handleAIReindex)
+	// 全量重建进度查询（running/total/processed/failed/currentPath）
+	api.Get("/ai/reindex/status", auth, s.handleAIReindexStatus)
 	// AI 定时任务 CRUD（用户自建"到点让 AI 执行 prompt"）
 	api.Get("/ai/jobs", auth, s.handleAIJobsList)
 	api.Post("/ai/jobs", auth, s.handleAIJobCreate)
@@ -515,6 +539,7 @@ func (s *Server) getTasksJSON(ctx iris.Context) {
 	ctx.Header("Cache-Control", "no-cache")
 	writeOK(ctx, data)
 }
+
 // ============================================================
 // GET /api/tasks/user/{id} — 查看同组织成员的任务（只读）
 // ============================================================
@@ -640,6 +665,7 @@ func (s *Server) writeTaskConflict(ctx iris.Context, orgID, userID int64, taskID
 	}
 	writeFailData(ctx, iris.StatusConflict, CodeTaskConflict, data)
 }
+
 // patchTask 更新单条任务（PATCH /api/tasks/{id}）
 // 请求体：{ "task": {...}, "baseRevision": 12 }
 //

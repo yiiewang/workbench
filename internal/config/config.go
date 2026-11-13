@@ -41,10 +41,10 @@ type NotifyConfig struct {
 // SMTP 凭据经环境变量 EMAIL_PASS 注入，不落配置文件。
 type EmailNotifyConfig struct {
 	Enabled  bool   `yaml:"enabled"`
-	Host     string `yaml:"host"` // SMTP 服务器，如 smtp.qq.com
-	Port     int    `yaml:"port"` // 587（STARTTLS；465 出站常被云厂商干预）
-	User     string `yaml:"user"` // SMTP 认证用户名（仅登录鉴权用，QQ 邮箱为完整地址）
-	From     string `yaml:"from"` // 系统发件邮箱（收件人看到的发件地址）
+	Host     string `yaml:"host"`      // SMTP 服务器，如 smtp.qq.com
+	Port     int    `yaml:"port"`      // 587（STARTTLS；465 出站常被云厂商干预）
+	User     string `yaml:"user"`      // SMTP 认证用户名（仅登录鉴权用，QQ 邮箱为完整地址）
+	From     string `yaml:"from"`      // 系统发件邮箱（收件人看到的发件地址）
 	FromName string `yaml:"from_name"` // 发件人显示名，缺省 "Workbench"
 }
 
@@ -76,20 +76,68 @@ type LogConfig struct {
 	Level string `yaml:"level"` // debug | info | warn | error，默认 info
 }
 
-// AIConfig AI 对话配置（OpenAI 兼容协议：OpenAI / DeepSeek / Ollama 网关等均可）
+// AIConfig AI 配置：对话与向量模型两个独立子段——两者常指向不同服务
+// （如聊天走 OpenAI 兼容网关、向量走自部署 Qwen3-Embedding）。
 type AIConfig struct {
+	Chat      ChatConfig      `yaml:"chat"`
+	Embedding EmbeddingConfig `yaml:"embedding"`
+}
+
+// ChatConfig 聊天模型配置（OpenAI 兼容 /chat/completions 协议）
+type ChatConfig struct {
 	BaseURL string `yaml:"base_url"` // 兼容端点，如 https://api.openai.com/v1
 	APIKey  string `yaml:"api_key"`  // 后端持有，不下发前端
 	Model   string `yaml:"model"`    // 模型名，如 gpt-4o-mini
 	// Tools 开启 AI 工具调用（Agent 模式）：模型可调用 list_dir / read_file /
-	// list_tasks / create_task 四个内置工具，由后端执行并回传结果。
+	// list_tasks / create_task 四个内置工具，由后端执行并回传工具结果。
 	// 要求上游模型支持 function calling。Env: AI_TOOLS=true 开启
 	Tools bool `yaml:"tools"`
 }
 
-// Enabled AI 功能是否可用（key + base_url 均已配置才视为开启）
+// Enabled 聊天功能是否可用（key + base_url 均已配置才视为开启）
+func (c ChatConfig) Enabled() bool {
+	return c.APIKey != "" && c.BaseURL != ""
+}
+
+// Enabled AI 对话功能是否可用（委托 Chat 子段）
 func (a AIConfig) Enabled() bool {
-	return a.APIKey != "" && a.BaseURL != ""
+	return a.Chat.Enabled()
+}
+
+// EmbeddingConfig 向量模型配置（OpenAI 兼容 /embeddings 协议）。
+// base_url + model 均配置才启用 RAG；api_key 对本地部署（vLLM/Ollama）可留空。
+type EmbeddingConfig struct {
+	BaseURL string `yaml:"base_url"` // 如 http://localhost:8001/v1
+	APIKey  string `yaml:"api_key"`  // 后端持有，不下发前端；本地部署可空
+	Model   string `yaml:"model"`    // 如 Qwen3-Embedding-8B
+	// Dim 向量维度：建 vec0 虚拟表时固定，改动后需全量重建索引。
+	// Qwen3-Embedding 系列原生 4096 维、支持 Matryoshka 降维，默认 1024
+	// （精度损失很小，存储与 KNN 扫描量降为 1/4）。Env: AI_EMBEDDING_DIM
+	Dim int `yaml:"dim"`
+	// MaxDistance 相关度阈值（vec0 L2 距离，向量已归一化）：命中距离超过它
+	// 视为无关直接丢弃——KNN 没有"不相关"概念，问天气也会返回距离最近的
+	// 5 个垃圾片段。归一化下 L2=0 同向、1 正交（无关）、2 反向；但中文
+	// embedding 空间各向异性，无关文本实测距离普遍 <1.0，故默认收紧到 0.9
+	// （≈余弦相似度 0.6）。依据 "rag: context injected" 日志的 distance
+	// 观测实际分布后微调。Env: AI_EMBEDDING_MAX_DISTANCE
+	MaxDistance float64 `yaml:"max_distance"`
+	// JudgeModel LLM 相关性预判模型（可选，flash 级小模型如 deepseek-flash）：
+	// 距离阈值过滤后仍有命中时，把问题+候选片段一次调用批量判相关性，
+	// 拦住阈值拦不住的语义无关命中。复用本网关的 /chat/completions；
+	// 留空 = 关闭（只用距离阈值）。判断失败/超时降级保留阈值结果。
+	// Env: AI_EMBEDDING_JUDGE_MODEL
+	JudgeModel string `yaml:"judge_model"`
+	// DigestModel 文件级摘要生成模型（可选，flash 级小模型）：索引时为每个
+	// 文件生成语义摘要卡（是什么/核心内容/关键点，~100 字），作为特殊块
+	// （chunk_index=-1）与原文块一起向量化——宏观问题命中摘要卡（token 极省、
+	// 无噪音），细节问题继续走原文块。文件内容变化时才重新生成（幂等）；
+	// 生成失败降级只索引原文块。复用本网关。Env: AI_EMBEDDING_DIGEST_MODEL
+	DigestModel string `yaml:"digest_model"`
+}
+
+// Enabled 向量功能（RAG）是否可用
+func (e EmbeddingConfig) Enabled() bool {
+	return e.BaseURL != "" && e.Model != ""
 }
 
 // DefaultConfig 返回默认配置
@@ -116,8 +164,14 @@ func DefaultConfig() *Config {
 			Level: "info",
 		},
 		AI: AIConfig{
-			BaseURL: "https://api.openai.com/v1",
-			Model:   "gpt-4o-mini",
+			Chat: ChatConfig{
+				BaseURL: "https://api.openai.com/v1",
+				Model:   "gpt-4o-mini",
+			},
+			Embedding: EmbeddingConfig{
+				Dim:         1024,
+				MaxDistance: 0.9,
+			},
 		},
 		Schedule: ScheduleConfig{
 			Timezone:    "Asia/Shanghai",
@@ -180,17 +234,38 @@ func mergeConfig(dst, src *Config) {
 	if src.Logging.Level != "" {
 		dst.Logging.Level = src.Logging.Level
 	}
-	if src.AI.BaseURL != "" {
-		dst.AI.BaseURL = src.AI.BaseURL
+	if src.AI.Chat.BaseURL != "" {
+		dst.AI.Chat.BaseURL = src.AI.Chat.BaseURL
 	}
-	if src.AI.APIKey != "" {
-		dst.AI.APIKey = src.AI.APIKey
+	if src.AI.Chat.APIKey != "" {
+		dst.AI.Chat.APIKey = src.AI.Chat.APIKey
 	}
-	if src.AI.Model != "" {
-		dst.AI.Model = src.AI.Model
+	if src.AI.Chat.Model != "" {
+		dst.AI.Chat.Model = src.AI.Chat.Model
 	}
-	if src.AI.Tools {
-		dst.AI.Tools = true
+	if src.AI.Chat.Tools {
+		dst.AI.Chat.Tools = true
+	}
+	if src.AI.Embedding.BaseURL != "" {
+		dst.AI.Embedding.BaseURL = src.AI.Embedding.BaseURL
+	}
+	if src.AI.Embedding.APIKey != "" {
+		dst.AI.Embedding.APIKey = src.AI.Embedding.APIKey
+	}
+	if src.AI.Embedding.Model != "" {
+		dst.AI.Embedding.Model = src.AI.Embedding.Model
+	}
+	if src.AI.Embedding.Dim != 0 {
+		dst.AI.Embedding.Dim = src.AI.Embedding.Dim
+	}
+	if src.AI.Embedding.MaxDistance != 0 {
+		dst.AI.Embedding.MaxDistance = src.AI.Embedding.MaxDistance
+	}
+	if src.AI.Embedding.JudgeModel != "" {
+		dst.AI.Embedding.JudgeModel = src.AI.Embedding.JudgeModel
+	}
+	if src.AI.Embedding.DigestModel != "" {
+		dst.AI.Embedding.DigestModel = src.AI.Embedding.DigestModel
 	}
 	if src.Schedule.Enabled {
 		dst.Schedule.Enabled = true
@@ -260,16 +335,45 @@ func ApplyEnv(cfg *Config) {
 		cfg.Auth.AdminSetupToken = v
 	}
 	if v := os.Getenv("AI_BASE_URL"); v != "" {
-		cfg.AI.BaseURL = v
+		cfg.AI.Chat.BaseURL = v
 	}
 	if v := os.Getenv("AI_API_KEY"); v != "" {
-		cfg.AI.APIKey = v
+		cfg.AI.Chat.APIKey = v
 	}
 	if v := os.Getenv("AI_MODEL"); v != "" {
-		cfg.AI.Model = v
+		cfg.AI.Chat.Model = v
 	}
 	// AI_TOOLS=true 开启工具调用（Agent 模式），默认关闭保持纯对话行为
 	if v := os.Getenv("AI_TOOLS"); v == "true" || v == "1" {
-		cfg.AI.Tools = true
+		cfg.AI.Chat.Tools = true
+	}
+	// 向量模型（RAG）配置，独立于聊天网关：AI_EMBEDDING_BASE_URL / AI_EMBEDDING_API_KEY /
+	// AI_EMBEDDING_MODEL / AI_EMBEDDING_DIM
+	if v := os.Getenv("AI_EMBEDDING_BASE_URL"); v != "" {
+		cfg.AI.Embedding.BaseURL = v
+	}
+	if v := os.Getenv("AI_EMBEDDING_API_KEY"); v != "" {
+		cfg.AI.Embedding.APIKey = v
+	}
+	if v := os.Getenv("AI_EMBEDDING_MODEL"); v != "" {
+		cfg.AI.Embedding.Model = v
+	}
+	if v := os.Getenv("AI_EMBEDDING_DIM"); v != "" {
+		var dim int
+		if _, err := fmt.Sscanf(v, "%d", &dim); err == nil && dim > 0 {
+			cfg.AI.Embedding.Dim = dim
+		}
+	}
+	if v := os.Getenv("AI_EMBEDDING_MAX_DISTANCE"); v != "" {
+		var d float64
+		if _, err := fmt.Sscanf(v, "%g", &d); err == nil && d > 0 {
+			cfg.AI.Embedding.MaxDistance = d
+		}
+	}
+	if v := os.Getenv("AI_EMBEDDING_JUDGE_MODEL"); v != "" {
+		cfg.AI.Embedding.JudgeModel = v
+	}
+	if v := os.Getenv("AI_EMBEDDING_DIGEST_MODEL"); v != "" {
+		cfg.AI.Embedding.DigestModel = v
 	}
 }

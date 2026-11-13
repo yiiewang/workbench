@@ -230,7 +230,54 @@
   overflow-y: auto;
 }
 
+/* token 消耗（assistant 气泡底部小字） */
+.ai-usage {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: .8;
+  text-align: right;
+  user-select: none;
+}
+
+/* ---- 过程块（思考 + 工具调用，时间序，可折叠）---- */
+.ai-process { margin-bottom: 6px; }
+.ai-process-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--text-dim); cursor: pointer;
+  background: none; border: none; padding: 2px 0;
+}
+.ai-process-toggle:hover { color: var(--accent); }
+.ai-process-toggle svg { width: 12px; height: 12px; }
+.ai-process-toggle .dim { opacity: .75; }
+.ai-process-chevron { transition: transform .15s; }
+.ai-process-chevron.open { transform: rotate(180deg); }
+.ai-process-body {
+  margin-top: 4px; padding: 8px 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ai-process-reasoning {
+  font-size: 11px; color: var(--text-dim); line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word;
+  border-left: 2px solid var(--border); padding-left: 8px;
+}
+
 /* assistant 气泡内 markdown（v-html） */
+.ai-md .rag-ref {
+  display: inline-block;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 4px;
+  margin: 0 1px;
+  border-radius: 3px;
+  color: var(--accent, #007acc);
+  background: rgba(0, 122, 204, 0.08);
+  cursor: help;
+  vertical-align: 2px;
+  user-select: none;
+}
+.ai-md .rag-ref:hover { background: rgba(0, 122, 204, 0.18); }
 .ai-md p { margin: 0 0 6px; }
 .ai-md p:last-child { margin-bottom: 0; }
 .ai-md ul, .ai-md ol { margin: 4px 0; padding-left: 20px; }

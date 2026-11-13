@@ -1,5 +1,6 @@
 // @ts-nocheck
-import { onMounted } from 'vue'
+import { onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { openTab } from './useTabs'
 import { dataSource } from './useEditor'
 import { getHashPath, clearHash } from './useHashRouting'
@@ -10,7 +11,7 @@ import {
   dsMode, dsToken, dsPathPrefix, shareRootPath,
   openTabs, activeTabPath,
   setOpenTabFn, loadSharesFn,
-  checkAuth,
+  checkAuth, openFileFromHash,
 } from '../stores/indexStore'
 import { treeStore } from './useTreeStore'
 
@@ -182,6 +183,16 @@ export function setupIndexApp() {
 
     // Wire openTab so TreeNode can call it
     setOpenTabFn(openTab)
+
+    // hash 活页消费：挂载后 hash 再变化（AI 引用卡片跳转 / markdown 内链）时
+    // 打开目标文件并定位。挂载时的首帧 hash 由 initApp 消费（避免双开）。
+    const route = useRoute()
+    watch(() => route.hash, (h) => {
+      if (!h) return
+      openFileFromHash(h).catch(err => {
+        console.warn('[workbench] open file from hash failed:', err)
+      })
+    })
 
     // start
     initApp().catch(err => {

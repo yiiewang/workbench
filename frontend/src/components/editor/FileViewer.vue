@@ -7,7 +7,7 @@ import { isCodeExt } from '../../lib/highlighter'
 import { showSharePasswordModal } from '../../lib/sharePasswordModal'
 import JsonViewer from './JsonViewer.vue'
 import XmlViewer from './XmlViewer.vue'
-import CodePreview from './CodePreview.vue'
+import CodePreview, { type LocateTarget } from './CodePreview.vue'
 import MarkdownPreview from '../markdown/MarkdownPreview.vue'
 
 // srcdoc 文档中 href="#id" 会被解析成导航到 about:srcdoc#id，触发整页重载（表现为点了没反应）。
@@ -36,7 +36,7 @@ function withAnchorHook(html: string): string {
   return i === -1 ? html + ANCHOR_HOOK : html.slice(0, i) + ANCHOR_HOOK + html.slice(i)
 }
 
-const props = defineProps<{ path: string; name: string; ext: string; size: number }>()
+const props = defineProps<{ path: string; name: string; ext: string; size: number; locate?: LocateTarget | null }>()
 
 const loading = ref(true)
 const error = ref('')
@@ -224,7 +224,7 @@ async function loadFile() {
     <MarkdownPreview v-else-if="['md','markdown'].includes(fileExt)" :content="textContent" toc />
 
     <!-- Code：行号 + 语法高亮 + 折叠（超大文件在组件内降级为纯文本） -->
-    <CodePreview v-else-if="isCodeExt(fileExt)" :text="textContent" :ext="fileExt" />
+    <CodePreview v-else-if="isCodeExt(fileExt)" :text="textContent" :ext="fileExt" :locate="locate" />
 
     <!-- Text -->
     <pre v-else class="text-preview">{{ textContent }}</pre>

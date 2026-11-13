@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { activeTabPath as storeActiveTabPath, storeGetTab } from '../../stores/indexStore'
+import { activeTabPath as storeActiveTabPath, storeGetTab, locateRequest } from '../../stores/indexStore'
 import { getTasksByFile, getOpenTasks, getTaskRevision, updateTask, type Task } from '../../api/tasks'
 import { showToast } from '../../lib/common'
 import FileViewer from './FileViewer.vue'
@@ -11,6 +11,12 @@ const tabInfo = computed(() => {
   const path = storeActiveTabPath.value
   if (!path) return null
   return storeGetTab(path) || null
+})
+
+// 行定位（RAG 引用跳转）：定位请求命中当前 tab 时下发给 FileViewer → CodePreview
+const activeLocate = computed(() => {
+  const lr = locateRequest.value
+  return lr && lr.path === storeActiveTabPath.value ? lr : null
 })
 
 // ============================================================
@@ -165,6 +171,7 @@ function onEditorClick(e: MouseEvent) {
       :name="tabInfo.name"
       :ext="tabInfo.ext"
       :size="tabInfo.size"
+      :locate="activeLocate"
     />
     <div v-else class="editor-empty">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>

@@ -5,11 +5,18 @@
 //   1. 缩进：某行的下一个非空行缩进更大 → 该行到本缩进块最后一行构成可折叠区（嵌套天然成立）
 //   2. #region / #endregion：按栈配对，跨缩进层级显式分组
 // 超大文件（>512KB 或 >5000 行）降级为整段 <pre>，避免生成上万行 DOM 卡死页面。
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { highlightLines, langForExt, type CodeToken } from '../../lib/highlighter'
 import { copyToClipboard, showToast, formatSize } from '../../lib/common'
 
-const props = defineProps<{ text: string; ext: string }>()
+// locate：外部定位请求（RAG 引用跳转等）。seq 递增保证"同文件同一行重复点击"
+// 也能触发 watch（对象引用变化）；line 为 1-based 行号
+export interface LocateTarget {
+  line: number
+  seq: number
+}
+
+const props = defineProps<{ text: string; ext: string; locate?: LocateTarget | null }>()
 
 const MAX_BYTES = 512 * 1024
 const MAX_LINES = 5000
@@ -112,6 +119,49 @@ function onCopy() {
 }
 
 const wrap = ref(false)
+
+// ---- 外部行定位（RAG 引用跳转）----
+const bodyEl = ref<HTMLElement | null>(null)
+let flashTimer = 0
+
+async function locateTo(target: LocateTarget) {
+  const n = Math.floor(target.line)
+  if (!n || n < 1 || tooLarge.value) return
+  // 目标行可能被折叠隐藏：展开覆盖它的折叠区（foldRanges 键为 0-based 起始行）
+  const row0 = n - 1
+  let expanded = false
+  for (const [start, end] of foldRanges.value) {
+    if (start < row0 && row0 <= end && collapsed.value.has(start)) {
+      collapsed.value.delete(start)
+      expanded = true
+    }
+  }
+  if (expanded) await nextTick()
+  const body = bodyEl.value
+  const rowEl = body?.querySelector(`[data-line="${n}"]`)
+  if (!body || !rowEl) return // 行尚不存在（内容未加载/超大降级）：pendingLocate 保留待重试
+  pendingLocate = null
+  // 只滚代码容器自身（scrollIntoView 会连带滚动外层页面）：
+  // 目标行滚到容器视口中部
+  const bodyRect = body.getBoundingClientRect()
+  const rowRect = rowEl.getBoundingClientRect()
+  body.scrollTop += rowRect.top - bodyRect.top - body.clientHeight / 2 + rowRect.height / 2
+  rowEl.classList.add('is-located')
+  clearTimeout(flashTimer)
+  flashTimer = window.setTimeout(() => rowEl.classList.remove('is-located'), 2200)
+}
+
+onBeforeUnmount(() => clearTimeout(flashTimer))
+// 定位请求粘性：请求到达时文件内容可能还没加载完（FileViewer 异步拉取），
+// 找不到目标行则保留 pending，内容就绪（text 变化）后重试；
+// locate 变 null（切换 tab / 定位目标换了文件）时丢弃 pending，
+// 防止旧文件的定位请求错误落到新文件上
+let pendingLocate: LocateTarget | null = null
+watch(() => props.locate, (t) => {
+  if (t && t.line > 0) { pendingLocate = t; locateTo(t) }
+  else pendingLocate = null
+}, { immediate: true })
+watch(() => props.text, () => { if (pendingLocate) locateTo(pendingLocate) })
 </script>
 
 <template>
@@ -128,8 +178,8 @@ const wrap = ref(false)
 
     <pre v-if="tooLarge" class="code-plain">{{ rawText }}</pre>
 
-    <div v-else class="code-body" :class="{ 'is-wrap': wrap }">
-      <div v-for="row in rows" :key="row.kind + '-' + row.n" class="code-row">
+    <div v-else class="code-body" ref="bodyEl" :class="{ 'is-wrap': wrap }">
+      <div v-for="row in rows" :key="row.kind + '-' + row.n" class="code-row" :data-line="row.kind === 'line' ? row.n + 1 : undefined">
         <template v-if="row.kind === 'line'">
           <span class="code-gutter">
             <span class="fold-toggle" :class="{ 'is-hidden': !row.foldable }"
@@ -198,5 +248,12 @@ const wrap = ref(false)
   margin: 0; padding: 16px 24px; flex: 1; overflow: auto;
   white-space: pre-wrap; word-break: break-all;
   font-size: 13px; font-family: var(--font-mono, monospace);
+}
+
+/* 外部行定位高亮（RAG 引用跳转）：短暂闪烁定位行 */
+.code-row.is-located { animation: locate-flash 2.2s ease; }
+@keyframes locate-flash {
+  0%, 55% { background: rgba(255, 200, 0, 0.28); }
+  100% { background: transparent; }
 }
 </style>

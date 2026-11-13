@@ -16,6 +16,12 @@ const filePath = computed(() => {
 const fileName = computed(() => baseName(filePath.value))
 const fileExt = computed(() => extFromPath(fileName.value))
 
+// RAG 引用跳转的行定位（query.line，AI 引用卡片 push 而来）
+const locate = computed(() => {
+  const line = Number(route.query.line) || 0
+  return line > 0 ? { line, seq: 1 } : null
+})
+
 // markdown 内本地文件链接拦截 → 移动端预览路由（同 EditorArea 逻辑的移动版）
 function onContentClick(e: MouseEvent) {
   const a = (e.target as HTMLElement).closest('a')
@@ -53,7 +59,7 @@ function onContentClick(e: MouseEvent) {
   </header>
 
   <div class="mv-body" @click="onContentClick">
-    <FileViewer :path="filePath" :name="fileName" :ext="fileExt" :size="0" />
+    <FileViewer :path="filePath" :name="fileName" :ext="fileExt" :size="0" :locate="locate" />
   </div>
 </div>
 </template>

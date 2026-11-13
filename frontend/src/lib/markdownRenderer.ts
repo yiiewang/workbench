@@ -70,3 +70,52 @@ export function renderMarkdown(text: string): string {
     return ''
   }
 }
+
+/**
+ * 把正文中的 RAG 引用编号 [n] 替换为可悬浮预览的 .rag-ref 元素（data 属性
+ * 携带路径/行号/原文片段，tooltip 组件按 dataset 渲染）。
+ * DOM 后处理而非字符串正则：跳过 CODE/PRE（代码里的 a[1] 不是引用），
+ * 行内位置要求编号前一个字符非字母/数字/下划线（进一步排除数组下标误伤）。
+ * 超出命中数的编号（模型幻觉的 [9]）不处理，保持原样。
+ */
+export function linkRagRefs(
+  html: string,
+  hits: { path: string; content: string; startLine: number }[],
+): string {
+  if (!html || !hits?.length) return html
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+  const textNodes: Text[] = []
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text
+    const tag = node.parentElement?.tagName
+    if (tag === 'CODE' || tag === 'PRE') continue
+    if (!/\[\d{1,2}\]/.test(node.data)) continue
+    textNodes.push(node)
+  }
+  for (const node of textNodes) {
+    const parts = node.data.split(/(\[\d{1,2}\])/)
+    const frag = doc.createDocumentFragment()
+    let lastChar = ''
+    for (const part of parts) {
+      const m = /^\[(\d{1,2})\]$/.exec(part)
+      const hit = m ? hits[Number(m[1]) - 1] : undefined
+      if (m && hit && !/[A-Za-z0-9_]/.test(lastChar)) {
+        const span = doc.createElement('span')
+        span.className = 'rag-ref'
+        span.dataset.idx = m[1]
+        span.dataset.path = hit.path
+        span.dataset.line = String(hit.startLine)
+        // 原文截断进 data 属性（tooltip 展示用；过长会使 DOM/序列化膨胀）
+        span.dataset.quote = hit.content.length > 600 ? hit.content.slice(0, 600) + '…' : hit.content
+        span.textContent = part
+        frag.appendChild(span)
+      } else {
+        frag.appendChild(doc.createTextNode(part))
+      }
+      lastChar = part.slice(-1)
+    }
+    node.parentElement?.replaceChild(frag, node)
+  }
+  return doc.body.innerHTML
+}

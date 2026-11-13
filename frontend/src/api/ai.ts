@@ -17,6 +17,34 @@ export interface ToolCallView {
   approval?: 'pending' | 'approved' | 'declined' | 'timeout'
 }
 
+// RAG 语义检索命中（rag_hits SSE 事件推给前端，挂在本条回复上）
+export interface RagHit {
+  /** 用户根目录内相对路径（/ 开头） */
+  path: string
+  /** 命中的原文片段（引用卡展开可见） */
+  content: string
+  /** 片段在原文中的起始行号（1-based；0 = 旧索引未知） */
+  startLine: number
+  distance: number
+}
+
+// 回复过程步骤（时序记录）：按发生顺序排列思考/工具调用/正文片段，
+// 渲染为"思考 → 调工具 → 分析结果 → 继续调工具 → 回答"的时间线，可折叠
+export interface MsgStep {
+  kind: 'reasoning' | 'tool' | 'text'
+  /** reasoning/text 的文本增量累积 */
+  text?: string
+  /** tool 步骤的工具调用（与 toolCalls 中同一对象引用，result/approval 实时同步） */
+  call?: ToolCallView
+}
+
+// token 消耗（usage SSE 事件，Agent 多轮已由后端累加）
+export interface TokenUsage {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+}
+
 // 对话消息（OpenAI chat 格式 + 前端展示扩展）
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -27,6 +55,12 @@ export interface ChatMessage {
   reasoning?: string
   /** 本条回复触发的工具调用（Agent 模式，仅前端 UI 展示用） */
   toolCalls?: ToolCallView[]
+  /** 本条回答参考的 RAG 检索命中（编号引用卡片，仅前端 UI 展示用） */
+  ragHits?: RagHit[]
+  /** 回复过程时序步骤（steps 缺失时前端从扁平字段归一化重建，兼容旧会话快照） */
+  steps?: MsgStep[]
+  /** 本条回复的 token 消耗（仅前端 UI 展示用；上游不支持 include_usage 时缺省） */
+  usage?: TokenUsage
 }
 
 // 发送给后端的上游消息（OpenAI chat 完整格式，含 Agent 工具消息）。
@@ -136,6 +170,8 @@ export async function chatStream(
   opts: {
     onDelta: (text: string) => void
     onReasoning?: (text: string) => void
+    onRagHits?: (hits: RagHit[]) => void
+    onUsage?: (u: TokenUsage) => void
     onToolCall?: (tc: { id: string; name: string; arguments: string }) => void
     onToolResult?: (tr: { id: string; name: string; result: unknown }) => void
     onApprovalRequest?: (ar: { id: string; name: string; arguments: string }) => void
@@ -194,6 +230,30 @@ export async function chatStream(
       curEvent = '' // data 行消费完毕，事件名复位
       try {
         const obj = JSON.parse(payload)
+        if (ev === 'rag_hits') {
+          // RAG 前置检索命中（编号引用卡片数据，流开始时一次性推送）
+          const hits: RagHit[] = Array.isArray(obj?.hits)
+            ? obj.hits.map((h: any) => ({
+                path: String(h?.path || ''),
+                content: String(h?.content || ''),
+                startLine: Number(h?.startLine) || 0,
+                distance: Number(h?.distance) || 0,
+              }))
+            : []
+          if (hits.length) opts.onRagHits?.(hits)
+          continue
+        }
+        if (ev === 'usage') {
+          // token 消耗（Agent 多轮已聚合，[DONE] 前一次性推送）
+          if (obj && typeof obj.total_tokens === 'number') {
+            opts.onUsage?.({
+              promptTokens: Number(obj.prompt_tokens) || 0,
+              completionTokens: Number(obj.completion_tokens) || 0,
+              totalTokens: Number(obj.total_tokens) || 0,
+            })
+          }
+          continue
+        }
         if (ev === 'tool_call') {
           opts.onToolCall?.({
             id: obj?.id || '',

@@ -2,6 +2,7 @@
 import { ref, reactive } from 'vue'
 import * as fileApi from '../api/files'
 import * as shareApi from '../api/share'
+import type { LocateTarget } from '../components/editor/CodePreview.vue'
 
 // ============================================================
 // Auth — re-export from stores/auth.ts (Single Source of Truth)
@@ -26,6 +27,50 @@ const currentInnerHash = ref('')
 function isValidTabPath(p: unknown): p is string {
   return typeof p === 'string' && p.length > 0
     && !p.startsWith('async ') && !p.startsWith('function ') && !p.startsWith('(');
+}
+
+// ============================================================
+// 行定位（RAG 引用跳转等外部触发）：path 命中当前 tab 时由 EditorArea
+// 传给 CodePreview 滚动定位。seq 保证同文件同一行重复点击也能触发。
+// ============================================================
+export const locateRequest = ref<(LocateTarget & { path: string }) | null>(null)
+let locateSeq = 0
+
+export function requestLocate(path: string, line: number): void {
+  if (!line || line < 1) return
+  locateSeq += 1
+  locateRequest.value = { path, line, seq: locateSeq }
+}
+
+/**
+ * 解析 hash 为文件路径 + 行号（RAG 引用跳转）。
+ * 形如 "#/a/b.md" 或 "#/a/b.md#L12"；非法/穿越路径返回 null。
+ */
+export function parseHashTarget(h: string): { path: string; line: number } | null {
+  if (!h || !h.startsWith('#/')) return null
+  let raw = ''
+  try { raw = decodeURIComponent(h.slice(1)) } catch { raw = h.slice(1) }
+  let line = 0
+  const m = raw.match(/^(.+)#L(\d+)$/)
+  if (m) { raw = m[1]; line = parseInt(m[2], 10) || 0 }
+  if (/(^|\/)\.\.(\/|$)/.test(raw)) return null
+  if (!raw.startsWith('/')) return null
+  return { path: raw, line }
+}
+
+/**
+ * 打开 hash 指向的文件（可选定位行）：展开目录树 → 开 tab → 请求行定位。
+ * 供 useIndexApp 的 route.hash watcher（活页触发）与 AI 引用卡片（同 hash
+ * 重复点击时 hashchange 不触发，手动调用兜底）共用。
+ */
+export async function openFileFromHash(h: string): Promise<void> {
+  const target = parseHashTarget(h)
+  if (!target) return
+  await treeStore.expandTo(target.path)
+  const name = target.path.split('/').pop() || ''
+  const ext = (name.split('.').pop() || '').toLowerCase()
+  openTabFn?.(target.path, name, ext, 0)
+  if (target.line > 0) requestLocate(target.path, target.line)
 }
 
 export function storeAddTab(path: string, name: string, ext: string, size: number): boolean {

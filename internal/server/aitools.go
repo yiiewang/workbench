@@ -452,7 +452,7 @@ func execSearchFiles(s *Server, ctx iris.Context, args map[string]any) any {
 	if v, ok := args["topK"].(float64); ok && v >= 1 && v <= 10 {
 		topK = int(v)
 	}
-	hits, err := s.rag.Search(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), query, topK)
+	hits, err := s.rag.Search(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), query, topK)
 	if err != nil {
 		return map[string]any{"error": "search failed: " + err.Error()}
 	}
@@ -481,7 +481,7 @@ func execSearchFiles(s *Server, ctx iris.Context, args map[string]any) any {
 // execListTasks 查任务：默认只返回未完成，可选包含已完成，上限 100 条
 func execListTasks(s *Server, ctx iris.Context, args map[string]any) any {
 	includeDone, _ := args["includeDone"].(bool)
-	tasks, err := s.db.GetTasks(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx))
+	tasks, err := s.db.GetTasks(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx))
 	if err != nil {
 		return map[string]any{"error": "get tasks failed"}
 	}
@@ -558,7 +558,7 @@ func execCreateTask(s *Server, ctx iris.Context, args map[string]any) any {
 		Progress:      0,
 		Assignee:      db.FlexString(strconv.FormatInt(currentUserID(ctx), 10)),
 	}
-	rev, err := s.db.AddTask(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), task)
+	rev, err := s.db.AddTask(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), task)
 	if err != nil {
 		return map[string]any{"error": "create task failed"}
 	}
@@ -588,7 +588,7 @@ func newAITaskID() string {
 
 // execListAIJobs 列出当前用户的定时任务（含全局公共任务，标注只读）
 func execListAIJobs(s *Server, ctx iris.Context, args map[string]any) any {
-	jobs, err := s.db.ListAIJobs(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx))
+	jobs, err := s.db.ListAIJobs(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx))
 	if err != nil {
 		return map[string]any{"error": "list ai jobs failed"}
 	}
@@ -628,7 +628,7 @@ func execCreateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if b == nil {
 		return map[string]any{"error": msg}
 	}
-	id, err := s.db.CreateAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), b.Name, b.CronExpr, b.Prompt, *b.Enabled)
+	id, err := s.db.CreateAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), b.Name, b.CronExpr, b.Prompt, *b.Enabled)
 	if err != nil {
 		return map[string]any{"error": "create ai job failed"}
 	}
@@ -642,7 +642,7 @@ func execUpdateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if jobID <= 0 {
 		return map[string]any{"error": "jobId is required"}
 	}
-	cur, err := s.db.GetAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), int64(jobID))
+	cur, err := s.db.GetAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID))
 	if err != nil {
 		return map[string]any{"error": "get ai job failed"}
 	}
@@ -668,7 +668,7 @@ func execUpdateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if msg := validateAIJobBody(merged); msg != "" {
 		return map[string]any{"error": msg}
 	}
-	if err := s.db.UpdateAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), int64(jobID), merged.Name, merged.CronExpr, merged.Prompt, *merged.Enabled); err != nil {
+	if err := s.db.UpdateAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), merged.Name, merged.CronExpr, merged.Prompt, *merged.Enabled); err != nil {
 		return map[string]any{"error": "update ai job failed"}
 	}
 	return map[string]any{"ok": true, "jobId": int64(jobID), "name": merged.Name, "cron": merged.CronExpr}
@@ -680,14 +680,14 @@ func execDeleteAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if jobID <= 0 {
 		return map[string]any{"error": "jobId is required"}
 	}
-	cur, err := s.db.GetAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), int64(jobID))
+	cur, err := s.db.GetAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID))
 	if err != nil {
 		return map[string]any{"error": "get ai job failed"}
 	}
 	if cur == nil {
 		return map[string]any{"error": "job not found"}
 	}
-	if err := s.db.DeleteAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), int64(jobID)); err != nil {
+	if err := s.db.DeleteAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID)); err != nil {
 		return map[string]any{"error": "delete ai job failed"}
 	}
 	return map[string]any{"ok": true, "deleted": cur.Name}
@@ -728,7 +728,7 @@ func execNotifyUser(s *Server, ctx iris.Context, args map[string]any) any {
 	if len(body) > 32*1024 {
 		return map[string]any{"error": "body too large (max 32KB)"}
 	}
-	s.bus.Publish(ctx.Request().Context(), schedule.Event{
+	s.bus.Publish(aiToolRunCtx(ctx), schedule.Event{
 		Topic: schedule.TopicUserNotify,
 		Payload: schedule.UserNotifyEvent{
 			UserID:  currentUserID(ctx),
@@ -840,7 +840,7 @@ func execUpdateTask(s *Server, ctx iris.Context, args map[string]any) any {
 	if taskID == "" {
 		return map[string]any{"error": "taskId is required"}
 	}
-	rctx := ctx.Request().Context()
+	rctx := aiToolRunCtx(ctx)
 	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
 	tasks, err := s.db.GetTasks(rctx, orgID, userID)
 	if err != nil {

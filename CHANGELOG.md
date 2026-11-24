@@ -18,6 +18,13 @@
 
 ### Added
 
+- **AI 对话与请求连接解耦（断连后继续跑完）**：一次 `/api/ai/chat` 抽象成后台 run，关闭面板/断网不再掐断 Agent 循环：
+  - 运行上下文：`runCtx`（`context.Background()` + 15min 总超时）取代 `ctx.Request().Context()` 派生上游请求；前置 RAG 检索与全部工具执行经 `aiToolRunCtx` 取用同一上下文（`aitools.go` 内 11 处 `ctx.Request().Context()` 统一替换），断连后 DB/RAG 操作仍可继续
+  - 镜像输出：`aiRunWriter` 包装 SSE ResponseWriter，首次写失败即标记 `disconnected` 并静默吞掉后续写入，`forwardAIStream` 继续解析上游分片；断连时不再 `return`，剩余工具轮与最终回复照常生成
+  - 状态落库：迁移 000016 `ai_runs`（runId、org/user、status= running/done/failed、events、result、err_msg、时间戳）；开跑插一条 running，每个工具轮结束落一次快照，任一路径退出由 defer 落最终态；`events` 为 `run_id/rag_hits/tool_call/tool_result/usage` 结构化事件，`result` 累积各轮文本
+  - 查询接口：`GET /api/ai/runs`（最近 20 条，不含 events）与 `GET /api/ai/runs/{id}`（含事件，按 org+user 隔离）；SSE header 就绪后先推 `run_id` 事件，供前端后续按 runId 轮询恢复（1b）
+  - 审批策略：断连后写类工具无人确认，直接跳过并回传 `{error:"用户已断开连接，写操作已跳过"}` 让模型基于已有结果收尾；审批等待期间断开同样作废审批，不再阻塞循环
+  - 局限：运行状态跨进程重启不恢复（循环仍绑定当前进程）；前端恢复 UI 待 1b
 - **AI 可触发索引重建并查询进度**：新增内置工具 `reindex_files` / `reindex_status`，Agent 不再只能读索引、把重建推给界面或后台：
   - 共用启动逻辑：`handleAIReindex` 的「RAG 可用性检查 → org:user 防重 → 后台 `ReindexTree`」抽成 `startReindex`，返回 `reindexStarted / reindexUnavailable / reindexAlreadyRunning` 三态；`POST /api/ai/reindex` 映射为 200 / 50301 / 40902，工具映射为 `started` 或明确说明，HTTP 与 Agent 不再有两套防重/异步语义
   - `reindex_files`：写类工具、`NeedApproval=true`——全量 embed 有实际成本，复用 `runToolWithApproval` → `approval_request` SSE → 界面批准/拒绝（5 分钟超时）后才执行；适用于刚写入/上传的文件搜不到、或改过 `ai.embedding.dim` 后索引失效；后台异步执行，返回 `started` 并提示用 `reindex_status` 查进度

@@ -217,6 +217,9 @@ func (s *Server) App() *iris.Application {
 	api.Get("/ai/reindex/status", auth, s.handleAIReindexStatus)
 	// 文件索引状态（汇总 files/chunks/errors + 明细列表）
 	api.Get("/ai/index-status", auth, s.handleAIIndexStatus)
+	// 后台对话运行状态（客户端断开后仍可查询跑完的结果）
+	api.Get("/ai/runs", auth, s.handleAIRunsList)
+	api.Get("/ai/runs/{id}", auth, s.handleAIRunGet)
 	// AI 定时任务 CRUD（用户自建"到点让 AI 执行 prompt"）
 	api.Get("/ai/jobs", auth, s.handleAIJobsList)
 	api.Post("/ai/jobs", auth, s.handleAIJobCreate)

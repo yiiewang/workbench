@@ -40,6 +40,81 @@ const aiMaxBodyBytes = 512 * 1024
 // aiStreamTimeout 单次对话上游流式响应的最长等待时间。
 const aiStreamTimeout = 10 * time.Minute
 
+// aiRunTimeout 一次后台对话运行的总超时（多轮工具执行 + 上游生成）。
+const aiRunTimeout = 15 * time.Minute
+
+// 后台运行的上下文与状态存入 iris Values 的 key：工具执行器与写工具审批读取
+const (
+	aiRunCtxKey   = "aiRunContext"
+	aiRunStateKey = "aiRunState"
+)
+
+// aiRunState 一次对话运行的状态：结构化事件、累积回复、断连标记。
+// 由单个 handleAIChat 循环串行读写，无需加锁。
+type aiRunState struct {
+	id           string
+	orgID        int64
+	userID       int64
+	events       []any
+	content      strings.Builder
+	disconnected bool
+}
+
+func (r *aiRunState) addEvent(name string, data any) {
+	r.events = append(r.events, map[string]any{"event": name, "data": data})
+}
+
+// flush 把当前快照写入 ai_runs。收尾写用 background context：
+// 客户端断开或运行超时也要把最终状态落库。
+func (r *aiRunState) flush(s *Server, status, errMsg string) {
+	events, _ := json.Marshal(r.events)
+	if err := s.db.SaveAIRun(context.Background(), r.orgID, r.userID, db.AIRun{
+		ID: r.id, Status: status, Events: events, Result: r.content.String(), Error: errMsg,
+	}); err != nil {
+		slog.Warn("ai run flush failed", "run", r.id, "err", err)
+	}
+}
+
+// aiRunWriter SSE 镜像输出：写失败即标记断连并静默丢弃后续写入，
+// 让 Agent 循环在客户端离开后继续跑完（事件同时落库到 ai_runs）。
+type aiRunWriter struct {
+	w     io.Writer
+	state *aiRunState
+	alive bool
+}
+
+func (w *aiRunWriter) Write(p []byte) (int, error) {
+	if !w.alive {
+		return len(p), nil
+	}
+	if _, err := w.w.Write(p); err != nil {
+		w.alive = false
+		w.state.disconnected = true
+	}
+	return len(p), nil
+}
+
+func (w *aiRunWriter) Flush() {
+	if !w.alive {
+		return
+	}
+	if f, ok := w.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// aiToolRunCtx 工具执行用的 context：后台 run 与请求连接解耦，客户端断开后
+// Request().Context() 已被取消，改用 run 的 context 继续读写 DB / RAG。
+// 非对话路径（无 Values）回退到请求上下文，保持原有语义。
+func aiToolRunCtx(ctx iris.Context) context.Context {
+	if v := ctx.Values().Get(aiRunCtxKey); v != nil {
+		if c, ok := v.(context.Context); ok {
+			return c
+		}
+	}
+	return ctx.Request().Context()
+}
+
 // ragSearchTopK RAG 前置检索取回的文本块数。取多了稀释上下文、
 // 取少了覆盖不足；5 块 × ~800 字 ≈ 4K 字，对个人知识库场景够用。
 const ragSearchTopK = 5
@@ -357,6 +432,33 @@ func (s *Server) handleAIIndexStatus(ctx iris.Context) {
 }
 
 // ============================================================
+// 后台对话运行状态：客户端断开后仍可查询已跑完的结果
+// ============================================================
+
+func (s *Server) handleAIRunsList(ctx iris.Context) {
+	limit, _ := strconv.Atoi(ctx.URLParam("limit"))
+	runs, err := s.db.ListAIRuns(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), limit)
+	if err != nil {
+		serverError(ctx, "list ai runs failed", err)
+		return
+	}
+	writeOK(ctx, map[string]any{"runs": runs})
+}
+
+func (s *Server) handleAIRunGet(ctx iris.Context) {
+	run, ok, err := s.db.GetAIRun(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), ctx.Params().Get("id"))
+	if err != nil {
+		serverError(ctx, "get ai run failed", err)
+		return
+	}
+	if !ok {
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
+	}
+	writeOK(ctx, run)
+}
+
+// ============================================================
 // POST /api/ai/chat — SSE 流式对话代理（可选 Agent 循环）
 //
 // 纯对话模式（ai.tools=false）：上游 SSE 逐行透传（行为与历史版本一致）。
@@ -410,6 +512,28 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 		return
 	}
 
+	// 后台运行上下文与请求连接解耦：客户端断开后循环继续跑完，
+	// 工具执行器经 aiRunCtxKey 取用同一个 context（见 aitools.go）。
+	runCtx, runCancel := context.WithTimeout(context.Background(), aiRunTimeout)
+	defer runCancel()
+	ctx.Values().Set(aiRunCtxKey, runCtx)
+
+	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
+	run := &aiRunState{id: uuid.NewString(), orgID: orgID, userID: userID, events: []any{}}
+	ctx.Values().Set(aiRunStateKey, run)
+	if err := s.db.CreateAIRun(runCtx, orgID, userID, run.id, req.QAId, req.SessionId); err != nil {
+		serverError(ctx, "create ai run failed", err)
+		return
+	}
+	// 任一路径退出都落库最终状态；正常结束时在 [DONE] 前改为 done。
+	runStatus, runErrMsg := "failed", ""
+	defer func() {
+		if runStatus == "failed" && runErrMsg == "" {
+			runErrMsg = "对话未完成（上游错误或运行中断）"
+		}
+		run.flush(s, runStatus, runErrMsg)
+	}()
+
 	// 组装上游请求（OpenAI 兼容 /chat/completions，stream=true）。
 	// base_url 兼容两种写法：网关根（…/v1，自动追加 /chat/completions）
 	// 或完整端点（…/v1/chat/completions，原样使用），避免配置歧义导致 404。
@@ -427,7 +551,7 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 	var ragHits []rag.Hit
 	if s.rag != nil {
 		if q := ragQueryFrom(req.Messages); q != "" {
-			hits, err := s.rag.Search(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), q, ragSearchTopK)
+			hits, err := s.rag.Search(runCtx, orgID, userID, q, ragSearchTopK)
 			switch {
 			case err != nil:
 				slog.Warn("rag: search failed, fallback to no context", "err", err)
@@ -446,11 +570,12 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 		}
 	}
 
-	// 绑定请求上下文：客户端断开 → 上游取消
-	upCtx, cancel := context.WithTimeout(ctx.Request().Context(), aiStreamTimeout)
+	// 上游请求绑定后台 run 上下文：客户端断开不再取消上游流
+	upCtx, cancel := context.WithTimeout(runCtx, aiStreamTimeout)
 	defer cancel()
 
-	w := ctx.ResponseWriter()
+	// SSE 仅为镜像输出：断连后 writer 静默吞掉写入，循环继续跑完并落库
+	w := &aiRunWriter{w: ctx.ResponseWriter(), state: run, alive: true}
 	wroteHeader := false
 	usageSum := aiUsage{} // Agent 多轮 token 消耗累加
 
@@ -525,21 +650,27 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 			ctx.Header("X-Accel-Buffering", "no")
 			ctx.StatusCode(iris.StatusOK)
 			wroteHeader = true
+			// runId 先告知前端：断连/刷新后据此轮询 /api/ai/runs/{id} 恢复
+			sseWriteEvent(w, "run_id", map[string]string{"id": run.id})
+			run.addEvent("run_id", map[string]string{"id": run.id})
 			// RAG 引用卡片数据（编号/路径/起始行/原文）：SSE header 就绪后
 			// 立刻推给前端（一次性），前端挂在当前回答气泡上
 			if ragHits != nil {
-				sseWriteEvent(w, "rag_hits", map[string]any{"hits": ragHits})
+				data := map[string]any{"hits": ragHits}
+				sseWriteEvent(w, "rag_hits", data)
+				run.addEvent("rag_hits", data)
 				ragHits = nil
 			}
 		}
 
-		// 转发 + 解析本轮流式响应
+		// 转发 + 解析本轮流式响应（writer 断连后仍继续解析，只是不再输出）
 		reader := bufio.NewReaderSize(resp.Body, 16*1024)
 		res, alive := forwardAIStream(w, reader)
 		resp.Body.Close()
 		if !alive {
-			return // 客户端已断开
+			return // 非镜像 writer 的断连兜底
 		}
+		run.content.WriteString(res.Content)
 		// 聚合本轮 token 消耗（Agent 多轮累加）
 		if res.Usage != nil {
 			usageSum.PromptTokens += res.Usage.PromptTokens
@@ -552,15 +683,20 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 			msgs = append(msgs, aiMessage{Role: "assistant", Content: res.Content, ToolCalls: res.ToolCalls})
 			for _, call := range res.ToolCalls {
 				sseWriteEvent(w, "tool_call", call)
+				run.addEvent("tool_call", call)
 				result := s.runToolWithApproval(ctx, w, call)
-				sseWriteEvent(w, "tool_result", map[string]any{
+				data := map[string]any{
 					"id":     call.ID,
 					"name":   call.Function.Name,
 					"result": result,
-				})
+				}
+				sseWriteEvent(w, "tool_result", data)
+				run.addEvent("tool_result", data)
 				resultJSON, _ := json.Marshal(result)
 				msgs = append(msgs, aiMessage{Role: "tool", ToolCallID: call.ID, Content: string(resultJSON)})
 			}
+			// 每个工具轮落一次快照：断连期间也能看到已完成到哪一步
+			run.flush(s, "running", "")
 			// 下一轮即上限轮：提醒模型收尾，避免轮次耗尽仍无文本输出
 			if round+1 >= aiMaxToolRounds {
 				msgs = append(msgs, aiMessage{Role: "system", Content: "工具调用轮次已达上限。请停止调用工具，基于以上已获得的工具结果直接回答用户问题；信息不足的部分明确说明，不要编造。"})
@@ -571,11 +707,13 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 		// 最终轮（stop / 无工具请求 / 达到轮数上限）：usage 事件 + 统一结束标记
 		if usageSum.TotalTokens > 0 {
 			sseWriteEvent(w, "usage", usageSum)
+			run.addEvent("usage", usageSum)
 		}
 		if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr != nil {
 			return
 		}
 		w.Flush()
+		runStatus = "done"
 		return
 	}
 }
@@ -812,6 +950,11 @@ func (s *Server) runToolWithApproval(ctx iris.Context, w aiStreamWriter, call ai
 	if tool == nil || !tool.NeedApproval {
 		return s.execAITool(ctx, call) // 读类工具或未知工具直接走原路径
 	}
+	// 客户端已断开：无人能点确认，跳过写工具并把原因回传给模型自行收尾，
+	// 后台循环的剩余步骤（含最终回复）继续执行。
+	if run, ok := ctx.Values().Get(aiRunStateKey).(*aiRunState); ok && run.disconnected {
+		return map[string]any{"error": "用户已断开连接，写操作已跳过"}
+	}
 
 	// 审批 ID 直接复用 tool_call ID（一次对话内上游保证唯一）
 	ch := s.aiApprovals.create(call.ID, currentUserID(ctx))
@@ -834,10 +977,10 @@ func (s *Server) runToolWithApproval(ctx iris.Context, w aiStreamWriter, call ai
 		s.aiApprovals.remove(call.ID)
 		approved, outcome = false, "timeout"
 	case <-ctx.Request().Context().Done():
-		// 客户端断开（关面板/停止生成）：作废审批，不执行
+		// 等待期间断开：作废审批、不执行写工具，循环继续收尾
 		s.aiApprovals.remove(call.ID)
 		slog.Info("ai approval aborted", "tool", call.Function.Name, "reason", "client disconnected")
-		return map[string]any{"error": "client disconnected before approval"}
+		return map[string]any{"error": "用户已断开连接，写操作已跳过"}
 	}
 
 	sseWriteEvent(w, "approval_resolved", map[string]any{

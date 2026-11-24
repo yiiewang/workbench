@@ -93,6 +93,36 @@ export interface AISessionDetail extends AISessionSummary {
   messages: ChatMessage[]
 }
 
+// 后台对话运行：客户端断开后服务端继续跑完，状态/事件/结果落库供前端恢复
+export interface AIRunEvent {
+  event: string
+  data: any
+}
+
+export interface AIRun {
+  id: string
+  qaId: string
+  sessionId: string
+  status: 'running' | 'done' | 'failed'
+  /** 结构化 SSE 事件（列表接口不返回） */
+  events?: AIRunEvent[]
+  /** 累积的助手回复文本 */
+  result: string
+  error: string
+  startedAt: string
+  updatedAt: string
+}
+
+// 单条运行详情 — GET /api/ai/runs/{id}
+export async function getAIRun(id: string): Promise<AIRun> {
+  return apiCall(`/api/ai/runs/${id}`)
+}
+
+// 最近运行列表（不含 events）— GET /api/ai/runs
+export async function listAIRuns(limit = 20): Promise<{ runs: AIRun[] }> {
+  return apiCall(`/api/ai/runs?limit=${limit}`)
+}
+
 // 最近会话列表 — GET /api/ai/sessions
 export async function listAISessions(): Promise<{ sessions: AISessionSummary[] }> {
   return apiCall('/api/ai/sessions')
@@ -176,6 +206,10 @@ export async function chatStream(
     onToolResult?: (tr: { id: string; name: string; result: unknown }) => void
     onApprovalRequest?: (ar: { id: string; name: string; arguments: string }) => void
     onApprovalResolved?: (ar: { id: string; outcome: 'approved' | 'declined' | 'timeout' }) => void
+    /** 后台 runId（SSE 开流时一次性推送，断连后据此轮询恢复） */
+    onRunId?: (id: string) => void
+    /** 收到 data: [DONE]：流完整结束（静默断流不会触发） */
+    onDone?: () => void
     signal?: AbortSignal
     qaId?: string
     sessionId?: string
@@ -225,11 +259,19 @@ export async function chatStream(
       }
       if (!line.startsWith('data:')) continue
       const payload = line.slice(5).trim()
-      if (payload === '[DONE]') return
+      if (payload === '[DONE]') {
+        opts.onDone?.()
+        return
+      }
       const ev = curEvent
       curEvent = '' // data 行消费完毕，事件名复位
       try {
         const obj = JSON.parse(payload)
+        if (ev === 'run_id') {
+          const id = String(obj?.id || '')
+          if (id) opts.onRunId?.(id)
+          continue
+        }
         if (ev === 'rag_hits') {
           // RAG 前置检索命中（编号引用卡片数据，流开始时一次性推送）
           const hits: RagHit[] = Array.isArray(obj?.hits)

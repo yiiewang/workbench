@@ -396,7 +396,7 @@ file_index_state / file_chunks / file_chunk_fts / file_chunk_vec  ← 按 (org_i
 | GET | `/api/ai/status` | `{enabled, model, tools}` |
 | POST | `/api/ai/chat` | SSE 对话（Agent 循环） |
 | POST | `/api/ai/approval` | 写工具审批 `{id, approved}` |
-| POST | `/api/ai/reindex` | 全量重建（并发 40902） |
+| POST | `/api/ai/reindex` | 全量重建（并发 40902）；与 `reindex_files` / `reindex_status` 工具共用 `startReindex` |
 | GET | `/api/ai/reindex/status` · `/api/ai/index-status` | 进度 / 文件索引状态 |
 | GET · POST | `/api/ai/jobs` | 定时任务列表 / 创建 |
 | PUT · DELETE | `/api/ai/jobs/{id}` | 更新 / 删除 |
@@ -450,7 +450,7 @@ file_index_state / file_chunks / file_chunk_fts / file_chunk_vec  ← 按 (org_i
 |---|---|---|
 | REST 接口 | `server/server.go` 的 `App()` 注册 + 单独 handler 文件；载荷结构放 `response.go`；错误码放 `codes.go` | 需 auth 就挂 `AuthMiddleware`；SSE/Range 类接口要加入压缩与日志的跳过前缀 |
 | 数据表 | `internal/db/migrations/NNNNNN_name.up.sql` + `.down.sql` | 每个版本一对文件；禁止 `BEGIN/COMMIT`；不要用 `IF NOT EXISTS` 掩盖增量 |
-| 内置 AI 工具 | `server/aitools.go` 的 `aiTools` 注册表 + `execAITool` 分发；写类设 `NeedApproval` | 路径必须走 `resolveUserPathSafe`；结果限长 32KB；更新后同步本文件与功能文档的 13 个工具清单 |
+| 内置 AI 工具 | `server/aitools.go` 的 `aiTools` 注册表 + `execAITool` 分发；写类设 `NeedApproval` | 路径必须走 `resolveUserPathSafe`；结果限长 32KB；当前 15 个工具，更新后同步功能文档 §9.3 的清单 |
 | 外部工具 | `ai.mcp.servers` 配置（无需改代码） | 仅 stateless HTTP；`mcp_<server>_<tool>` 命名空间；一律需审批 |
 | 事件 topic | `schedule/jobs.go` 的 `KnownTopics` + 载荷结构 + 发布方 | 订阅者在 `Server.New` 注册；异步 handler 不能依赖发布方 ctx |
 | 通知渠道 | 新增订阅者（实现 `schedule.Handler`）并在 `Server.New` 订阅现有 topic | `Publish` 不等待、panic 隔离；渠道自身负责去重与失败处理 |

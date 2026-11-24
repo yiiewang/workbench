@@ -239,7 +239,7 @@ curl -s -X POST http://localhost:8001/api/set-password \
 | 响应 | `text/event-stream`；默认事件为 OpenAI 兼容增量（`delta.content` / `delta.reasoning_content`），结束 `data: [DONE]` |
 | 自定义事件 | `rag_hits`（检索命中）、`usage`（多轮累计 token）、`tool_call` / `tool_result`、`approval_request` / `approval_resolved`、`error` |
 
-### 9.3 内置工具（13 个，`ai.tools=true` 时）
+### 9.3 内置工具（15 个，`ai.tools=true` 时）
 
 | 类别 | 工具 | 关键参数 | 需审批 |
 |---|---|---|---|
@@ -253,6 +253,8 @@ curl -s -X POST http://localhost:8001/api/set-password \
 | 定时任务 | `create_ai_job` / `update_ai_job` / `delete_ai_job` | `name`/`cronExpr`/`prompt` / `jobId` | **是** |
 | 事件 | `list_events` | 无（内省事件总线 topic 与订阅者数） | 否 |
 | 通知 | `notify_user` | `subject`, `body`（≤32 KB） | **是** |
+| 索引 | `reindex_files` | 无（触发本人文件全量重建，后台异步） | **是** |
+| 索引 | `reindex_status` | 无（返回 `ProgressOf` 进度快照副本） | 否 |
 
 写类工具执行前，SSE 流发出 `approval_request` 并暂停，用户在工具卡片点「批准/拒绝」，决定经 `POST /api/ai/approval {id, approved}` 提交。**5 分钟未确认按拒绝处理**，关闭面板或停止生成会作废未决审批；拒绝/超时以说明性结果回传模型，由模型解释原因后继续对话。所有外部 MCP 工具（`mcp_<server>_<tool>`）一律需要审批。工具结果统一截断到 32 KB，Agent 最多 5 轮工具调用，达到上限时强制模型用已有结果作答。
 
@@ -262,7 +264,7 @@ curl -s -X POST http://localhost:8001/api/set-password \
 - **切块**：按空行分段，目标 800 字 + 相邻块 100 字重叠，记录 1-based 起始行；可选生成文件级摘要卡（`chunk_index=-1`）与原文块一起参与检索。
 - **检索**：向量 KNN + FTS5 trigram 关键词双路召回，经 RRF（`score = Σ 1/(60+rank)`）融合取 top-5；向量路受 `max_distance`（默认 0.9）过滤，关键词路不受；可选 `judge_model` 批量预判相关性。短问题（<30 字）会拼上一条 user 消息补语境。
 - **展示**：命中片段经 `rag_hits` 推送，注入 prompt 时编号 `[1]…[n]`；回答底部「引用来源」只列出正文实际引用到的编号，点击可跳转到文件并定位行（PC hash `#L12`，移动 `?line=12`）。
-- **运维**：`POST /api/ai/reindex` 全量重建（同用户并发触发返回 `40902`）；`GET /api/ai/reindex/status` 查进度；`GET /api/ai/index-status` 查每文件索引状态与错误；索引清理用 `make ragclean [--reset]`。
+- **运维**：`POST /api/ai/reindex` 全量重建（同用户并发触发返回 `40902`）；`GET /api/ai/reindex/status` 查进度；`GET /api/ai/index-status` 查每文件索引状态与错误；索引清理用 `make ragclean [--reset]`。HTTP 接口与 Agent 工具 `reindex_files`（需审批）/ `reindex_status`（只读）共用 `startReindex` 的「RAG 可用性检查 → org:user 防重 → 后台 `ReindexTree`」逻辑，避免两套异步与防重语义漂移；从未触发过时 `reindex_status` 会给出提示。
 
 ### 9.5 会话与消息操作
 

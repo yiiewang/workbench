@@ -4,10 +4,10 @@
 import { ref, computed, watch } from 'vue'
 import { loggedIn, currentUser } from '../stores/auth'
 import {
-  getAIStatus, chatStream, approveAITool,
+  getAIStatus, chatStream, approveAITool, getAIRun, listAIRuns,
   listAISessions, getAISession, createAISession, updateAISession, deleteAISession,
   type ChatMessage, type AISessionSummary, type AiPayloadMessage,
-  type MsgStep, type ToolCallView,
+  type MsgStep, type ToolCallView, type AIRun,
 } from '../api/ai'
 import { getFile, createDir, uploadFiles } from '../api/files'
 import { showToast, isBinaryExt, extFromPath, copyToClipboard } from '../lib/common'
@@ -33,6 +33,21 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   const streaming = ref(false)
   let abortCtrl: AbortController | null = null
   let sessionId = newId()
+
+  // 后台运行恢复：runId 存 sessionStorage，静默断流/刷新后按 runId 轮询补齐回复
+  const RUN_ID_KEY = 'workbench-ai-active-run'
+  const RESUME_POLL_MS = 2000
+  let activeRunId: string | null = null
+  let resumeStopped = false
+  let resumedRunId: string | null = null
+
+  function setRunId(id: string | null) {
+    activeRunId = id
+    try {
+      if (id) sessionStorage.setItem(RUN_ID_KEY, id)
+      else sessionStorage.removeItem(RUN_ID_KEY)
+    } catch { /* 存储不可用时仅内存态 */ }
+  }
 
   // payload 展开后总条数预算（后端上限 30，留余量）：Agent 对话一条
   // "AI 回复"展开为 assistant(tool_calls) + N 条 tool 消息，按显示条数截断
@@ -218,6 +233,95 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
       }
     } catch { /* 恢复失败：保持空白新会话 */ }
+    void resumePendingRun()
+  }
+
+  // 把后台 run 快照重放到当前回复消息：正文取后端累积的 result，
+  // 工具卡片/引用/消耗按事件补齐（按 id 去重，可反复调用）
+  function applyRunSnapshot(run: AIRun, live: ChatMessage) {
+    if (run.result && run.result.length > live.content.length) live.content = run.result
+    const calls = live.toolCalls || (live.toolCalls = [])
+    for (const e of run.events || []) {
+      const d: any = e.data || {}
+      if (e.event === 'tool_call') {
+        const fn = d.function || {}
+        const id = String(d.id || '')
+        if (!id || calls.some(c => c.id === id)) continue
+        calls.push({ id, name: String(fn.name || ''), arguments: String(fn.arguments || '') })
+      } else if (e.event === 'tool_result') {
+        const tc = calls.find(c => c.id === d.id)
+        if (tc && tc.result === undefined) tc.result = d.result
+      } else if (e.event === 'rag_hits') {
+        if (!live.ragHits?.length && Array.isArray(d.hits)) live.ragHits = d.hits
+      } else if (e.event === 'usage' && typeof d.total_tokens === 'number') {
+        live.usage = {
+          promptTokens: Number(d.prompt_tokens) || 0,
+          completionTokens: Number(d.completion_tokens) || 0,
+          totalTokens: Number(d.total_tokens) || 0,
+        }
+      }
+    }
+    // 时序步骤交给渲染层从扁平字段归一化重建（避免半截 steps 与完整正文不一致）
+    live.steps = undefined
+    scrollBottom()
+    throttledPersist()
+  }
+
+  // 轮询直到 run 结束：期间保持 streaming，结束后落库并清 runId
+  async function pollRun(id: string, live: ChatMessage) {
+    if (resumedRunId === id) return
+    resumedRunId = id
+    streaming.value = true
+    const deadline = Date.now() + 15 * 60 * 1000
+    try {
+      for (;;) {
+        if (resumeStopped) return
+        let run: AIRun
+        try { run = await getAIRun(id) } catch { return }
+        applyRunSnapshot(run, live)
+        if (run.status !== 'running' || Date.now() > deadline) {
+          setRunId(null)
+          if (!live.content) live.content = run.error || '（后台运行已结束，但无回复内容）'
+          return
+        }
+        await new Promise(r => setTimeout(r, RESUME_POLL_MS))
+      }
+    } finally {
+      resumedRunId = null
+      streaming.value = false
+      scrollBottom(true)
+      persistSession()
+    }
+  }
+
+  // 打开面板/刷新后自动发现未消费的后台 run：优先本地 runId，
+  // 丢失时用服务端列表兜底找仍在跑的；太久以前的已完成记录不再补
+  async function resumePendingRun() {
+    if (streaming.value || resumedRunId) return
+    let id: string | null = null
+    try { id = sessionStorage.getItem(RUN_ID_KEY) } catch { /* 忽略 */ }
+    let run: AIRun | null = null
+    if (id) {
+      try { run = await getAIRun(id) } catch { /* 本地 runId 已失效 */ }
+    }
+    if (!run) {
+      try {
+        const { runs } = await listAIRuns()
+        const pending = runs?.find(r => r.status === 'running')
+        if (pending) run = await getAIRun(pending.id)
+      } catch { /* 忽略 */ }
+    }
+    if (!run) return
+    const updated = new Date(run.updatedAt).getTime()
+    if (run.status !== 'running' && (!Number.isFinite(updated) || Date.now() - updated > 30 * 60 * 1000)) return
+    setRunId(run.id)
+    let live = messages.value[messages.value.length - 1]
+    if (!live || live.role !== 'assistant') {
+      messages.value.push({ role: 'assistant', content: '', toolCalls: [], steps: [] })
+      live = messages.value[messages.value.length - 1]
+    }
+    resumeStopped = false
+    await pollRun(run.id, live)
   }
 
   function clearChat() {
@@ -243,6 +347,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   function stopStreaming() {
     abortCtrl?.abort()
     abortCtrl = null
+    resumeStopped = true // 恢复轮询也随"停止"一起停（服务端 run 仍会跑完）
   }
 
   async function send() {
@@ -336,6 +441,9 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     }
 
     abortCtrl = new AbortController()
+    resumeStopped = false
+    let completed = false
+    let recoverable = true
     const qaId = newId()
     const ctxText = await buildCtxText(userMsg.files || [])
     const history = messages.value.slice(0, -2)
@@ -351,6 +459,8 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         signal: abortCtrl.signal,
         qaId,
         sessionId,
+        onRunId: (id) => setRunId(id),
+        onDone: () => { completed = true },
         onReasoning: (delta) => {
           live.reasoning = (live.reasoning || '') + delta
           appendStep('reasoning', delta)
@@ -395,6 +505,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         },
       })
     } catch (e: any) {
+      recoverable = false
       if (e?.name === 'AbortError') {
         if (!live.content) {
           live.content = '（已停止）'
@@ -411,15 +522,21 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         showToast(e?.message || 'AI 请求失败')
       }
     } finally {
-      streaming.value = false
       abortCtrl = null
-      // 兜底：中断/静默断流后无正文（哪怕已有思考与工具调用）——补"（已中断）"
-      // 文本：让用户知道回复被打断；空 assistant 落库会让下次提问 400
-      if (!live.content) {
-        live.content = '（已中断）'
-        const last = live.steps![live.steps!.length - 1]
-        if (last?.kind === 'text') last.text = '（已中断）'
-        else live.steps!.push({ kind: 'text', text: '（已中断）' })
+      // 静默断流：服务端后台 run 继续跑，保持流式态并轮询补齐，不补中断占位
+      if (recoverable && !completed && activeRunId) {
+        void pollRun(activeRunId, live)
+      } else {
+        streaming.value = false
+        if (completed) setRunId(null)
+        // 兜底：中断后无正文（哪怕已有思考与工具调用）——补"（已中断）"
+        // 文本：空 assistant 落库会让下次提问 400
+        if (!live.content) {
+          live.content = '（已中断）'
+          const last = live.steps![live.steps!.length - 1]
+          if (last?.kind === 'text') last.text = '（已中断）'
+          else live.steps!.push({ kind: 'text', text: '（已中断）' })
+        }
       }
       scrollBottom(true)
       persistSession()

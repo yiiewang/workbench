@@ -18,6 +18,13 @@
 
 ### Added
 
+- **补充三套项目文档（`docs/`）**：`docs/functional-guide.md`（功能说明，16 章：功能地图、快速开始与首次超管初始化、通用约定、各功能模块统一的「场景→操作流程→输入/输出→参数→限制」模板、PC/移动能力矩阵、配置默认值 vs `config.yaml` 示例值与环境变量表、限制条件汇总、FAQ、术语表）；`docs/design.md`（软件设计，12 章：分层架构与 3 个全局中间件链、后端 8 个包与前端目录的职责/依赖、`main.run` → `server.New` 装配顺序与失败语义、8 条关键流程时序、15 个迁移版本 + 19 项表的数据模型、全量路由与 7 类 SSE 自定义事件、安全模型、10 类扩展点、17 项设计取舍与已知约束）；`docs/README.md`（文档中心：目录结构与状态标记、文档版本规则、更新记录、单一事实源 + 变更触发规则 + 提交前检查清单 + 一致性核对方法、15 项已知文档偏差清单）。两份 2026-08-21 历史设计稿（`rbac-design.md` / `migration-strategy.md`）原位保留，文件头加归档提示与主要漂移说明（modernc/`CGO_ENABLED=0` → mattn + cgo + sqlite-vec、`org_features` → `user_org_feature` 等）；根 `README.md` 的过时描述按约定**仅登记不修改**。事实依据为 `Server.App()` 路由注册、`config.DefaultConfig` / `mergeConfig` / `ApplyEnv`、15 个迁移脚本、`aitools.go` 的 15 个工具注册表、`ai.go` 的 SSE 事件、`schedule.KnownTopics` 的逐项核对；文档内容基线锁定 `v1.3.0-23-g8f70235` + 迁移 000015；撰写期间 HEAD 前进到 `5d28238`（`000016_ai_runs` / `/api/ai/runs` / `run_id` 等），未纳入正文，登记在 `docs/README.md` §3.3「基线差距与待同步内容」
+- **AI 对话后台运行结果前端恢复（1b）**：断连/刷新后自动按 runId 补齐后台跑完的回复，让 1a 落库的结果真正可见：
+  - `chatStream` 新增 `onRunId` / `onDone` 回调并分发 `run_id` 事件；`onDone` 只在收到 `data: [DONE]` 时触发，用于区分「完整结束」与「静默断流」（后者 `reader.read()` 正常结束、不抛错）
+  - `useAIChat` 把 runId 存入 `sessionStorage`；静默断流时保持 `streaming` 并启动 `pollRun`（2s 轮询 `/api/ai/runs/{id}`，上限 15min），不再补「（已中断）」占位；用户主动停止与业务错误仍走原有收尾
+  - `applyRunSnapshot` 以后端 `result` 覆盖半截正文，按 id 去重补齐工具调用/结果、RAG 引用与 token 消耗；`steps` 置空交给 `legacySteps` 归一化重建，避免半截时序步骤与完整正文不一致
+  - 刷新/打开面板时由 `maybeRestoreLastSession` 末尾触发 `resumePendingRun`：优先本地 runId（含已完成的断流遗留，30 分钟过期保护），本地记录丢失时用 `GET /api/ai/runs` 兜底找仍 running 的；PC 面板与移动端共用同一 composable，组件零改动
+  - 轮询结束才清 runId 并 `persistSession()`；`stopStreaming` 同时终止轮询（服务端 run 仍会跑完，结果仍可查）
 - **AI 对话与请求连接解耦（断连后继续跑完）**：一次 `/api/ai/chat` 抽象成后台 run，关闭面板/断网不再掐断 Agent 循环：
   - 运行上下文：`runCtx`（`context.Background()` + 15min 总超时）取代 `ctx.Request().Context()` 派生上游请求；前置 RAG 检索与全部工具执行经 `aiToolRunCtx` 取用同一上下文（`aitools.go` 内 11 处 `ctx.Request().Context()` 统一替换），断连后 DB/RAG 操作仍可继续
   - 镜像输出：`aiRunWriter` 包装 SSE ResponseWriter，首次写失败即标记 `disconnected` 并静默吞掉后续写入，`forwardAIStream` 继续解析上游分片；断连时不再 `return`，剩余工具轮与最终回复照常生成

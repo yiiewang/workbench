@@ -17,7 +17,7 @@ func TestDueMailContent(t *testing.T) {
 		DueDate:     "2026-11-11",
 		OverdueDays: 0,
 	}
-	subject, text, html := dueMailContent(ev)
+	subject, text, html := dueMailContent(ev, "")
 	if !strings.Contains(subject, "写周报") || !strings.Contains(subject, "今天截止") {
 		t.Fatalf("subject = %q", subject)
 	}
@@ -29,7 +29,7 @@ func TestDueMailContent(t *testing.T) {
 	}
 
 	ev.OverdueDays = 3
-	subject, _, html = dueMailContent(ev)
+	subject, _, html = dueMailContent(ev, "")
 	if !strings.Contains(subject, "已逾期 3 天") {
 		t.Fatalf("overdue subject = %q", subject)
 	}
@@ -79,7 +79,7 @@ func TestBuildMail(t *testing.T) {
 // mdToHTML：标题/列表/粗体/转义
 func TestMdToHTML(t *testing.T) {
 	md := "# 日报\n\n今天完成 **3 项** 任务。\n\n- 修复审批\n- 发布版本\n\n<script>alert(1)</script>"
-	html := string(mdToHTML(md))
+	html := string(mdToHTML(md, ""))
 	// 标题
 	if !strings.Contains(html, "font-weight:600") || !strings.Contains(html, "日报") {
 		t.Errorf("heading missing: %s", html)
@@ -142,5 +142,49 @@ func TestB64(t *testing.T) {
 	lines := strings.Split(strings.TrimSuffix(out, "\r\n"), "\r\n")
 	if len(lines) < 3 {
 		t.Fatalf("long input should be folded, got %d lines", len(lines))
+	}
+}
+
+// 站点地址配置后才渲染跳转按钮与任务深链；未配置/非法地址不产出链接
+func TestEmailActionLinks(t *testing.T) {
+	ev := schedule.TaskDueEvent{
+		Task:    db.TaskItem{ID: "t1", Title: "写周报", Due: "2026-11-11", Status: "progress", Priority: "high"},
+		DueDate: "2026-11-11",
+	}
+	_, text, html := dueMailContent(ev, "https://wb.example.com")
+	if !strings.Contains(html, `href="https://wb.example.com/todo?task=t1"`) || !strings.Contains(html, "查看任务") {
+		t.Fatalf("action button missing: %s", html)
+	}
+	if !strings.Contains(text, "查看任务：https://wb.example.com/todo?task=t1") {
+		t.Fatalf("plain text link missing: %s", text)
+	}
+	for _, site := range []string{"", "javascript:alert(1)", "wb.example.com"} {
+		_, _, html = dueMailContent(ev, site)
+		if strings.Contains(html, "href=") {
+			t.Errorf("invalid site_url %q should not render a link: %s", site, html)
+		}
+	}
+}
+
+// 正文 markdown 链接只允许站内 http(s)：外域/javascript 降级为纯文字
+func TestMdToHTML_Links(t *testing.T) {
+	md := "详见 [任务看板](https://wb.example.com/todo) 与 `done` 状态。\n\n- [危险](javascript:alert)\n- [外链](https://evil.com/x)\n- **重点**"
+	html := string(mdToHTML(md, "https://wb.example.com"))
+	if !strings.Contains(html, `<a href="https://wb.example.com/todo"`) {
+		t.Errorf("same-site link missing: %s", html)
+	}
+	if !strings.Contains(html, "<code") || !strings.Contains(html, "<b>重点</b>") {
+		t.Errorf("inline code/bold missing: %s", html)
+	}
+	if strings.Contains(html, "javascript:") || strings.Contains(html, "evil.com") {
+		t.Errorf("unsafe link rendered: %s", html)
+	}
+	if !strings.Contains(html, "text-indent:-14px") {
+		t.Errorf("list hanging indent missing: %s", html)
+	}
+	// 站点未配置：链接只显示为文字
+	html = string(mdToHTML("[任务看板](https://wb.example.com/todo)", ""))
+	if strings.Contains(html, "<a ") {
+		t.Errorf("link should degrade to text without site_url: %s", html)
 	}
 }

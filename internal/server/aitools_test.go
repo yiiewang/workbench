@@ -177,3 +177,41 @@ func TestValidateAIMessages_ToolRoles(t *testing.T) {
 		}
 	}
 }
+
+// 索引重建工具：触发必须走审批，进度查询只读，两者都要进 tools payload
+func TestReindexToolsRegistered(t *testing.T) {
+	s := &Server{}
+	trigger := s.aiToolByName("reindex_files")
+	if trigger == nil || !trigger.NeedApproval {
+		t.Fatal("reindex_files must be registered and require approval")
+	}
+	status := s.aiToolByName("reindex_status")
+	if status == nil || status.NeedApproval {
+		t.Fatal("reindex_status must be read-only without approval")
+	}
+	seenFiles, seenStatus := false, false
+	for _, p := range aiToolsPayload(aiTools) {
+		if fn, ok := p["function"].(map[string]any); ok {
+			switch fn["name"] {
+			case "reindex_files":
+				seenFiles = true
+			case "reindex_status":
+				seenStatus = true
+			}
+		}
+	}
+	if !seenFiles || !seenStatus {
+		t.Fatal("reindex tools missing from tools payload")
+	}
+}
+
+// RAG 未启用时两个工具返回明确说明（且不触碰请求上下文）
+func TestReindexToolsWhenRAGDisabled(t *testing.T) {
+	s := &Server{}
+	if got, ok := execReindexFiles(s, nil, nil).(map[string]any); !ok || got["error"] == nil {
+		t.Fatalf("reindex_files: want explicit error when RAG disabled, got %+v", got)
+	}
+	if got, ok := execReindexStatus(s, nil, nil).(map[string]any); !ok || got["error"] == nil {
+		t.Fatalf("reindex_status: want explicit error when RAG disabled, got %+v", got)
+	}
+}

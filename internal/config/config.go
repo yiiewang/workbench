@@ -11,7 +11,9 @@ import (
 )
 
 // Config 应用总配置
+// SiteURL 为站点对外根地址（如 https://wb.example.com），供邮件跳转等无 HTTP 请求上下文的场景使用。
 type Config struct {
+	SiteURL  string            `yaml:"site_url"`
 	Server   ServerConfig      `yaml:"server"`
 	DB       DBConfig          `yaml:"database"`
 	Auth     AuthConfig        `yaml:"auth"`
@@ -81,6 +83,21 @@ type LogConfig struct {
 type AIConfig struct {
 	Chat      ChatConfig      `yaml:"chat"`
 	Embedding EmbeddingConfig `yaml:"embedding"`
+	MCP       MCPConfig       `yaml:"mcp"`
+}
+
+// MCPConfig 外部 MCP 服务（仅 HTTP 型无状态服务）。启动时拉取 tools/list
+// 转成与内置工具同构的静态表，调用时每次独立 POST，不维护会话生命周期。
+type MCPConfig struct {
+	Servers []MCPServerConfig `yaml:"servers"`
+}
+
+// MCPServerConfig 单个 MCP 服务；工具以 mcp_<name>_<tool> 暴露给模型。
+// Headers 的值支持 ${ENV_VAR} 展开，凭据不落仓库。
+type MCPServerConfig struct {
+	Name    string            `yaml:"name"`
+	URL     string            `yaml:"url"`
+	Headers map[string]string `yaml:"headers"`
 }
 
 // ChatConfig 聊天模型配置（OpenAI 兼容 /chat/completions 协议）
@@ -210,6 +227,9 @@ func Load(path string) (*Config, error) {
 
 // mergeConfig 将 src 中的非零值合并到 dst
 func mergeConfig(dst, src *Config) {
+	if src.SiteURL != "" {
+		dst.SiteURL = src.SiteURL
+	}
 	if src.Server.Port != 0 {
 		dst.Server.Port = src.Server.Port
 	}
@@ -245,6 +265,9 @@ func mergeConfig(dst, src *Config) {
 	}
 	if src.AI.Chat.Tools {
 		dst.AI.Chat.Tools = true
+	}
+	if src.AI.MCP.Servers != nil {
+		dst.AI.MCP.Servers = src.AI.MCP.Servers
 	}
 	if src.AI.Embedding.BaseURL != "" {
 		dst.AI.Embedding.BaseURL = src.AI.Embedding.BaseURL
@@ -308,7 +331,7 @@ func ResolvePath(p string) string {
 	return p
 }
 
-// ApplyEnv 用环境变量覆盖配置（PORT, STATIC_DIR, DB_PATH, LOG_DIR, ALLOW_SYMLINK, ADMIN_SETUP_TOKEN, AI_*）
+// ApplyEnv 用环境变量覆盖配置（PORT, STATIC_DIR, DB_PATH, LOG_DIR, ALLOW_SYMLINK, ADMIN_SETUP_TOKEN, WORKBENCH_SITE_URL, AI_*）
 func ApplyEnv(cfg *Config) {
 	if v := os.Getenv("PORT"); v != "" {
 		var port int
@@ -333,6 +356,10 @@ func ApplyEnv(cfg *Config) {
 	// 不落配置文件，部署时注入：openssl rand -hex 16
 	if v := os.Getenv("ADMIN_SETUP_TOKEN"); v != "" {
 		cfg.Auth.AdminSetupToken = v
+	}
+	// WORKBENCH_SITE_URL 站点对外根地址（无 HTTP 请求上下文，只能由部署环境提供）
+	if v := os.Getenv("WORKBENCH_SITE_URL"); v != "" {
+		cfg.SiteURL = v
 	}
 	if v := os.Getenv("AI_BASE_URL"); v != "" {
 		cfg.AI.Chat.BaseURL = v

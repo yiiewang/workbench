@@ -276,16 +276,25 @@ func (s *Server) handleAISessionDelete(ctx iris.Context) {
 // 同用户重复触发直接 409，完成后自动清除。
 var ragReindexing sync.Map
 
-func (s *Server) handleAIReindex(ctx iris.Context) {
+// reindexStartStatus 全量重建的启动结果：HTTP 接口与 AI 工具共用同一套判定
+type reindexStartStatus int
+
+const (
+	reindexStarted reindexStartStatus = iota
+	reindexUnavailable
+	reindexAlreadyRunning
+)
+
+// startReindex 以当前请求用户身份在后台启动全量重建；防重标记与异步执行语义
+// 由 POST /api/ai/reindex 和 reindex_files 工具共享，避免两套逻辑漂移。
+func (s *Server) startReindex(ctx iris.Context) reindexStartStatus {
 	if s.rag == nil {
-		writeFail(ctx, http.StatusServiceUnavailable, CodeAINotConfigured)
-		return
+		return reindexUnavailable
 	}
 	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
 	key := fmt.Sprintf("%d:%d", orgID, userID)
 	if _, running := ragReindexing.LoadOrStore(key, struct{}{}); running {
-		writeFail(ctx, iris.StatusConflict, CodeReindexRunning)
-		return
+		return reindexAlreadyRunning
 	}
 	root := s.userRoot(ctx)
 	go func() {
@@ -298,7 +307,18 @@ func (s *Server) handleAIReindex(ctx iris.Context) {
 		slog.Info("rag: reindex done", "user", userID,
 			"indexed", stats.Indexed, "skipped", stats.Skipped, "failed", stats.Failed)
 	}()
-	writeOK(ctx, map[string]any{"started": true})
+	return reindexStarted
+}
+
+func (s *Server) handleAIReindex(ctx iris.Context) {
+	switch s.startReindex(ctx) {
+	case reindexUnavailable:
+		writeFail(ctx, http.StatusServiceUnavailable, CodeAINotConfigured)
+	case reindexAlreadyRunning:
+		writeFail(ctx, iris.StatusConflict, CodeReindexRunning)
+	default:
+		writeOK(ctx, map[string]any{"started": true})
+	}
 }
 
 // ============================================================
@@ -447,7 +467,7 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 			"stream_options": map[string]any{"include_usage": true},
 		}
 		if toolsOn && !forceAnswer {
-			payload["tools"] = aiToolsPayload()
+			payload["tools"] = aiToolsPayload(s.allTools())
 			payload["tool_choice"] = "auto"
 		}
 		body, err := json.Marshal(payload)
@@ -788,7 +808,7 @@ func (s *Server) handleAIJobRuns(ctx iris.Context) {
 //
 // 返回值即 tool 消息内容：拒绝/超时返回说明性结果，由模型向用户解释。
 func (s *Server) runToolWithApproval(ctx iris.Context, w aiStreamWriter, call aiToolCall) any {
-	tool := aiToolByName(call.Function.Name)
+	tool := s.aiToolByName(call.Function.Name)
 	if tool == nil || !tool.NeedApproval {
 		return s.execAITool(ctx, call) // 读类工具或未知工具直接走原路径
 	}

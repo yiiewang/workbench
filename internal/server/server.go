@@ -48,6 +48,8 @@ type Server struct {
 	// rag 文件语义检索服务（ai.embedding 配置启用时非 nil；nil = RAG 关闭，
 	// 各写钩子与对话前置检索据此静默跳过）
 	rag *rag.Service
+	// mcpTools 启动时从 ai.mcp.servers 拉取的外部工具表（与内置 aiTools 同构）
+	mcpTools []aiTool
 }
 
 // New 创建 Server 实例
@@ -73,11 +75,16 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 		logFile:     logFile,
 	}
 
+	// MCP 外部工具：启动时拉取各服务 tools/list（配置错误 fail fast，服务不可达跳过）
+	if err := srv.initMCPTools(); err != nil {
+		return nil, err
+	}
+
 	// 定时调度 + 事件总线：订阅者（EmailNotifier 等）注册到总线，
 	// schedule.enabled 时启动 cron 引擎（表达式配置错误 fail fast）
 	bus := schedule.NewEventBus()
 	srv.bus = bus
-	if _, err := notify.NewEmailNotifier(cfg.Notify.Email, database, bus); err != nil {
+	if err := notify.SubscribeEmailNotifier(cfg.Notify.Email, cfg.SiteURL, database, bus); err != nil {
 		return nil, err
 	}
 	if cfg.Schedule.Enabled {

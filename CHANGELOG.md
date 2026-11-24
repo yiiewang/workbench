@@ -5,12 +5,30 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **邮件列表项里的 `**粗体**` 失效**：`mdToHTML` 原用 `strings.TrimLeft(t, "-*·• ")` 剥离列表符号，会一并吃掉内容前导的 `*`（`- **重点**` → `重点**`，粗体标记残缺）；改为按 `- ` / `* ` / `· ` / `• ` 具体前缀 `TrimPrefix`，只剥离列表符号本身
+- **AI 对话面板左缘拖拽调宽失效**：消息目录刻度容器 `.ai-toc`（z-index:2，left:0 宽 48px）盖住了拖拽条 `.ai-resizer`（z-index:1，宽 8px），面板中部拖拽条不可点击、仅头尾狭窄区域可触发；将 `.ai-resizer` 提到 z-index:3 恢复整条可拖拽
+
 ### Changed
 
+- **邮件通知器装配简化**：原 `NewEmailNotifier` 在 `notify.email.enabled=false` 时仍构造一个未订阅任何事件的 `EmailNotifier` 并返回，调用方 `server.go` 用 `_` 丢弃实例（全仓仅此一处调用）——该对象无人持有、永不触发；且原顺序是先构造再校验 `host/user`，校验失败时构造白做。改为 `SubscribeEmailNotifier(...)` 只返回 `error`：`enabled=false` 直接返回，随后前置校验 `host/user` 再构造实例并订阅三类事件（事件总线持有方法值，无需返回实例）；`server.go` 直接判 error
+- **邮件模板可读性与样式**：`mdToHTML` 输出由 `<br>` 连续拼接改为每项独立 `<div>`——列表项加 `padding:5px 0 5px 14px;text-indent:-14px` 悬挂缩进（长句折行与首行文字对齐）+ 项间留白，解决多个长 bullet 挤成一片文字墙；分节标题（`##` / 中文序号）加左侧 3px 蓝色色条与上间距，正文行距 1.9 → 1.8、段落自带下间距；新增行内代码（反引号）渲染为浅灰底小字，AI 日报里的 `done` / `CERTS_DELETE` 等内部标识不再露出反引号。行内标记统一由 `inlineRe` 正则（链接/粗体/代码）处理，用户内容仍经 `escHTML` 转义；`docs/email-template-preview.html` 同步更新
 - **`ai` 配置结构嵌套化（破坏性变更）**：聊天配置收进 `ai.chat` 子段（`ai.base_url/api_key/model/tools` → `ai.chat.*`），与 `ai.embedding` 子段对称——两者常指向不同服务。旧平铺写法不再识别，存量 config.yaml 需手动迁移；环境变量（`AI_BASE_URL`/`AI_API_KEY`/`AI_MODEL`/`AI_TOOLS`）不受影响
 
 ### Added
 
+- **AI 可触发索引重建并查询进度**：新增内置工具 `reindex_files` / `reindex_status`，Agent 不再只能读索引、把重建推给界面或后台：
+  - 共用启动逻辑：`handleAIReindex` 的「RAG 可用性检查 → org:user 防重 → 后台 `ReindexTree`」抽成 `startReindex`，返回 `reindexStarted / reindexUnavailable / reindexAlreadyRunning` 三态；`POST /api/ai/reindex` 映射为 200 / 50301 / 40902，工具映射为 `started` 或明确说明，HTTP 与 Agent 不再有两套防重/异步语义
+  - `reindex_files`：写类工具、`NeedApproval=true`——全量 embed 有实际成本，复用 `runToolWithApproval` → `approval_request` SSE → 界面批准/拒绝（5 分钟超时）后才执行；适用于刚写入/上传的文件搜不到、或改过 `ai.embedding.dim` 后索引失效；后台异步执行，返回 `started` 并提示用 `reindex_status` 查进度
+  - `reindex_status`：只读无审批，直接回传 `rag.ProgressOf` 的快照副本（`running/total/processed/indexed/skipped/failed/currentPath/startedAt/updatedAt`，`running=false` 即最近一次已完成记录），从未触发过时给出提示；`ProgressOf` 在锁内做值拷贝，重建 goroutine 并发更新不影响工具结果
+  - 零前端改动：工具调用/结果/审批卡片沿用既有 `tool_call` / `tool_result` / `approval_*` SSE 事件；事件总线与 MCP 工具表未动
+- **AI 接入 MCP 外部工具**（`ai.mcp.servers`）：让 Agent 能调用外部 MCP 服务的工具，范围限定为 **HTTP 型无状态服务**——不引入会话生命周期与权限模型：
+  - 配置：`MCPConfig.Servers`（`name` / `url` / `headers`），headers 值支持 `${ENV_VAR}` 展开使凭据不落仓库；`mergeConfig` 按 slice 合并，`DefaultConfig` 保持零值（无服务 = 功能关闭）
+  - 新包 `internal/mcpclient`：JSON-RPC 2.0 `initialize` → `notifications/initialized` → `tools/list` → `tools/call`，30s 超时；响应兼容 `application/json` 与 `text/event-stream`（取首条 `data:`）；`Mcp-Session-Id` 仅从握手响应透传，不维护会话表/重连/子进程
+  - 工具桥接（`internal/server/aitools_mcp.go`）：启动时各服务拉一次 `tools/list` 转成与 `aiTools` 同构的静态表，`mcp_<server>_<tool>` 命名空间防冲突、`inputSchema → parameters`、结果以 `{"result": text}` 回传并沿用 32KB 限长；`aiToolByName` 改为 `Server` 方法、`aiToolsPayload` 改为接受合并表，`execAITool` / `runToolWithApproval` 链路原样复用，前端 SSE 事件零改动
+  - 安全：外部工具一律 `NeedApproval=true`（复用 `runToolWithApproval` → `approval_request` SSE → `aiApprovalHub`），可信 endpoint 由配置白名单决定；启动握手 10s 超时，配置缺 `name`/`url` fail fast，服务不可达只记日志并跳过
+- **邮件跳转链接**：新增顶层 `site_url` 全局配置（环境变量 `WORKBENCH_SITE_URL` 覆盖；由 `Server` 装配时传给 `EmailNotifier`，notify 包不耦合整个 `Config`）——站点对外地址不只服务邮件，分享链接/AI 内容等场景亦可复用；邮件通知运行在 schedule 事件总线、无 HTTP 请求上下文，站点根地址无法像分享链接那样从 `ctx.Host()` 推断，只能由部署环境提供。配置后三类邮件正文下方渲染蓝色 CTA 按钮（table + `bgcolor` 内联样式，兼容邮件客户端），纯文本兜底同步附上 URL；未配置或地址非 http(s) 时不渲染任何链接，避免发出 `localhost` 死链。跳转目标：任务到期/精确时间提醒 → `/todo?task=<id>`（`url.QueryEscape` 编码任务 ID，前端 `TodoView` 的 `route.query.task` watcher 自动打开编辑弹窗；未登录由路由守卫带 `redirect` 回跳），AI 定时任务报告 → `/jobs`（管理该定时任务），普通 `user.notify` → `/todo`。`mdToHTML` 新增 `[文字](url)` 渲染，`safeHref` 只允许 http(s) 且与 site_url 同 host，外域 / `javascript:` / 站点未配置时降级为纯文字，防 AI 编造链接与 href 属性注入
 - **AI 定时任务注入 RAG 检索**：`LLMCaller` 签名扩展任务归属用户身份（全局公共任务展开后的实际执行者），执行 prompt 前以该用户身份做 RAG 前置检索（top-3），命中片段（`ReferencePrompt`，无编号标注要求）拼进 prompt——日报/总结类定时任务可自动引用个人文件（周报文档、项目笔记）；检索失败静默降级
 - **文件索引状态可视化**：`GET /api/ai/index-status`（汇总 files/chunks/errors + 明细 500 条）；AI 面板头部新增数据库图标按钮，抽屉式展示（绿点=ok 红点=失败、路径/块数/错误悬浮提示，与历史会话抽屉互斥，可刷新）
 - **AI 对话 token 消耗显示**：请求上游时携带 `stream_options.include_usage`（流式响应末尾携带 usage 分片），后端解析并**聚合 Agent 多轮**消耗后在 [DONE] 前以自定义 SSE 事件 `usage` 推给前端；assistant 气泡底部右对齐小字显示 `prompt 1.2K · completion 800 · 共 2.1K tokens`（>1000 缩写 K）。usage 随消息持久化到会话快照（历史回看保留）；上游网关不支持 include_usage 时分片缺失，不显示（无害降级）。PC 面板与移动端同步

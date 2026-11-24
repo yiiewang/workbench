@@ -9,7 +9,7 @@
 
 <!-- 预览说明 -->
 <div style="max-width: 640px; margin: 0 auto 32px; padding: 14px 18px; background: #eef4ff; border: 1px solid #c8dbff; border-radius: 10px; font-size: 13px; color: #3b5b8c; line-height: 1.7;">
-  <b>新版预览</b>：AI 报告邮件（标题去掉前缀；正文分节加粗 + 列表，来自 mdToHTML 对 markdown/中文序号的渲染）。另附任务提醒样式。
+  <b>新版预览</b>：分节左侧色条、列表悬挂缩进（长句折行对齐）与项间距、行内代码/站内链接渲染，正文下方蓝色跳转按钮（由全局 site_url 生成，未配置时不显示）。另附任务提醒样式。
 </div>
 
 <!-- ============ 示例 1：AI 报告（新版） ============ -->
@@ -30,38 +30,42 @@
     </td>
   </tr>
   <tr>
-    <td style="font-size: 14px; color: #374151; line-height: 1.9;">
+    <td style="font-size: 14px; color: #374151; line-height: 1.8; padding-bottom: 20px;">
 
       <!-- 概览段 -->
-      今天你共有 <b>6</b> 项任务，完成 <b>3</b> 项，进行中 2 项，逾期 1 项，整体完成率 <b>50%</b>。<br><br>
+      <div style="padding:2px 0 8px;">今天你共有 <b>6</b> 项任务，完成 <b>3</b> 项，进行中 2 项，逾期 1 项，整体完成率 <b>50%</b>。</div>
 
-      <!-- ## 小节（mdToHTML 渲染 markdown 标题 / 中文序号兜底） -->
-      <div style="font-weight:600;color:#1a1f27;margin:14px 0 6px;">今日完成与进展</div>
+      <!-- ## 小节 -->
+      <div style="font-weight:600;font-size:15px;color:#1a1f27;margin:20px 0 8px;padding-left:10px;border-left:3px solid #2563eb;">今日完成与进展</div>
 
-      <!-- - 列表 -->
-      <div style="padding:2px 0;">
-        · 完成邮件模板设计评审（HTML 简约版上线）<br>
-        · 修复 AI 对话审批超时问题（60s → 5 分钟）<br>
-        · AI 定时任务系统联调通过，失败兜底通知正常<br>
-      </div>
+      <!-- - 列表：每项独立成块 + 悬挂缩进（长句折行与首行文字对齐） -->
+      <div style="padding:5px 0 5px 14px;text-indent:-14px;">· 完成邮件模板设计评审（HTML 简约版上线）</div>
+      <div style="padding:5px 0 5px 14px;text-indent:-14px;">· 修复 AI 对话审批超时问题（60s → 5 分钟）</div>
+      <div style="padding:5px 0 5px 14px;text-indent:-14px;">· AI 定时任务系统联调通过，失败兜底通知正常</div>
 
-      <div style="font-weight:600;color:#1a1f27;margin:14px 0 6px;">明日优先事项</div>
+      <div style="font-weight:600;font-size:15px;color:#1a1f27;margin:20px 0 8px;padding-left:10px;border-left:3px solid #2563eb;">明日优先事项</div>
 
-      <div style="padding:2px 0;">
-        · <b>完成项目周报</b>（已逾期 3 天，建议最先处理）<br>
-        · RAG 知识库技术方案设计<br>
-        · 整理 v1.4.0 发版清单<br>
-      </div>
+      <div style="padding:5px 0 5px 14px;text-indent:-14px;">· <b>完成项目周报</b>（已逾期 3 天，建议最先处理）</div>
+      <div style="padding:5px 0 5px 14px;text-indent:-14px;">· RAG 知识库技术方案设计</div>
+      <div style="padding:5px 0 5px 14px;text-indent:-14px;">· 整理 v1.4.0 发版清单</div>
 
-      <div style="font-weight:600;color:#1a1f27;margin:14px 0 6px;">建议</div>
+      <div style="font-weight:600;font-size:15px;color:#1a1f27;margin:20px 0 8px;padding-left:10px;border-left:3px solid #2563eb;">建议</div>
 
-      逾期任务集中在文档类，建议每天 18:00 前集中清一波。
+      <div style="padding:2px 0 8px;">逾期任务集中在文档类，建议每天 <code style="padding:1px 4px;background:#f3f4f6;border-radius:3px;font-size:12px;color:#b91c1c;">18:00</code> 前集中清一波，详见 <a href="https://wb.example.com/todo" style="color:#2563eb;text-decoration:underline;">任务看板</a>。</div>
 
+    </td>
+  </tr>
+  <!-- CTA 按钮（未配置 site_url 时不渲染） -->
+  <tr>
+    <td style="padding-bottom:24px;">
+      <table role="presentation" cellpadding="0" cellspacing="0"><tr><td bgcolor="#2563eb" style="border-radius:6px;">
+        <a href="https://wb.example.com/jobs" style="display:inline-block;padding:10px 18px;color:#ffffff;font-size:13px;font-weight:600;text-decoration:none;">管理定时任务 →</a>
+      </td></tr></table>
     </td>
   </tr>
   <tr>
     <td>
-      <div style="height: 1px; background: #f0f1f3; margin: 24px 0 14px;"></div>
+      <div style="height: 1px; background: #f0f1f3; margin: 0 0 14px;"></div>
       <div style="font-size: 11px; color: #b0b6bf; line-height: 1.7;">
         可在「定时」页面管理此任务 · 2026-11-12 18:07 执行
       </div>
@@ -87,13 +91,21 @@
     </td>
   </tr>
   <tr>
-    <td style="font-size: 13px; color: #4b5563; line-height: 1.8; padding-bottom: 24px;">
+    <td style="font-size: 13px; color: #4b5563; line-height: 1.8; padding-bottom: 20px;">
       汇总本周各模块进展，数据从项目管理面板导出，抄送相关负责人。
+    </td>
+  </tr>
+  <!-- CTA 按钮：任务深链 /todo?task=<id> 会自动打开该任务的编辑弹窗 -->
+  <tr>
+    <td style="padding-bottom:24px;">
+      <table role="presentation" cellpadding="0" cellspacing="0"><tr><td bgcolor="#2563eb" style="border-radius:6px;">
+        <a href="https://wb.example.com/todo?task=42" style="display:inline-block;padding:10px 18px;color:#ffffff;font-size:13px;font-weight:600;text-decoration:none;">查看任务 →</a>
+      </td></tr></table>
     </td>
   </tr>
   <tr>
     <td>
-      <div style="height: 1px; background: #f0f1f3; margin-bottom: 14px;"></div>
+      <div style="height: 1px; background: #f0f1f3; margin: 0 0 14px;"></div>
       <div style="font-size: 11px; color: #b0b6bf; line-height: 1.7;">
         完成任务后不再提醒 · 2026-11-12 18:10
       </div>

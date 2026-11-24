@@ -290,12 +290,31 @@ var aiTools = []aiTool{
 		NeedApproval: true,
 		Exec:         execNotifyUser,
 	},
+	{
+		Name: "reindex_files",
+		Desc: "触发当前用户文件的全量向量索引重建（后台异步执行，耗时取决于文件数量，执行前需要用户在界面上确认）。适用于刚写入/上传的文件搜不到、或改过 embedding 配置后索引失效的场景；启动后用 reindex_status 查询进度",
+		Params: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+		NeedApproval: true,
+		Exec:         execReindexFiles,
+	},
+	{
+		Name: "reindex_status",
+		Desc: "查询最近一次全量索引重建的进度（running/total/processed/indexed/skipped/failed/currentPath/startedAt/updatedAt）；running=false 表示最近一次已结束。只读，可反复调用",
+		Params: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+		Exec: execReindexStatus,
+	},
 }
 
 // aiToolsPayload 组装 OpenAI /chat/completions 的 tools 参数
-func aiToolsPayload() []map[string]any {
-	payloads := make([]map[string]any, 0, len(aiTools))
-	for _, t := range aiTools {
+func aiToolsPayload(tools []aiTool) []map[string]any {
+	payloads := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
 		payloads = append(payloads, map[string]any{
 			"type": "function",
 			"function": map[string]any{
@@ -311,7 +330,7 @@ func aiToolsPayload() []map[string]any {
 // execAITool 分发执行一次工具调用：
 // 解析 arguments JSON → 查注册表 → 执行（panic 兜底）→ 结果限长。
 func (s *Server) execAITool(ctx iris.Context, call aiToolCall) (result any) {
-	tool := aiToolByName(call.Function.Name)
+	tool := s.aiToolByName(call.Function.Name)
 	if tool == nil {
 		return map[string]any{"error": "unknown tool: " + call.Function.Name}
 	}
@@ -563,16 +582,6 @@ func newAITaskID() string {
 	return fmt.Sprintf("%d-%s", time.Now().UnixMilli(), hex.EncodeToString(b))
 }
 
-// aiToolByName 按名称查找工具（Agent 循环判断是否需要审批时用）
-func aiToolByName(name string) *aiTool {
-	for i := range aiTools {
-		if aiTools[i].Name == name {
-			return &aiTools[i]
-		}
-	}
-	return nil
-}
-
 // ============================================================
 // AI 定时任务工具执行器
 // ============================================================
@@ -733,6 +742,33 @@ func execNotifyUser(s *Server, ctx iris.Context, args map[string]any) any {
 		"ok":    true,
 		"topic": schedule.TopicUserNotify,
 		"note":  "事件已发布，投递异步进行（用户未配置邮箱时跳过）",
+	}
+}
+
+// 索引重建工具：reindex_status 只读；reindex_files 为写类，经审批后才到达这里。
+// 两者共用 startReindex / ProgressOf，与 POST /api/ai/reindex 语义一致。
+func execReindexStatus(s *Server, ctx iris.Context, args map[string]any) any {
+	if s.rag == nil {
+		return map[string]any{"error": "RAG（ai.embedding）未配置，没有重建进度"}
+	}
+	p := s.rag.ProgressOf(currentOrgID(ctx), currentUserID(ctx))
+	if p == nil {
+		return map[string]any{"running": false, "note": "尚未触发过全量重建（reindex_files）"}
+	}
+	return p
+}
+
+func execReindexFiles(s *Server, ctx iris.Context, args map[string]any) any {
+	switch s.startReindex(ctx) {
+	case reindexUnavailable:
+		return map[string]any{"error": "RAG（ai.embedding）未配置，无法重建索引"}
+	case reindexAlreadyRunning:
+		return map[string]any{"error": "全量重建已在进行中，请用 reindex_status 查询进度"}
+	default:
+		return map[string]any{
+			"started": true,
+			"note":    "重建在后台异步执行，请用 reindex_status 查询进度",
+		}
 	}
 }
 

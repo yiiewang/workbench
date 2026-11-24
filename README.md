@@ -91,6 +91,12 @@ ai:                            # AI config: chat & embedding are independent sub
     api_key: ""                # inject via AI_EMBEDDING_API_KEY env; may stay empty for local deployments
     model: Qwen3-Embedding-8B
     dim: 1024                  # Matryoshka reduced dimension (Qwen3-Embedding native 4096); changing it invalidates all vectors
+  mcp:                        # external MCP tools (stateless HTTP servers only); tools exposed as mcp_<name>_<tool>
+    servers: []
+    # - name: demo             # every external tool call requires user approval (same as built-in write tools)
+    #   url: https://mcp.example.com/mcp
+    #   headers:                # values support ${ENV_VAR} expansion, so tokens stay out of the repo
+    #     Authorization: "Bearer ${MCP_DEMO_TOKEN}"
 
 schedule:                      # cron scheduler + in-process event bus (internal/schedule)
   enabled: false               # config-only (no env override); enables all scheduler jobs

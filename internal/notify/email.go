@@ -13,6 +13,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/smtp"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,26 +27,30 @@ const emailTimeout = 30 * time.Second
 
 // EmailNotifier 邮件通知器：订阅 task.due → 发邮件给任务归属用户
 type EmailNotifier struct {
-	cfg config.EmailNotifyConfig
-	db  *db.DB
+	cfg     config.EmailNotifyConfig
+	siteURL string // 全局站点根地址（Config.SiteURL），生成邮件跳转链接用
+	db      *db.DB
 }
 
-// NewEmailNotifier 创建并订阅（enabled=false 时静默不订阅）。
+// SubscribeEmailNotifier 创建通知器并订阅三类事件（enabled=false 时静默跳过）。
 // enabled 时校验必填项 host/user（SMTP 认证）；from 可选，
 // 缺省回退 user（个人邮箱两者相同；仅企业邮局/代发服务场景才需要不同值）。
-func NewEmailNotifier(cfg config.EmailNotifyConfig, database *db.DB, bus *schedule.EventBus) (*EmailNotifier, error) {
-	n := &EmailNotifier{cfg: cfg, db: database}
+// siteURL 由 server 装配时从全局配置传入，notify 包不依赖整个 Config。
+// 事件总线持有订阅的方法值，实例无需返回给调用方。
+func SubscribeEmailNotifier(cfg config.EmailNotifyConfig,
+	siteURL string, database *db.DB, bus *schedule.EventBus) error {
 	if !cfg.Enabled {
-		return n, nil
+		return nil
 	}
 	if cfg.Host == "" || cfg.User == "" {
-		return nil, fmt.Errorf("notify.email: host and user (SMTP auth) are required when enabled")
+		return fmt.Errorf("notify.email: host and user (SMTP auth) are required when enabled")
 	}
+	n := &EmailNotifier{cfg: cfg, siteURL: siteURL, db: database}
 	bus.Subscribe(schedule.TopicTaskDue, n.onTaskDue)
 	bus.Subscribe(schedule.TopicTaskReminder, n.onTaskReminder)
 	bus.Subscribe(schedule.TopicUserNotify, n.onUserNotify)
 	slog.Info("email notifier subscribed", "host", cfg.Host, "from", n.from())
-	return n, nil
+	return nil
 }
 
 // from 系统发件邮箱：配置显式指定，缺省回退认证用户名（个人邮箱场景）
@@ -73,7 +78,7 @@ func (n *EmailNotifier) onTaskDue(ctx context.Context, evt schedule.Event) {
 		return
 	}
 
-	subject, text, html := dueMailContent(ev)
+	subject, text, html := dueMailContent(ev, n.siteURL)
 	if err := n.send(ctx, to, subject, text, html); err != nil {
 		slog.Error("email notify: send failed", "to", to, "task", ev.Task.ID, "err", err)
 		return
@@ -99,18 +104,27 @@ func (n *EmailNotifier) onUserNotify(ctx context.Context, evt schedule.Event) {
 	}
 	kind := "WORKBENCH · 用户通知"
 	title := ev.Subject
+	actionPath, actionLabel := "/todo", "打开 Workbench"
 	if strings.HasPrefix(ev.Subject, "[定时任务") {
 		kind = "WORKBENCH · AI 定时任务"
 		// 类型标识已在顶部灰字，标题去掉 "[定时任务] " 前缀避免重复
 		title = strings.TrimSpace(strings.TrimPrefix(ev.Subject, "[定时任务]"))
+		actionPath, actionLabel = "/jobs", "管理定时任务"
+	}
+	actionURL := siteActionURL(n.siteURL, actionPath)
+	text := ev.Body
+	if actionURL != "" {
+		text += "\n\n" + actionLabel + "：" + actionURL
 	}
 	html := renderEmailHTML(emailContent{
-		Kind:     kind,
-		Title:    title,
-		BodyHTML: mdToHTML(ev.Body),
-		Footer:   "Workbench · " + time.Now().Format("2006-01-02 15:04"),
+		Kind:        kind,
+		Title:       title,
+		BodyHTML:    mdToHTML(ev.Body, n.siteURL),
+		ActionURL:   template.URL(actionURL),
+		ActionLabel: actionLabel,
+		Footer:      "Workbench · " + time.Now().Format("2006-01-02 15:04"),
 	})
-	if err := n.send(ctx, to, ev.Subject, ev.Body, html); err != nil {
+	if err := n.send(ctx, to, ev.Subject, text, html); err != nil {
 		slog.Error("email notify: send failed", "to", to, "subject", ev.Subject, "err", err)
 		return
 	}
@@ -131,7 +145,7 @@ func (n *EmailNotifier) onTaskReminder(ctx context.Context, evt schedule.Event) 
 	if to == "" {
 		return
 	}
-	subject, text, html := reminderMailContent(ev)
+	subject, text, html := reminderMailContent(ev, n.siteURL)
 	if err := n.send(ctx, to, subject, text, html); err != nil {
 		slog.Error("email notify: send failed", "to", to, "kind", ev.Kind, "err", err)
 		return
@@ -140,7 +154,7 @@ func (n *EmailNotifier) onTaskReminder(ctx context.Context, evt schedule.Event) 
 }
 
 // reminderMailContent 组装精确时间提醒：主题 + 纯文本 + HTML（简约模板）
-func reminderMailContent(ev schedule.TaskReminderEvent) (subject, text, html string) {
+func reminderMailContent(ev schedule.TaskReminderEvent, siteURL string) (subject, text, html string) {
 	var head, action string
 	if ev.Kind == "start" {
 		head, action = "计划开始", "计划开始时间已到"
@@ -158,18 +172,25 @@ func reminderMailContent(ev schedule.TaskReminderEvent) (subject, text, html str
 	if ev.Task.Priority != "" {
 		meta += " · " + priorityLabel(ev.Task.Priority) + "优先级"
 	}
+	// 任务深链：/todo?task=<id> 会自动打开该任务的编辑弹窗（未登录先走 login?redirect=）
+	actionURL := siteActionURL(siteURL, "/todo?task="+url.QueryEscape(string(ev.Task.ID)))
+	if actionURL != "" {
+		b.WriteString("\n查看任务：" + actionURL + "\n")
+	}
 	html = renderEmailHTML(emailContent{
-		Kind:     "WORKBENCH · 定时提醒",
-		Title:    ev.Task.Title,
-		Meta:     template.HTML(meta),
-		BodyHTML: mdToHTML(ev.Task.Content),
-		Footer:   "到点自动发送 · " + ev.At,
+		Kind:        "WORKBENCH · 定时提醒",
+		Title:       ev.Task.Title,
+		Meta:        template.HTML(meta),
+		BodyHTML:    mdToHTML(ev.Task.Content, siteURL),
+		ActionURL:   template.URL(actionURL),
+		ActionLabel: "查看任务",
+		Footer:      "到点自动发送 · " + ev.At,
 	})
 	return subject, b.String(), html
 }
 
 // dueMailContent 组装到期提醒：主题 + 纯文本 + HTML（简约模板）
-func dueMailContent(ev schedule.TaskDueEvent) (subject, text, html string) {
+func dueMailContent(ev schedule.TaskDueEvent, siteURL string) (subject, text, html string) {
 	var head string
 	if ev.OverdueDays == 0 {
 		head = "今天截止"
@@ -197,12 +218,18 @@ func dueMailContent(ev schedule.TaskDueEvent) (subject, text, html string) {
 		meta = fmt.Sprintf("<b>今天截止</b> · %s · %s · %s优先级 · 进度 %d%%",
 			ev.DueDate, statusLabel(ev.Task.Status), priorityLabel(ev.Task.Priority), ev.Task.Progress)
 	}
+	actionURL := siteActionURL(siteURL, "/todo?task="+url.QueryEscape(string(ev.Task.ID)))
+	if actionURL != "" {
+		b.WriteString("\n查看任务：" + actionURL + "\n")
+	}
 	html = renderEmailHTML(emailContent{
-		Kind:     "WORKBENCH · 任务到期提醒",
-		Title:    ev.Task.Title,
-		Meta:     template.HTML(meta),
-		BodyHTML: mdToHTML(content),
-		Footer:   "完成任务后不再提醒 · " + time.Now().Format("2006-01-02 15:04"),
+		Kind:        "WORKBENCH · 任务到期提醒",
+		Title:       ev.Task.Title,
+		Meta:        template.HTML(meta),
+		BodyHTML:    mdToHTML(content, siteURL),
+		ActionURL:   template.URL(actionURL),
+		ActionLabel: "查看任务",
+		Footer:      "完成任务后不再提醒 · " + time.Now().Format("2006-01-02 15:04"),
 	})
 	return subject, b.String(), html
 }
@@ -232,7 +259,7 @@ func priorityLabel(p string) string {
 	return p
 }
 
-// escHTML 极简 HTML 转义（meta 行拼接用）
+// escHTML 极简 HTML 转义（meta 行与 markdown 正文共用；属性值另用 escHTMLAttr）
 func escHTML(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")

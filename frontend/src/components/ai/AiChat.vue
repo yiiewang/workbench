@@ -658,7 +658,7 @@ function onResizeStart(e: MouseEvent) {
 }
 .ai-toc-tip-body { color: #b8bfc7; }
 
-/* 左缘拖拽调宽：默认隐形细条，hover/拖拽时淡显居中线 */
+/* 左缘拖拽调宽：默认隐形细条，hover/拖拽时淡显居中线；z-index 高于 ai-toc(2)，否则刻度容器盖住左缘导致拖不动 */
 .ai-resizer {
   position: absolute;
   left: -3px;
@@ -666,7 +666,7 @@ function onResizeStart(e: MouseEvent) {
   bottom: 0;
   width: 8px;
   cursor: col-resize;
-  z-index: 1;
+  z-index: 3;
   background: transparent;
 }
 .ai-resizer::after {

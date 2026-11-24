@@ -1,4 +1,9 @@
 # Workbench configuration
+
+# 站点对外根地址（邮件内跳转链接用；也可用 WORKBENCH_SITE_URL 注入）
+# 需带 scheme，如 https://wb.example.com；不配置则邮件不含跳转链接
+site_url: "https://159.75.112.77"
+
 server:
   port: 8001
   static_dir: ./preview  # 用户文件目录（UI 资源 index.html/css/js/todo.html 走 embed，不在此服务）
@@ -72,6 +77,14 @@ ai:
     judge_model: deepseek-flash  # LLM 相关性预判（可选）：距离阈值后批量过滤无关命中，留空关闭
     digest_model: deepseek-flash # 文件级摘要卡（可选）：索引时 LLM 生成语义摘要与原文块一起向量化，
     #                               # 宏观问题命中摘要（省 token），细节走原文；文件变更时才重新生成
+  # MCP 外部工具（HTTP 型无状态服务）：启动时 tools/list 拉取，工具以 mcp_<name>_<tool> 暴露；
+  # 模型调用外部工具一律走审批；headers 值支持 ${ENV_VAR} 展开，凭据不落仓库。
+  mcp:
+    servers:
+      - name: exa-websearch
+        url: http://clickmcp.devcloud.woa.com:8080/mcp
+        headers:
+          x-exa-api-key: "${EXA_API_KEY}"  # 启动前 export EXA_API_KEY=...（不落仓库）
 
 # 定时调度（cron 引擎 + 进程内事件总线，internal/schedule）
 schedule:

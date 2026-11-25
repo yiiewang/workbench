@@ -1,7 +1,7 @@
 package db
 
-// 编排模板 CRUD（pipeline_templates 表）。模板只保存纯 Definition：
-// 定时配置属于调度领域，见 cron_triggers.go / schedule_triggers 表。
+// 编排模板 CRUD（pipeline_templates 表）与版本历史（pipeline_template_versions）。
+// 模板只保存纯 Definition；定时配置属于调度领域，见 cron_triggers.go。
 // db 层不解析 Definition，按 org+user 隔离，列表查询不取 definition。
 
 import (
@@ -16,6 +16,14 @@ type PipelineTemplate struct {
 	Definition string `json:"definition,omitempty"`
 	CreatedAt  string `json:"createdAt"`
 	UpdatedAt  string `json:"updatedAt"`
+}
+
+// PipelineTemplateVersion 模板版本（列表不含 definition，回滚详情才有）
+type PipelineTemplateVersion struct {
+	Version    int    `json:"version"`
+	Name       string `json:"name"`
+	Definition string `json:"definition,omitempty"`
+	CreatedAt  string `json:"createdAt"`
 }
 
 func scanPipelineTemplate(s interface{ Scan(...any) error }, full bool) (PipelineTemplate, error) {
@@ -70,30 +78,147 @@ func (d *DB) GetPipelineTemplate(ctx context.Context, orgID, userID, id int64) (
 	return t, err == nil, err
 }
 
-// CreatePipelineTemplate 新建模板，返回 id
+// CreatePipelineTemplate 新建模板并写入版本 1（事务）。
 func (d *DB) CreatePipelineTemplate(ctx context.Context, orgID, userID int64, name, definition string) (int64, error) {
-	res, err := d.conn.ExecContext(ctx,
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO pipeline_templates (org_id, user_id, name, definition) VALUES (?, ?, ?, ?)`,
 		orgID, userID, name, definition)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO pipeline_template_versions (template_id, org_id, user_id, version, name, definition)
+		 VALUES (?, ?, ?, 1, ?, ?)`,
+		id, orgID, userID, name, definition); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
-// UpdatePipelineTemplate 覆盖名称与 Definition
+// UpdatePipelineTemplate 覆盖名称与 Definition，并写入下一版本（事务）。
 func (d *DB) UpdatePipelineTemplate(ctx context.Context, orgID, userID, id int64, name, definition string) error {
-	_, err := d.conn.ExecContext(ctx,
+	return d.updatePipelineTemplate(ctx, orgID, userID, id, name, definition)
+}
+
+func (d *DB) updatePipelineTemplate(ctx context.Context, orgID, userID, id int64, name, definition string) error {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var next int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(version), 0) + 1 FROM pipeline_template_versions WHERE template_id = ?`,
+		id).Scan(&next); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO pipeline_template_versions (template_id, org_id, user_id, version, name, definition)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		id, orgID, userID, next, name, definition); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE pipeline_templates SET name = ?, definition = ?, updated_at = datetime('now')
 		 WHERE id = ? AND org_id = ? AND user_id = ?`,
-		name, definition, id, orgID, userID)
-	return err
+		name, definition, id, orgID, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// DeletePipelineTemplate 删除模板
+// DeletePipelineTemplate 删除模板（版本历史一并删除）
 func (d *DB) DeletePipelineTemplate(ctx context.Context, orgID, userID, id int64) error {
-	_, err := d.conn.ExecContext(ctx,
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM pipeline_template_versions WHERE template_id = ? AND org_id = ? AND user_id = ?`,
+		id, orgID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM pipeline_templates WHERE id = ? AND org_id = ? AND user_id = ?`,
-		id, orgID, userID)
-	return err
+		id, orgID, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ListPipelineTemplateVersions 版本列表（不含 definition，倒序）
+func (d *DB) ListPipelineTemplateVersions(ctx context.Context, orgID, userID, templateID int64) ([]PipelineTemplateVersion, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT version, name, created_at FROM pipeline_template_versions
+		 WHERE template_id = ? AND org_id = ? AND user_id = ?
+		 ORDER BY version DESC LIMIT 50`,
+		templateID, orgID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PipelineTemplateVersion
+	for rows.Next() {
+		var v PipelineTemplateVersion
+		if err := rows.Scan(&v.Version, &v.Name, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		v.CreatedAt = sqliteTimeToRFC3339(v.CreatedAt)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// GetPipelineTemplateVersion 指定版本详情（含 definition）；不存在返回 ok=false
+func (d *DB) GetPipelineTemplateVersion(ctx context.Context, orgID, userID, templateID int64, version int) (PipelineTemplateVersion, bool, error) {
+	var v PipelineTemplateVersion
+	err := d.conn.QueryRowContext(ctx,
+		`SELECT version, name, definition, created_at FROM pipeline_template_versions
+		 WHERE template_id = ? AND org_id = ? AND user_id = ? AND version = ?`,
+		templateID, orgID, userID, version).
+		Scan(&v.Version, &v.Name, &v.Definition, &v.CreatedAt)
+	if err == sql.ErrNoRows {
+		return v, false, nil
+	}
+	if err != nil {
+		return v, false, err
+	}
+	v.CreatedAt = sqliteTimeToRFC3339(v.CreatedAt)
+	return v, true, nil
+}
+
+// RestorePipelineTemplateVersion 回滚到指定版本：以该版本内容写一个新版本，返回新版本号。
+func (d *DB) RestorePipelineTemplateVersion(ctx context.Context, orgID, userID, templateID int64, version int) (int, error) {
+	v, ok, err := d.GetPipelineTemplateVersion(ctx, orgID, userID, templateID, version)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, sql.ErrNoRows
+	}
+	if err := d.updatePipelineTemplate(ctx, orgID, userID, templateID, v.Name, v.Definition); err != nil {
+		return 0, err
+	}
+	var latest int
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT MAX(version) FROM pipeline_template_versions WHERE template_id = ?`,
+		templateID).Scan(&latest); err != nil {
+		return 0, err
+	}
+	return latest, nil
 }

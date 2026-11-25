@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -171,6 +172,51 @@ func (s *Server) handlePipelineTemplateDelete(ctx iris.Context) {
 		slog.Warn("delete orphan schedule triggers failed", "template", id, "err", err)
 	}
 	writeOK(ctx, map[string]any{"status": "ok"})
+}
+
+// handlePipelineTemplateVersions GET /api/pipeline/templates/{id}/versions — 版本列表
+func (s *Server) handlePipelineTemplateVersions(ctx iris.Context) {
+	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		return
+	}
+	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
+	if _, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), orgID, userID, id); err != nil || !ok {
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
+	}
+	versions, err := s.db.ListPipelineTemplateVersions(ctx.Request().Context(), orgID, userID, id)
+	if err != nil {
+		serverError(ctx, "list pipeline template versions failed", err)
+		return
+	}
+	writeOK(ctx, map[string]any{"versions": versions})
+}
+
+// handlePipelineTemplateRestore POST /api/pipeline/templates/{id}/versions/{version}/restore
+func (s *Server) handlePipelineTemplateRestore(ctx iris.Context) {
+	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	version, verr := strconv.Atoi(ctx.Params().Get("version"))
+	if err != nil || id <= 0 || verr != nil || version <= 0 {
+		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		return
+	}
+	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
+	if _, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), orgID, userID, id); err != nil || !ok {
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
+	}
+	newVersion, err := s.db.RestorePipelineTemplateVersion(ctx.Request().Context(), orgID, userID, id, version)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+			return
+		}
+		serverError(ctx, "restore pipeline template version failed", err)
+		return
+	}
+	writeOK(ctx, map[string]any{"status": "ok", "version": newVersion})
 }
 
 // handlePipelineTemplateRun POST /api/pipeline/templates/{id}/run — 手动触发

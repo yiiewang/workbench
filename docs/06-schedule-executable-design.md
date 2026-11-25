@@ -1,6 +1,6 @@
 # 定时任务可执行对象设计
 
-> 面向：开发者 ｜ 状态：**现行（P0-a / P0-b / P1 已实现）** ｜ 代码基线：`v1.3.0-26-gc0577c4` + 工作树 000021–000024（`docs v2.3`）
+> 面向：开发者 ｜ 状态：**现行（P0-a / P0-b / P1 / P2 已实现）** ｜ 代码基线：`v1.3.0-26-gc0577c4` + 工作树 000021–000026（`docs v2.3`）
 > 功能说明见 `02-functional-guide.md`、软件设计见 `03-design.md`、文档维护规范见 `README.md`（00 号入口）。
 > 本文已纳入现行文档基线；后续按 `README.md` §5.2 随代码变更同步。
 
@@ -143,7 +143,9 @@ cron_triggers_runner 整分钟 tick（唯一扫描器）
 | `ai_jobs`（000022） | 新增 `target_type`（`TEXT NOT NULL DEFAULT 'ai'`）、`target_json`（target 完整 JSON，含 prompt / templateId / definition / method / path）、`allow_write`（静态预授权清单 JSON）、`context_json` / `notify_json`；`prompt` 列保留不删 |
 | `ai_jobs`（000023） | 用 SQLite「建新表 → 复制 → 删旧表 → 改名」重建，删掉 `cron_expr` / `enabled` / `last_run_at` / `last_status`；`.down` 加回 4 列并从 `schedule_triggers` 反向回填（多规则取最近一条），回滚不丢配置（照搬 000020 的做法） |
 | `schedule_triggers`（000023） | 新增 `lease_until`（租约）；`target_type` 白名单增加中性类型 `job`；`validateTriggerTarget` 增加 `job` 归属 case 与全局公共任务分支 |
+| `ai_jobs`（000025） | 新增 `retry`（0-3，job 级失败重试；仅无写步骤生效） |
 | `ai_job_runs` | 000011 原表仅 `id/job_id/ran_at/status/output`，增列 `target_type`、`pipeline_run_id`、`steps_summary`、`status`、`err_msg`、`duration_ms`、`finished_at` |
+| `pipeline_template_versions`（000026） | 模板版本历史：`template_id` / org / user / `version` / `name` / `definition` / `created_at`；唯一 `(template_id,version)`，删除模板级联清理 |
 
 **兼容回填**（000022 / 000023 各做一半；均已实现）：
 
@@ -221,7 +223,7 @@ cron 的对象不限于 AI：`pipeline_template` 已是非 AI 目标，`job` 只
 | P0-a（执行对象归一化，迁移 000022；已实现） | 加 target 列 + `prompt` 回填、`ResolveTarget`、`ValidateJobTarget`、共享 `allowWrite` 判定、接入 `runPipeline`；此时 cron 仍在 `ai_jobs`、`ai_jobs_runner` 照常扫 |
 | P0-b（调度收敛，迁移 000023；已实现） | 重建 `ai_jobs` 删 4 个调度列 + 回填 `schedule_triggers`（`target_type='job'`）+ `lease_until` + `triggerJob` handler + 老 API 拆两行（前端零改动，`/jobs` 复用触发卡片留到 P1）+ 删除 `ai_jobs_runner` |
 | P1（已实现） | 模板引用、执行历史联动 `pipeline_runs`（迁移 000024）、`AiJobsView` 类型选择器、邮件分类型渲染、外部 MCP 按 `allowWrite` 白名单放开 |
-| P2 | job 级失败重试、模板版本化、外部 MCP 定时放开后的审计增强 |
+| P2（已实现） | job 级失败重试（000025）、模板版本化（000026）、外部 MCP 审计增强（日志 `mcpSteps`） |
 | 后续议题 | 更多领域对象（`task` / `file`）接入 `schedule_triggers`、字符串目标（`target_ref`）、表名 / API 中性化重命名 |
 
 外部 HTTP 接口已移出分期：当前编排明确禁止外访，将来真要外访需另立安全边界。

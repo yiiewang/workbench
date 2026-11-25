@@ -218,7 +218,7 @@ var aiTools = []aiTool{
 	},
 	{
 		Name: "create_ai_job",
-		Desc: "创建一条 AI 定时任务：到点后自动执行指令（附带你的任务数据）并邮件通知你（执行前需要用户在界面上确认）",
+		Desc: "创建一条定时任务：到点后执行 AI 提示词、单个工具、站内接口或编排流程，并邮件通知你（执行前需要用户在界面上确认）",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -232,10 +232,23 @@ var aiTools = []aiTool{
 				},
 				"prompt": map[string]any{
 					"type":        "string",
-					"description": "到点后执行的指令内容，如：总结我今天完成的任务并生成日报",
+					"description": "AI 提示词（target 缺省时必填；提供 target 时可省略）",
+				},
+				"target": map[string]any{
+					"type":        "object",
+					"description": "执行对象（可选，替代 prompt）：{type: ai|tool|interface|pipeline, prompt?, tool?, path?, method?, query?, body?, definition?, templateId?, params?}",
+				},
+				"allowWrite": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "静态预授权：写类工具名（如 notify_user）或非 GET 的 api/<path>（如 api/tasks）",
+				},
+				"retry": map[string]any{
+					"type":        "integer",
+					"description": "失败重试次数 0-3（仅无写步骤时生效）",
 				},
 			},
-			"required": []string{"name", "cronExpr", "prompt"},
+			"required": []string{"name", "cronExpr"},
 		},
 		NeedApproval: true,
 		Exec:         execCreateAIJob,
@@ -259,6 +272,7 @@ var aiTools = []aiTool{
 					"items":       map[string]any{"type": "string"},
 					"description": "静态预授权清单（覆盖原值）",
 				},
+				"retry":   map[string]any{"type": "integer", "description": "失败重试次数 0-3（仅无写步骤时生效）"},
 				"enabled": map[string]any{"type": "boolean", "description": "启用/停用"},
 			},
 			"required": []string{"jobId"},
@@ -675,6 +689,31 @@ func aiJobArgsToBody(args map[string]any) (*aiJobBody, string) {
 	b.Prompt, _ = args["prompt"].(string)
 	if v, ok := args["enabled"].(bool); ok {
 		b.Enabled = &v
+	}
+	if v, ok := args["retry"].(float64); ok {
+		b.Retry = int(v)
+	}
+	if v, ok := args["target"].(map[string]any); ok {
+		if raw, err := json.Marshal(v); err == nil {
+			b.Target = raw
+		}
+	}
+	if v, ok := args["allowWrite"].([]any); ok {
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				b.AllowWrite = append(b.AllowWrite, s)
+			}
+		}
+	}
+	if v, ok := args["context"].(map[string]any); ok {
+		if raw, err := json.Marshal(v); err == nil {
+			b.Context = raw
+		}
+	}
+	if v, ok := args["notify"].(map[string]any); ok {
+		if raw, err := json.Marshal(v); err == nil {
+			b.Notify = raw
+		}
 	}
 	if msg := validateAIJobBody(b); msg != "" {
 		return nil, msg

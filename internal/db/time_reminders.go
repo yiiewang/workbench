@@ -83,6 +83,7 @@ type AIJob struct {
 	AllowWrite []string        `json:"allowWrite,omitempty"`
 	Context    json.RawMessage `json:"context,omitempty"`
 	Notify     json.RawMessage `json:"notify,omitempty"`
+	Retry      int             `json:"retry,omitempty"`
 	LastRunAt  string          `json:"lastRunAt,omitempty"`
 	LastStatus string          `json:"lastStatus,omitempty"`
 	CreatedAt  string          `json:"createdAt,omitempty"`
@@ -92,7 +93,7 @@ type AIJob struct {
 // 该任务最近一条 job 规则。表别名固定为 j。
 const aiJobSelectCols = `j.id, j.name, j.prompt,
 	COALESCE(j.target_type,'ai'), COALESCE(j.target_json,''), COALESCE(j.allow_write,'[]'),
-	COALESCE(j.context_json,'{}'), COALESCE(j.notify_json,'{}'), COALESCE(j.created_at,''),
+	COALESCE(j.context_json,'{}'), COALESCE(j.notify_json,'{}'), COALESCE(j.retry,0), COALESCE(j.created_at,''),
 	j.user_id, j.org_id,
 	COALESCE((SELECT cron_expr FROM schedule_triggers WHERE target_type='job' AND target_id=j.id ORDER BY id LIMIT 1),''),
 	COALESCE((SELECT enabled FROM schedule_triggers WHERE target_type='job' AND target_id=j.id ORDER BY id LIMIT 1),0),
@@ -106,14 +107,15 @@ func scanAIJobRow(scan func(dest ...any) error) (AIJobWithOwner, error) {
 	var user sql.NullInt64
 	var org int64
 	var targetType, targetJSON, allowWrite, contextJSON, notifyJSON, createdAt, cronExpr string
+	var retry int
 	if err := scan(&j.ID, &j.Name, &j.Prompt,
-		&targetType, &targetJSON, &allowWrite, &contextJSON, &notifyJSON, &createdAt,
+		&targetType, &targetJSON, &allowWrite, &contextJSON, &notifyJSON, &retry, &createdAt,
 		&user, &org, &cronExpr, &enabled, &j.LastRunAt, &j.LastStatus); err != nil {
 		return AIJobWithOwner{}, err
 	}
 	j.Enabled = enabled == 1
 	j.IsGlobal = !user.Valid
-	j.CronExpr, j.CreatedAt = cronExpr, createdAt
+	j.CronExpr, j.CreatedAt, j.Retry = cronExpr, createdAt, retry
 	j.TargetType = targetType
 	if targetJSON != "" {
 		j.Target = json.RawMessage(targetJSON)
@@ -198,6 +200,7 @@ type AIJobSpec struct {
 	AllowWrite  []string
 	ContextJSON string
 	NotifyJSON  string
+	Retry       int
 }
 
 // legacyAITargetJSON 把历史 prompt 包装成 {"type":"ai","prompt":...}。
@@ -243,10 +246,14 @@ func (d *DB) CreateAIJobWithSpec(ctx context.Context, orgID, userID int64, spec 
 	if notifyJSON == "" {
 		notifyJSON = "{}"
 	}
+	retry := spec.Retry
+	if retry < 0 {
+		retry = 0
+	}
 	res, err := d.conn.ExecContext(ctx,
-		`INSERT INTO ai_jobs (user_id, org_id, name, prompt, target_type, target_json, allow_write, context_json, notify_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		userID, orgID, spec.Name, spec.Prompt, targetType, targetJSON, allowWrite, contextJSON, notifyJSON)
+		`INSERT INTO ai_jobs (user_id, org_id, name, prompt, target_type, target_json, allow_write, context_json, notify_json, retry)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		userID, orgID, spec.Name, spec.Prompt, targetType, targetJSON, allowWrite, contextJSON, notifyJSON, retry)
 	if err != nil {
 		return 0, err
 	}
@@ -293,7 +300,7 @@ func (d *DB) UpdateAIJob(ctx context.Context, orgID, userID, id int64, name, cro
 // AllowWrite nil 表示保持、空切片表示显式清空。
 func (d *DB) UpdateAIJobWithSpec(ctx context.Context, orgID, userID, id int64, spec AIJobSpec) error {
 	_, err := d.conn.ExecContext(ctx,
-		`UPDATE ai_jobs SET name=?, prompt=?,
+		`UPDATE ai_jobs SET name=?, prompt=?, retry=?,
 		 target_type = COALESCE(NULLIF(?, ''), target_type),
 		 target_json = COALESCE(NULLIF(?, ''), target_json),
 		 allow_write = COALESCE(NULLIF(?, ''), allow_write),
@@ -301,7 +308,7 @@ func (d *DB) UpdateAIJobWithSpec(ctx context.Context, orgID, userID, id int64, s
 		 notify_json = COALESCE(NULLIF(?, ''), notify_json),
 		 updated_at = datetime('now')
 		 WHERE org_id=? AND user_id=? AND id=?`,
-		spec.Name, spec.Prompt,
+		spec.Name, spec.Prompt, spec.Retry,
 		spec.TargetType, spec.TargetJSON, marshalAllowWrite(spec.AllowWrite),
 		spec.ContextJSON, spec.NotifyJSON,
 		orgID, userID, id)

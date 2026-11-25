@@ -21,6 +21,8 @@ type aiJobRunResult struct {
 	PipelineRunID string
 	Steps         []pipeline.StepResult
 	DurationMs    int64
+	// Retryable 无写步骤才允许 job 级重试（重跑写操作可能重复副作用）。
+	Retryable bool
 }
 
 // execAIJob 单次定时任务的执行入口。
@@ -36,7 +38,7 @@ func (s *Server) execAIJob(ctx context.Context, job db.AIJobWithOwner) (aiJobRun
 	// 审计：定时执行无人审批，静态授权与最终步骤在此留痕。
 	slog.Info("scheduled job authorized",
 		"job", job.ID, "name", job.Name, "user", job.UserID, "target", job.TargetType,
-		"steps", stepUses(def.Steps), "allowWrite", def.AllowWrite)
+		"steps", stepUses(def.Steps), "allowWrite", def.AllowWrite, "mcpSteps", mcpStepUses(def.Steps))
 	runID := uuid.NewString()
 	results, runErr := s.runPipeline(ctx, job.OrgID, job.UserID, runID, def)
 	return aiJobRunResult{
@@ -44,6 +46,7 @@ func (s *Server) execAIJob(ctx context.Context, job db.AIJobWithOwner) (aiJobRun
 		PipelineRunID: runID,
 		Steps:         results,
 		DurationMs:    time.Since(start).Milliseconds(),
+		Retryable:     len(def.AllowWrite) == 0,
 	}, runErr
 }
 
@@ -52,6 +55,18 @@ func stepUses(steps []pipeline.Step) []string {
 	out := make([]string, 0, len(steps))
 	for _, st := range steps {
 		out = append(out, st.Uses)
+	}
+	return out
+}
+
+// mcpStepUses 审计日志里的外部 MCP 步骤（工具名统一 mcp_ 前缀）。
+func mcpStepUses(steps []pipeline.Step) []string {
+	var out []string
+	for _, st := range steps {
+		kind, name, ok := pipeline.ParseUses(st.Uses)
+		if ok && kind == "tool" && strings.HasPrefix(name, "mcp_") {
+			out = append(out, st.Uses)
+		}
 	}
 	return out
 }

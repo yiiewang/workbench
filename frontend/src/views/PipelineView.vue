@@ -13,6 +13,7 @@ import {
 import { showToast } from '../lib/common'
 import PipelineGraph from '../components/pipeline/PipelineGraph.vue'
 import PipelineTriggerCard from '../components/ai/PipelineTriggerCard.vue'
+import PipelineVersionCard from '../components/pipeline/PipelineVersionCard.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -61,6 +62,19 @@ async function loadRuns() {
   }
 }
 
+async function loadTemplate(id: number) {
+  try {
+    const t = await getPipelineTemplate(id)
+    form.value = { name: t.name, definition: t.definition || DEFAULT_DEF }
+  } catch (e: any) {
+    showToast('载入模板失败：' + (e?.msg || e?.message || ''))
+  }
+}
+
+async function onVersionRestored() {
+  if (typeof selected.value === 'number') await loadTemplate(selected.value)
+}
+
 watch(selected, async (sel) => {
   showJson.value = false
   activeRunId.value = null
@@ -71,12 +85,7 @@ watch(selected, async (sel) => {
     return
   }
   if (typeof sel === 'number') {
-    try {
-      const t = await getPipelineTemplate(sel)
-      form.value = { name: t.name, definition: t.definition || DEFAULT_DEF }
-    } catch (e: any) {
-      showToast('载入模板失败：' + (e?.msg || e?.message || ''))
-    }
+    await loadTemplate(sel)
     await loadRuns()
   }
 }, { immediate: true })
@@ -239,6 +248,7 @@ const needsText = computed(() => {
     </div>
 
     <PipelineTriggerCard :template-id="typeof selected === 'number' ? selected : null" />
+    <PipelineVersionCard :template-id="typeof selected === 'number' ? selected : null" @restored="onVersionRestored" />
 
     <div class="pipe-main">
       <section class="pipe-board">

@@ -332,3 +332,105 @@ func TestMigration000024RunDetail(t *testing.T) {
 		t.Fatalf("detail columns should be dropped, got %d", cols)
 	}
 }
+
+// 000025 任务级重试：up 加列默认 0，down 删除。
+func TestMigration000025AIJobRetry(t *testing.T) {
+	conn, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetMaxOpenConns(1)
+
+	src, err := iofs.New(migrationsFS, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver, err := sqlite3.WithInstance(conn, &sqlite3.Config{NoTxWrap: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := migrate.NewWithInstance("iofs", src, "sqlite", driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Migrate(24); err != nil {
+		t.Fatalf("migrate to 24: %v", err)
+	}
+	if _, err := conn.Exec(`INSERT INTO ai_jobs (name, prompt) VALUES ('t', 'p')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Migrate(25); err != nil {
+		t.Fatalf("migrate to 25: %v", err)
+	}
+	var retry int
+	if err := conn.QueryRow(`SELECT retry FROM ai_jobs WHERE name = 't'`).Scan(&retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry != 0 {
+		t.Fatalf("existing job retry = %d, want 0", retry)
+	}
+	if err := m.Migrate(24); err != nil {
+		t.Fatalf("down to 24: %v", err)
+	}
+	var cols int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('ai_jobs') WHERE name = 'retry'`).Scan(&cols); err != nil {
+		t.Fatal(err)
+	}
+	if cols != 0 {
+		t.Fatalf("retry column should be dropped, got %d", cols)
+	}
+}
+
+// 000026 模板版本表：up 建表、down 删除。
+func TestMigration000026TemplateVersions(t *testing.T) {
+	conn, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "template_versions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetMaxOpenConns(1)
+
+	src, err := iofs.New(migrationsFS, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver, err := sqlite3.WithInstance(conn, &sqlite3.Config{NoTxWrap: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := migrate.NewWithInstance("iofs", src, "sqlite", driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Migrate(25); err != nil {
+		t.Fatalf("migrate to 25: %v", err)
+	}
+	var n int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pipeline_template_versions'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("version table should not exist at 000025")
+	}
+	if err := m.Migrate(26); err != nil {
+		t.Fatalf("migrate to 26: %v", err)
+	}
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pipeline_template_versions'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("version table should exist at 000026")
+	}
+	if err := m.Migrate(25); err != nil {
+		t.Fatalf("down to 25: %v", err)
+	}
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pipeline_template_versions'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("version table should be dropped on rollback")
+	}
+}

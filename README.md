@@ -123,8 +123,9 @@ notify:                        # notification channels (subscribe to the event b
 - **File Browser** — Directory tree, tabbed editor, syntax highlighting for code/markdown/JSON
 - **Markdown Viewer** — Rendered markdown with Mermaid diagrams, cross-file link navigation, anchor scrolling
 - **JSON Viewer** — Collapsible tree view, raw text toggle, copy raw to clipboard
-- **AI Chat & Agent** — OpenAI-compatible streaming chat with 13 built-in tools (file ops / task management / event publishing / scheduled jobs); Human-in-the-loop approval for write operations; `@` file references; reasoning display; session history persisted in SQLite
-- **Scheduled Tasks & Notifications** — Hand-written cron engine + in-process event bus; AI scheduled jobs (run your prompt at a cron time, results emailed); precise task-time reminders (start/due HH:mm); email delivery via SMTP 587 STARTTLS
+- **AI Chat & Agent** — OpenAI-compatible streaming chat with 16 built-in tools (file ops / search / task management / event publishing / scheduled jobs / pipelines / indexing); Human-in-the-loop approval for write operations; `@` file references; reasoning display; session history persisted in SQLite
+- **Scheduled Tasks & Notifications** — Hand-written cron engine + in-process event bus; one scanner over `schedule_triggers`; a job can run an AI prompt, a tool, an in-site API call, or a pipeline at a cron time (static `allowWrite` pre-authorization; per-run history with target type and pipeline run id); precise task-time reminders (start/due HH:mm); email delivery via SMTP 587 STARTTLS
+- **Declarative Pipelines** — JSON `Definition` with DAG `needs`, `when`, `retry` and tool/api/llm steps; run directly, save as versioned templates (rollback supported), or trigger by cron; DAG view and run overlay under `/pipelines`
 - **Todo ↔ File Linking** — Tasks can link files (tree picker in todo editor); the file viewer shows linked tasks with jump-to-task and link-existing-task actions
 - **Download & Share** — Download any file; create time-limited, access-controlled shares for files or folders
 - **Static File Serving** — HTML, Markdown, JSON, CSS, JS, images with path traversal protection; gzip/br response compression
@@ -135,15 +136,18 @@ notify:                        # notification channels (subscribe to the event b
 - **Todo Board** — User/org task management with conflict detection, optimistic-lock revision sync, multi-device support
 - **SQLite Storage** — All data in a single portable `workbench.db` file (WAL mode)
 
-### AI Agent Tools (13)
+### AI Agent Tools (16)
 
 When `ai.chat.tools` is enabled, the chat agent can call these tools (write operations require in-chat approval):
 
 | Category | Tools |
 |---|---|
 | Files | `list_dir` · `read_file` · `write_file` |
+| Search | `search_files` |
 | Tasks | `list_tasks` · `create_task` · `update_task` |
 | Scheduled jobs | `list_ai_jobs` · `create_ai_job` · `update_ai_job` · `delete_ai_job` |
+| Pipelines | `run_pipeline` |
+| Indexing | `reindex_files` · `reindex_status` |
 | Events & notifications | `list_events` · `notify_user` |
 
 ### Feature Matrix (Desktop vs Mobile)
@@ -190,9 +194,17 @@ The mobile UI (`/m/*`, auto-served on viewports ≤900px) is a separate, browse-
 | `/api/profile/email` | POST | Update own notification email `{email}` (requires token) |
 | `/api/tasks/{id}` | GET | Task detail (full fields incl. content; requires token) |
 | `/api/ai/approval` | POST | Approve/decline an AI write-tool call `{id, approved}` (requires token) |
-| `/api/ai/jobs` | GET/POST | List / create AI scheduled jobs (requires token) |
-| `/api/ai/jobs/{id}` | PUT/DELETE | Update / delete an AI scheduled job (requires token) |
-| `/api/ai/jobs/{id}/runs` | GET | Job execution history (requires token) |
+| `/api/ai/jobs` | GET/POST | List / create scheduled jobs (`target`: ai / tool / interface / pipeline; requires token) |
+| `/api/ai/jobs/{id}` | PUT/DELETE | Update / delete a scheduled job (requires token) |
+| `/api/ai/jobs/{id}/runs` | GET | Execution history (target type, pipeline run id, steps summary; requires token) |
+| `/api/pipeline/run` | POST | Run a pipeline Definition asynchronously (requires token) |
+| `/api/pipeline/templates` | GET/POST | List / create pipeline templates (requires token) |
+| `/api/pipeline/templates/{id}` | GET/PUT/DELETE | Template detail / update / delete (requires token) |
+| `/api/pipeline/templates/{id}/run` | POST | Run a template manually (requires token) |
+| `/api/pipeline/templates/{id}/versions` | GET | Template version history (requires token) |
+| `/api/pipeline/templates/{id}/versions/{version}/restore` | POST | Roll back to a version (writes a new version; requires token) |
+| `/api/schedule/triggers` | GET/POST | List / create cron trigger rules (requires token) |
+| `/api/schedule/triggers/{id}` | GET/PUT/DELETE | Trigger detail / update / delete (requires token) |
 | `/api/admin/users` | GET | List all users across orgs (admin only) |
 | `/api/admin/users` | POST | Create user `{org, name, password, roleId, mobile}` (admin only) |
 | `/api/admin/users/{id}` | PATCH | Update user `{name?, mobile?, password?, roleId?}` (admin only) |

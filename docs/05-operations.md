@@ -173,9 +173,9 @@ HTTP 与 Agent 共用同一套「RAG 可用性检查 → org:user 防重 → 后
 
 ## 7. 升级与迁移
 
-`internal/db/migrations/` 用 golang-migrate 管理，`//go:embed` 内嵌；当前基线 **000024_ai_job_runs_detail**（24 个版本 / 48 个脚本，每个版本一对 `.up.sql` / `.down.sql`）。
+`internal/db/migrations/` 用 golang-migrate 管理，`//go:embed` 内嵌；当前基线 **000026_pipeline_template_versions**（26 个版本 / 52 个脚本，每个版本一对 `.up.sql` / `.down.sql`）。
 
-- 000017 新建 `pipeline_runs`；000018 新建 `pipeline_templates`（初版含 cron / 启停 / 状态列）；000019 新建 `schedule_triggers` 并从模板 `cron_expr <> ''` 回填已有规则；000020 重建模板表删掉 4 个调度列；000021 新建 `ai_session_messages`；000022 给 `ai_jobs` 加 target 五列并回填 `prompt`；000023 调度收敛（`ai_jobs` 去 4 个调度列、`schedule_triggers` 加 `lease_until`、回填 `target_type='job'`）；000024 给 `ai_job_runs` 加详情列。000020 / 000023 的 `.down.sql` 都按规则反向回填调度列，回滚不丢配置。
+- 000017 新建 `pipeline_runs`；000018 新建 `pipeline_templates`（初版含 cron / 启停 / 状态列）；000019 新建 `schedule_triggers` 并从模板 `cron_expr <> ''` 回填已有规则；000020 重建模板表删掉 4 个调度列；000021 新建 `ai_session_messages`；000022 给 `ai_jobs` 加 target 五列并回填 `prompt`；000023 调度收敛（`ai_jobs` 去 4 个调度列、`schedule_triggers` 加 `lease_until`、回填 `target_type='job'`）；000024 给 `ai_job_runs` 加详情列；000025 给 `ai_jobs` 加 `retry`（job 级失败重试，0-3，仅无写步骤生效）；000026 新建 `pipeline_template_versions`（模板版本历史，删除模板级联清理）。000020 / 000023 的 `.down.sql` 都按规则反向回填调度列，回滚不丢配置。
 - 启动时自动 `m.Up()`；`sqlite3.Config{NoTxWrap:true}`（`PRAGMA foreign_keys` 在事务内无效）。
 - 存量库无 `schema_migrations` 但有 `users` 时 `Force(1)` 跳过 baseline。
 - **生产不自动执行 down**；需要回滚时用 CLI 或显式调用 `m.Steps(-1)` / `m.Down()`。

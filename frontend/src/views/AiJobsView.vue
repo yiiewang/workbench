@@ -31,6 +31,7 @@ const form = ref({
   templateId: '',
   definition: '',
   allowWrite: '',
+  retry: 0,
 })
 const runsOpen = ref(new Set<number>())
 
@@ -66,7 +67,7 @@ function parseJSONField(raw: string, label: string): unknown {
 
 function buildBody(): any {
   const allowWrite = form.value.allowWrite.split(',').map(x => x.trim()).filter(Boolean)
-  const common: any = { name: form.value.name.trim(), cronExpr: form.value.cronExpr.trim(), enabled: form.value.enabled, allowWrite }
+  const common: any = { name: form.value.name.trim(), cronExpr: form.value.cronExpr.trim(), enabled: form.value.enabled, allowWrite, retry: form.value.retry }
   if (form.value.targetType === 'ai') {
     const prompt = form.value.prompt.trim()
     return { ...common, prompt, target: { type: 'ai', prompt } }
@@ -112,6 +113,7 @@ function fillForm(j: AIJob) {
     templateId: t?.templateId ? String(t.templateId) : '',
     definition: t?.definition ? JSON.stringify(t.definition, null, 2) : '',
     allowWrite: (j.allowWrite || []).join(', '),
+    retry: j.retry || 0,
   }
 }
 
@@ -159,7 +161,7 @@ watch(selected, async (sel) => {
     form.value = {
       name: '', cronExpr: '0 18 * * *', prompt: '', enabled: true,
       targetType: 'ai', tool: '', toolParams: '', method: 'GET', path: '',
-      query: '', body: '', templateId: '', definition: '', allowWrite: '',
+      query: '', body: '', templateId: '', definition: '', allowWrite: '', retry: 0,
     }
     return
   }
@@ -365,6 +367,10 @@ function statusText(j: AIJob): string {
             <label>静态预授权（逗号分隔，写类工具或非 GET 接口）</label>
             <input v-model="form.allowWrite" class="form-input mono" placeholder="notify_user, api/tasks" />
             <p class="form-hint">定时执行无人审批，写操作必须在创建时显式列出；未列出的步骤会失败。</p>
+          </div>
+          <div class="form-row">
+            <label>失败重试次数（0-3，仅无写步骤时生效）</label>
+            <input v-model.number="form.retry" type="number" min="0" max="3" class="form-input" style="max-width: 120px" />
           </div>
           <div class="form-row form-row-inline">
             <label class="switch-label">

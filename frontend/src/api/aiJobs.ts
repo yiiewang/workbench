@@ -28,6 +28,7 @@ export interface AIJob {
   targetType?: AIJobTargetType
   target?: AIJobTarget
   allowWrite?: string[]
+  retry?: number
   lastRunAt?: string
   lastStatus?: string
   createdAt?: string
@@ -42,6 +43,7 @@ export interface AIJobBody {
   allowWrite?: string[]
   context?: Record<string, unknown>
   notify?: Record<string, unknown>
+  retry?: number
 }
 
 export async function listAIJobs(): Promise<{ jobs: AIJob[] }> {

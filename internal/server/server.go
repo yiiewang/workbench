@@ -235,6 +235,8 @@ func (s *Server) App() *iris.Application {
 	api.Put("/pipeline/templates/{id}", auth, s.handlePipelineTemplateUpdate)
 	api.Delete("/pipeline/templates/{id}", auth, s.handlePipelineTemplateDelete)
 	api.Post("/pipeline/templates/{id}/run", auth, s.handlePipelineTemplateRun)
+	api.Get("/pipeline/templates/{id}/versions", auth, s.handlePipelineTemplateVersions)
+	api.Post("/pipeline/templates/{id}/versions/{version}/restore", auth, s.handlePipelineTemplateRestore)
 	// 通用定时触发规则（schedule 只按 target_type 分发，目标归属在装配层校验）
 	api.Get("/schedule/triggers", auth, s.handleScheduleTriggersList)
 	api.Get("/schedule/triggers/{id}", auth, s.handleScheduleTriggerGet)

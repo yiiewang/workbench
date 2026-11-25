@@ -80,6 +80,21 @@ export async function runPipelineTemplate(id: number): Promise<{ runId: string; 
   return apiCall(`/api/pipeline/templates/${id}/run`, { method: 'POST' })
 }
 
+/** 模板版本历史（每次保存/回滚产生新版本） */
+export interface PipelineTemplateVersion {
+  version: number
+  name: string
+  createdAt?: string
+}
+
+export async function listPipelineTemplateVersions(id: number): Promise<{ versions: PipelineTemplateVersion[] }> {
+  return apiCall(`/api/pipeline/templates/${id}/versions`)
+}
+
+export async function restorePipelineTemplateVersion(id: number, version: number): Promise<{ version: number }> {
+  return apiCall(`/api/pipeline/templates/${id}/versions/${version}/restore`, { method: 'POST' })
+}
+
 /** 直接提交一份 Definition 执行（不落模板） */
 export async function runPipeline(definition: unknown): Promise<{ runId: string; started: boolean }> {
   return apiCall('/api/pipeline/run', {

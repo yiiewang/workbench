@@ -259,6 +259,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | 能力 | 入口 / 接口 | 说明 |
 |---|---|---|
 | 模板 CRUD | `GET` · `POST` `/api/pipeline/templates`、`GET` · `PUT` · `DELETE` `/api/pipeline/templates/{id}` | 模板只存 `{name, definition}` 纯 Definition JSON；列表不含 definition，详情才返回；按 org+user 隔离 |
+| 版本历史 | `GET /api/pipeline/templates/{id}/versions`、`POST .../versions/{version}/restore` | 创建写 v1，每次保存/回滚写新版本（最多展示 50 条）；回滚生成新版本，当前内容仍可找回；删除模板级联清理 |
 | 直接执行 | `POST /api/pipeline/run` | 提交 `{definition}` 后台异步执行，立即返回 `runId` |
 | 手动触发 | `POST /api/pipeline/templates/{id}/run` | 按 id 读模板 Definition 后台执行，返回 `runId`；每次执行产生一条 `pipeline_runs` |
 | 定时触发 | `GET` · `POST` `/api/schedule/triggers`、`GET` · `PUT` · `DELETE` `/api/schedule/triggers/{id}` | 通用触发规则 `{targetType:"pipeline_template"|"job", targetId, cronExpr, enabled}`；每分钟扫描、CAS 租约占用（同分钟不重跑、长任务跨分钟不重复），`lastRunAt` / `lastStatus` 回写 |
@@ -294,6 +295,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | `target` | 执行对象：`{type:"ai", prompt}` / `{type:"tool", tool, params?}` / `{type:"interface", method, path, query?, body?}` / `{type:"pipeline", templateId}` 或 `{type:"pipeline", definition}` |
 | `prompt` | 老字段兼容：只传 `prompt` 等价于 `target={type:"ai", prompt}`；`ai` 类型必填 |
 | `allowWrite` | 静态预授权清单：写类工具名（如 `notify_user`）或非 GET 的 `api/<path>`（如 `api/tasks`） |
+| `retry` | 失败重试次数 0-3；仅对无写步骤的执行生效，避免重跑写操作 |
 
 **四种执行对象**：`ai`（单 `llm` 步，自动附带本人任务数据与 RAG）、`tool`（单 `tool/<name>` 步）、`interface`（站内 `api/<path>` 单步）、`pipeline`（模板或内联 Definition，支持 DAG / `when` / `retry`）。执行时统一归一化为编排 Definition，由同一个 `runPipeline` 核心运行；步骤结果写入 `pipeline_runs`，任务级结果写入 `ai_job_runs`（含 `targetType`、`pipelineRunId`、`stepsSummary`、`durationMs`）。
 

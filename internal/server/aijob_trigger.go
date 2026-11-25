@@ -48,6 +48,16 @@ func (s *Server) triggerJob(ctx context.Context, t db.CronTriggerWithOwner) erro
 // runAIJobOnce 执行一次任务并投递结果邮件；返回执行错误供规则状态回写。
 func (s *Server) runAIJobOnce(ctx context.Context, job db.AIJobWithOwner) error {
 	res, err := s.execAIJob(ctx, job)
+	// 仅无写步骤时按 job.Retry 重试；写操作重跑可能重复副作用。
+	for attempt := 1; err != nil && res.Retryable && attempt <= job.Retry; attempt++ {
+		select {
+		case <-time.After(time.Duration(attempt) * 2 * time.Second):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		slog.Warn("retry scheduled job", "job", job.ID, "attempt", attempt)
+		res, err = s.execAIJob(ctx, job)
+	}
 	status := "ok"
 	errMsg := ""
 	if err != nil {

@@ -905,6 +905,7 @@ type aiJobBody struct {
 	AllowWrite []string        `json:"allowWrite,omitempty"`
 	Context    json.RawMessage `json:"context,omitempty"`
 	Notify     json.RawMessage `json:"notify,omitempty"`
+	Retry      int             `json:"retry,omitempty"`
 }
 
 // validateAIJobBody 校验：name/cron 必填；prompt 或 target 至少一项；
@@ -953,6 +954,9 @@ func validateAIJobBody(b *aiJobBody) string {
 	if len(b.AllowWrite) > 64 {
 		return "allowWrite too many entries (max 64)"
 	}
+	if b.Retry < 0 || b.Retry > 3 {
+		return "retry out of range (0-3)"
+	}
 	if b.Enabled == nil {
 		t := true
 		b.Enabled = &t
@@ -964,7 +968,7 @@ func validateAIJobBody(b *aiJobBody) string {
 func aiJobSpecFromBody(b *aiJobBody) db.AIJobSpec {
 	spec := db.AIJobSpec{
 		Name: b.Name, CronExpr: b.CronExpr, Prompt: b.Prompt, Enabled: *b.Enabled,
-		AllowWrite: b.AllowWrite,
+		AllowWrite: b.AllowWrite, Retry: b.Retry,
 	}
 	if len(b.Target) == 0 {
 		spec.TargetType = aiJobTypeAI
@@ -1005,6 +1009,7 @@ func aiJobPreview(spec db.AIJobSpec, orgID, userID int64) db.AIJobWithOwner {
 			Target:     json.RawMessage(spec.TargetJSON),
 			AllowWrite: spec.AllowWrite,
 			Context:    json.RawMessage(spec.ContextJSON),
+			Retry:      spec.Retry,
 		},
 		OrgID: orgID, UserID: userID,
 	}

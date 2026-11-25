@@ -114,6 +114,15 @@
   - `AiJobsView`：任务类型选择器（AI 提示词 / 工具 / 站内接口 / 编排）；工具参数、接口 method/path/query/body、模板 ID 或 Definition 分别编辑，`allowWrite` 逗号分隔；编辑按 `target` 回填，启停只改规则不动 target
   - 模板引用：`target.templateId` 走现有 `/api/pipeline/templates`，执行时读 Definition；外部 MCP 沿用 `allowWrite` 白名单判定（`NeedApproval` 工具必须在清单中），未额外放宽
   - 测试：000024 往返、后端全量 `go test`、前端 `vue-tsc` + `pnpm build` 全绿
+- **定时任务 P2：job 级失败重试（迁移 000025）**：`ai_jobs.retry`（0-3）仅对**无写步骤**的执行生效（`allowWrite` 为空），避免重跑写操作造成重复副作用：
+  - 重试按 2s/4s/6s 退避，每次尝试各落一条 `pipeline_runs`；最终只写一条 `ai_job_runs`（最后一次输出 + 总耗时 + 错误）
+  - 有写步骤的任务即使配置 `retry` 也不重试，审计日志与执行历史仍记录首次结果
+  - REST、`create_ai_job` / `update_ai_job` 工具与 `/jobs` 表单均支持 `retry`；迁移 000025 加列默认 0，down 可回滚
+- **定时任务 P2：模板版本化与 MCP 审计（迁移 000026）**：
+  - `pipeline_template_versions` 表：创建模板写 v1，每次保存写新版本；`GET /api/pipeline/templates/{id}/versions`、`POST .../versions/{version}/restore` 支持回滚（回滚也写新版本，当前内容不丢）；删除模板级联清理版本
+  - `/pipelines` 模板页新增「版本历史」卡片：列表 + 回滚，回滚后自动重载 Definition
+  - 外部 MCP 定时执行仍按 `allowWrite` 白名单，审计日志新增 `mcpSteps`（`tool/mcp_*` 步骤）便于追踪外部调用
+  - 测试：模板版本递增 / 隔离 / 回滚 / 级联删除、000026 建表与回滚；`make check`、`vue-tsc`、`pnpm build` 全绿
 - **通用定时触发规则（调度领域自己的持久化对象）**：`schedule_triggers` 表 + `GET/POST /api/schedule/triggers`、`GET/PUT/DELETE /{id}`，让任何领域对象都能成为「可被 schedule 执行的目标」：
   - 迁移 000019 建表（org/user、`target_type`、`target_id`、`cron_expr`、`enabled`、`last_run_at/last_status` + owner/enabled/target 三个索引），并从 000018 的 `pipeline_templates` **回填**已有 cron 配置（含停用状态与最近执行状态；纯手动模板不产生规则）；`internal/db/cron_triggers.go` 提供 CRUD、按类型/目标可选过滤、启用规则全库扫描、分钟键状态回写、按目标批量删除
   - `internal/schedule/triggers.go`：`TriggerHandler func(ctx, db.CronTriggerWithOwner) error` + handlers 注册表；`cron_triggers_runner` 每分钟只扫通用规则、按 `target_type` 分发、`YYYY-MM-DD HH:mm` 分钟键防重，非法 cron / 未注册类型各记状态互不阻塞，15min 超时 + 独立 ctx 回写；复用现有 `Job`/`Scheduler`，调度内核不动，**schedule 生产代码零 pipeline 标识符**

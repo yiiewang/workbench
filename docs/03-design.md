@@ -358,19 +358,22 @@ triggerJob（定时任务：ResolveTarget 归一化后进入同一核心）
 | 000020 | 模板表纯化：建新表 → 复制 → 删旧表 → 改名，删掉 4 个调度列 | | |
 | 000021 | AI 会话消息表（`ai_session_messages`，行级消息） | 000022 | `ai_jobs` 执行对象：target 五列 + `prompt` 回填 |
 | 000023 | 调度收敛：`ai_jobs` 去 4 个调度列 + `schedule_triggers.lease_until` + job 规则回填 | 000024 | `ai_job_runs` 详情列（run id / steps / 耗时） |
+| 000025 | `ai_jobs.retry`（job 级失败重试，0-3，仅无写步骤生效） | | |
+| 000026 | `pipeline_template_versions`（模板版本历史） | | |
 
 000020 是 SQLite 无 `DROP COLUMN` 时的标准重建写法；其 `.down.sql` 建回 `pipeline_templates_legacy`，按 `target_type='pipeline_template'` 从 `schedule_triggers` 取最近一条反向回填调度列。
 
-### 6.2 现行表清单（23 项，含虚拟表与框架表）
+### 6.2 现行表清单（24 项，含虚拟表与框架表）
 
 | 组 | 表 | 关键列 / 约束 |
 |---|---|---|
 | 组织权限 | `orgs`、`roles`、`users`、`user_orgs`、`user_org_feature`、`app_secrets`、`rate_limits` | `users` 含 `is_platform_admin`/`revision`/`email`；`user_org_feature` 唯一 `(user_id,org_id,feature_code)` |
 | 业务 | `tasks`、`shares`、`notify_log` | `tasks.PK(id,user_id,org_id)` + `files`/`scheduled_time`/`due_time`；`notify_log` 唯一 `(topic,dedup_key,notify_date)` |
-| AI 会话调度 | `ai_sessions`、`ai_jobs`、`ai_job_runs` | `ai_sessions.messages` 为前端快照 JSON；`ai_jobs` 只存执行定义（`target_type`/`target_json`/`allow_write`/context/notify，无调度列）；`ai_job_runs` 含 `target_type`/`pipeline_run_id`/`steps_summary`/`err_msg`/`duration_ms`/`finished_at` |
+| AI 会话调度 | `ai_sessions`、`ai_jobs`、`ai_job_runs` | `ai_sessions.messages` 为前端快照 JSON；`ai_jobs` 只存执行定义（`target_type`/`target_json`/`allow_write`/context/notify/`retry`，无调度列）；`ai_job_runs` 含 `target_type`/`pipeline_run_id`/`steps_summary`/`err_msg`/`duration_ms`/`finished_at` |
 | **后台运行** | `ai_runs` | `id TEXT PK`、org/user、`qa_id`/`session_id`、`status running/done/failed`、`events JSON`、`result`、`err_msg`、时间戳；索引 `(org_id,user_id,started_at DESC)` |
 | **编排运行** | `pipeline_runs` | `id TEXT PK`、org/user、`name`、`definition JSON`、`status`、`steps JSON`、`err_msg`、时间戳；同款 owner 索引 |
 | **编排模板** | `pipeline_templates` | `id INTEGER PK AUTOINCREMENT`、org/user、`name`、`definition JSON`（纯 Definition，不含调度字段）、时间戳；索引 `(org_id,user_id,id DESC)` |
+| **模板版本** | `pipeline_template_versions` | `template_id`、org/user、`version`、`name`、`definition JSON`、`created_at`；唯一 `(template_id,version)`，owner 索引；删除模板级联清理 |
 | **通用触发规则** | `schedule_triggers` | `id`、org/user、`target_type`（`pipeline_template` / `job`）、`target_id`、`cron_expr`、`enabled`、`last_run_at`/`last_status`、`lease_until`、时间戳；索引含 owner、enabled 与 `(target_type,target_id)` |
 | RAG | `file_index_state`、`file_chunks`、`rag_meta`、`file_chunk_fts`、`file_chunk_vec` | `file_chunks.chunk_index=-1` 为摘要卡；FTS5 `tokenize=trigram`，`rowid = file_chunks.id`；vec0 的 `owner = "orgID:userID"` 为分区键，**运行时由 `EnsureVecIndex` 创建，不在迁移脚本中** |
 | 框架 | `schema_migrations` | golang-migrate 维护 |
@@ -446,6 +449,8 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | GET · POST | `/api/pipeline/templates` | 模板列表（不含 definition）/ 创建 |
 | GET · PUT · DELETE | `/api/pipeline/templates/{id}` | 详情（含 definition）/ 覆盖更新 / 删除（级联清触发规则） |
 | POST | `/api/pipeline/templates/{id}/run` | 手动触发，返回 `runId` |
+| GET | `/api/pipeline/templates/{id}/versions` | 版本列表（version / name / createdAt） |
+| POST | `/api/pipeline/templates/{id}/versions/{version}/restore` | 回滚到指定版本（写新版本，返回新版本号） |
 | GET · POST | `/api/schedule/triggers` | 规则列表（可按 `targetType`/`targetId` 过滤）/ 创建 |
 | GET · PUT · DELETE | `/api/schedule/triggers/{id}` | 规则详情 / 更新 / 删除 |
 

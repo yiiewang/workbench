@@ -14,8 +14,106 @@ const runs = ref<AIJobRun[]>([])
 const runsLoading = ref(false)
 const saving = ref(false)
 
-const form = ref({ name: '', cronExpr: '', prompt: '', enabled: true })
+type TargetType = 'ai' | 'tool' | 'interface' | 'pipeline'
+
+const form = ref({
+  name: '',
+  cronExpr: '',
+  prompt: '',
+  enabled: true,
+  targetType: 'ai' as TargetType,
+  tool: '',
+  toolParams: '',
+  method: 'GET',
+  path: '',
+  query: '',
+  body: '',
+  templateId: '',
+  definition: '',
+  allowWrite: '',
+})
 const runsOpen = ref(new Set<number>())
+
+function validateForm(): string {
+  if (!form.value.name.trim()) return '任务名称必填'
+  if (!form.value.cronExpr.trim()) return 'cron 表达式必填'
+  switch (form.value.targetType) {
+    case 'ai':
+      if (!form.value.prompt.trim()) return 'AI 提示词必填'
+      break
+    case 'tool':
+      if (!form.value.tool.trim()) return '工具名必填'
+      break
+    case 'interface':
+      if (!form.value.path.trim()) return '接口路径必填'
+      break
+    case 'pipeline':
+      if (!form.value.templateId.trim() && !form.value.definition.trim()) return '编排模板 ID 或 Definition 必填'
+      break
+  }
+  return ''
+}
+
+function parseJSONField(raw: string, label: string): unknown {
+  const s = raw.trim()
+  if (!s) return undefined
+  try {
+    return JSON.parse(s)
+  } catch {
+    throw new Error(label + ' 不是合法 JSON')
+  }
+}
+
+function buildBody(): any {
+  const allowWrite = form.value.allowWrite.split(',').map(x => x.trim()).filter(Boolean)
+  const common: any = { name: form.value.name.trim(), cronExpr: form.value.cronExpr.trim(), enabled: form.value.enabled, allowWrite }
+  if (form.value.targetType === 'ai') {
+    const prompt = form.value.prompt.trim()
+    return { ...common, prompt, target: { type: 'ai', prompt } }
+  }
+  switch (form.value.targetType) {
+    case 'tool':
+      return { ...common, target: { type: 'tool', tool: form.value.tool.trim(), params: parseJSONField(form.value.toolParams, '工具参数') } }
+    case 'interface':
+      return {
+        ...common,
+        target: {
+          type: 'interface',
+          method: form.value.method,
+          path: form.value.path.trim(),
+          query: parseJSONField(form.value.query, 'query'),
+          body: parseJSONField(form.value.body, 'body'),
+        },
+      }
+    case 'pipeline': {
+      const templateId = Number(form.value.templateId)
+      if (Number.isFinite(templateId) && templateId > 0) {
+        return { ...common, target: { type: 'pipeline', templateId } }
+      }
+      return { ...common, target: { type: 'pipeline', definition: parseJSONField(form.value.definition, 'Definition') } }
+    }
+  }
+}
+
+function fillForm(j: AIJob) {
+  const t = j.target
+  form.value = {
+    name: j.name,
+    cronExpr: j.cronExpr,
+    prompt: t?.prompt || j.prompt || '',
+    enabled: j.enabled,
+    targetType: (j.targetType || t?.type || 'ai') as TargetType,
+    tool: t?.tool || '',
+    toolParams: t?.params ? JSON.stringify(t.params, null, 2) : '',
+    method: t?.method || 'GET',
+    path: t?.path || '',
+    query: t?.query ? JSON.stringify(t.query, null, 2) : '',
+    body: t?.body ? JSON.stringify(t.body, null, 2) : '',
+    templateId: t?.templateId ? String(t.templateId) : '',
+    definition: t?.definition ? JSON.stringify(t.definition, null, 2) : '',
+    allowWrite: (j.allowWrite || []).join(', '),
+  }
+}
 
 const CRON_PRESETS: { label: string; expr: string }[] = [
   { label: '每天 18:00', expr: '0 18 * * *' },
@@ -58,14 +156,18 @@ async function loadRuns(id: number) {
 watch(selected, async (sel) => {
   runs.value = []
   if (sel === 'new') {
-    form.value = { name: '', cronExpr: '0 18 * * *', prompt: '', enabled: true }
+    form.value = {
+      name: '', cronExpr: '0 18 * * *', prompt: '', enabled: true,
+      targetType: 'ai', tool: '', toolParams: '', method: 'GET', path: '',
+      query: '', body: '', templateId: '', definition: '', allowWrite: '',
+    }
     return
   }
   if (typeof sel === 'number') {
     if (!jobs.value.length) await loadJobs()
     const j = jobs.value.find(x => x.id === sel)
     if (j) {
-      form.value = { name: j.name, cronExpr: j.cronExpr, prompt: j.prompt, enabled: j.enabled }
+      fillForm(j)
       loadRuns(sel)
     }
   }
@@ -78,19 +180,21 @@ function notifyChanged() {
 }
 
 async function save() {
-  if (!form.value.name.trim() || !form.value.prompt.trim()) {
-    showToast('名称和执行内容必填')
+  const msg = validateForm()
+  if (msg) {
+    showToast(msg)
     return
   }
   saving.value = true
   try {
+    const body = buildBody()
     if (selected.value === 'new') {
-      const data = await createAIJob(form.value)
+      const data = await createAIJob(body)
       showToast('已创建，下一分钟生效')
       await loadJobs()
       router.replace({ query: { id: String(data.id) } })
     } else if (typeof selected.value === 'number') {
-      await updateAIJob(selected.value, form.value)
+      await updateAIJob(selected.value, body)
       showToast('已更新')
       await loadJobs()
     }
@@ -106,7 +210,7 @@ async function toggle() {
   const j = selectedJob.value
   if (!j) return
   try {
-    await updateAIJob(j.id, { ...form.value, enabled: !j.enabled })
+    await updateAIJob(j.id, { name: j.name, cronExpr: j.cronExpr, prompt: j.prompt, enabled: !j.enabled, target: j.target, allowWrite: j.allowWrite })
     form.value.enabled = !j.enabled
     await loadJobs()
     notifyChanged()
@@ -196,10 +300,71 @@ function statusText(j: AIJob): string {
             </div>
           </div>
           <div class="form-row">
-            <label>执行内容（到点后 AI 收到的指令）</label>
-            <textarea v-model="form.prompt" class="form-input" rows="8"
-              placeholder="如：总结我今天完成的任务和进展，生成一份简短的工作日报，指出明天应优先处理的事项。"></textarea>
-            <p class="form-hint">执行时 AI 会自动附带你的任务列表，结果作为邮件正文发送到你的邮箱。</p>
+            <label>任务类型</label>
+            <select v-model="form.targetType" class="form-input" :disabled="selectedJob?.isGlobal">
+              <option value="ai">AI 提示词</option>
+              <option value="tool">单个工具</option>
+              <option value="interface">站内接口</option>
+              <option value="pipeline">编排流程</option>
+            </select>
+          </div>
+
+          <template v-if="form.targetType === 'ai'">
+            <div class="form-row">
+              <label>执行内容（到点后 AI 收到的指令）</label>
+              <textarea v-model="form.prompt" class="form-input" rows="8"
+                placeholder="如：总结我今天完成的任务和进展，生成一份简短的工作日报，指出明天应优先处理的事项。"></textarea>
+              <p class="form-hint">执行时 AI 会自动附带你的任务列表，结果作为邮件正文发送到你的邮箱。</p>
+            </div>
+          </template>
+
+          <template v-else-if="form.targetType === 'tool'">
+            <div class="form-row">
+              <label>工具名</label>
+              <input v-model="form.tool" class="form-input mono" placeholder="如：list_tasks" />
+            </div>
+            <div class="form-row">
+              <label>工具参数（JSON，可选）</label>
+              <textarea v-model="form.toolParams" class="form-input mono" rows="4" placeholder='{"limit": 20}'></textarea>
+            </div>
+          </template>
+
+          <template v-else-if="form.targetType === 'interface'">
+            <div class="form-row">
+              <label>请求方法与路径（站内 /api/*）</label>
+              <div class="target-inline">
+                <select v-model="form.method" class="form-input" style="max-width: 110px">
+                  <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option>
+                </select>
+                <input v-model="form.path" class="form-input mono" placeholder="tasks/open" />
+              </div>
+            </div>
+            <div class="form-row">
+              <label>query（JSON，可选）</label>
+              <textarea v-model="form.query" class="form-input mono" rows="3" placeholder='{"date": "2026-11-25"}'></textarea>
+            </div>
+            <div class="form-row">
+              <label>body（JSON，可选）</label>
+              <textarea v-model="form.body" class="form-input mono" rows="3" placeholder='{"status": "done"}'></textarea>
+            </div>
+          </template>
+
+          <template v-else>
+            <div class="form-row">
+              <label>编排模板 ID（优先；留空则用下方 Definition）</label>
+              <input v-model="form.templateId" class="form-input mono" placeholder="如：3" />
+            </div>
+            <div class="form-row">
+              <label>Definition（JSON，可选）</label>
+              <textarea v-model="form.definition" class="form-input mono" rows="8"
+                placeholder='{"name":"收盘总结","steps":[{"id":"run","uses":"llm"}]}'></textarea>
+            </div>
+          </template>
+
+          <div class="form-row">
+            <label>静态预授权（逗号分隔，写类工具或非 GET 接口）</label>
+            <input v-model="form.allowWrite" class="form-input mono" placeholder="notify_user, api/tasks" />
+            <p class="form-hint">定时执行无人审批，写操作必须在创建时显式列出；未列出的步骤会失败。</p>
           </div>
           <div class="form-row form-row-inline">
             <label class="switch-label">
@@ -224,9 +389,13 @@ function statusText(j: AIJob): string {
                 {{ r.status === 'ok' ? '✓' : '✕' }}
               </span>
               <span class="aijob-run-time">{{ r.ranAt }}</span>
+              <span v-if="r.targetType" class="aijob-run-type">{{ r.targetType }}</span>
               <span class="aijob-run-toggle">{{ runsOpen.has(i) ? '收起' : '查看输出' }}</span>
             </button>
-            <pre v-show="runsOpen.has(i)" class="aijob-run-output">{{ r.output || '（无输出）' }}</pre>
+            <div v-show="runsOpen.has(i)" class="aijob-run-detail">
+              <pre class="aijob-run-output">{{ r.output || '（无输出）' }}</pre>
+              <a v-if="r.pipelineRunId" class="aijob-run-link" :href="`/pipelines?run=${r.pipelineRunId}`" target="_blank" rel="noopener">查看编排运行详情</a>
+            </div>
           </div>
         </div>
       </section>
@@ -335,4 +504,14 @@ textarea.form-input { resize: vertical; line-height: 1.6; }
   background: var(--code-bg);
 }
 .btn-danger-ghost { color: #a04040; }
+.target-inline { display: flex; gap: 8px; }
+.target-inline .form-input { min-width: 0; }
+.aijob-run-type {
+  font-size: 10px; color: var(--text-muted); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0 6px; flex-shrink: 0;
+}
+.aijob-run-detail { border-top: 1px solid var(--border); }
+.aijob-run-detail .aijob-run-output { border-top: none; }
+.aijob-run-link { display: inline-block; padding: 6px 12px 10px; font-size: 11px; color: var(--accent); text-decoration: none; }
+.aijob-run-link:hover { text-decoration: underline; }
 </style>

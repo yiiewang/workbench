@@ -60,8 +60,16 @@ func runCronTriggers(ctx context.Context, fireAt time.Time, database *db.DB, han
 			_ = database.MarkCronTriggerRun(ctx, t.ID, "error: unknown target type "+t.TargetType, nowKey)
 			continue
 		}
-		// 先写分钟键占位：同分钟重复 tick / 进程重启都不会重跑
-		_ = database.MarkCronTriggerRun(ctx, t.ID, "running", nowKey)
+		// CAS 占用：同分钟重复 tick 不重跑；跨分钟的长任务由租约拦住
+		leaseUntil := local.Add(cronTriggerTimeout).Format("2006-01-02 15:04")
+		claimed, err := database.ClaimCronTrigger(ctx, t.ID, nowKey, leaseUntil)
+		if err != nil {
+			slog.Error("cron trigger claim failed", "trigger", t.ID, "err", err)
+			continue
+		}
+		if !claimed {
+			continue
+		}
 		item, fn := t, handler
 		go func() {
 			runCtx, cancel := context.WithTimeout(context.Background(), cronTriggerTimeout)

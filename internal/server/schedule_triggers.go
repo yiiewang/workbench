@@ -17,6 +17,7 @@ import (
 // 新增领域对象时，只需在 server.go 注册 handler 并在这里加一行。
 var supportedTriggerTargets = map[string]bool{
 	"pipeline_template": true,
+	"job":               true,
 }
 
 type scheduleTriggerBody struct {
@@ -56,6 +57,9 @@ func (s *Server) validateTriggerTarget(ctx iris.Context, targetType string, targ
 	case "pipeline_template":
 		_, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), targetID)
 		return ok, err
+	case "job":
+		job, err := s.db.GetAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), targetID)
+		return job != nil, err
 	}
 	return false, nil
 }

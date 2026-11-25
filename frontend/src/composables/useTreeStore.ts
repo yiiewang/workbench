@@ -103,6 +103,17 @@ export function useTreeStore() {
     }
   }
 
+  /** 父目录清单已加载且该名字在 files 里 → 确定是文件。
+   *  对文件调 loadDir 必 404，expandTo 探测前先据此跳过（打开文件不再多一条 /api/tree 404）。 */
+  function knownFile(path: string): boolean {
+    const slash = path.lastIndexOf('/')
+    const parent = slash <= 0 ? '/' : path.slice(0, slash)
+    const data = dirCache.get(parent)
+    if (!data) return false
+    const name = path.slice(slash + 1)
+    return (data.files || []).some(f => f.name === name)
+  }
+
   /** expand all ancestor directories and load data for the target path.
    *  If target is a directory, also expand it (so children are visible).
    *  注意：最后一段可能是文件（loadDir 只接受目录路径，对文件调会 404），
@@ -120,7 +131,7 @@ export function useTreeStore() {
     // 如果 target 本身是目录（已在 dirCache），加载并展开
     if (dirCache.has(targetPath)) {
       expanded.add(targetPath)
-    } else if (parts.length > 0) {
+    } else if (parts.length > 0 && !knownFile(targetPath)) {
       // target 可能是未加载的目录，尝试 loadDir（失败说明是文件，忽略）
       try {
         await loadDir(targetPath)

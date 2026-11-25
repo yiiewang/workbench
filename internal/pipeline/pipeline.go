@@ -148,6 +148,9 @@ func (d Definition) layers() ([][]int, error) {
 	return layers, nil
 }
 
+// ParseUses 导出给装配层做 uses 校验 / 调度黑名单（内部执行仍用 parseUses）。
+func ParseUses(uses string) (kind, name string, ok bool) { return parseUses(uses) }
+
 // parseUses 拆出能力类别与名称；llm 这类无名称的类别 name 为空
 func parseUses(uses string) (kind, name string, ok bool) {
 	if uses == "" {

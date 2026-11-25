@@ -249,8 +249,17 @@ var aiTools = []aiTool{
 				"jobId":    map[string]any{"type": "integer", "description": "任务 ID（可用 list_ai_jobs 查询），必填"},
 				"name":     map[string]any{"type": "string", "description": "新名称"},
 				"cronExpr": map[string]any{"type": "string", "description": "新 cron 表达式（分 时 日 月 周）"},
-				"prompt":   map[string]any{"type": "string", "description": "新执行指令"},
-				"enabled":  map[string]any{"type": "boolean", "description": "启用/停用"},
+				"prompt":   map[string]any{"type": "string", "description": "新 AI 提示词"},
+				"target": map[string]any{
+					"type":        "object",
+					"description": "新执行对象：{type: ai|tool|interface|pipeline, ...}",
+				},
+				"allowWrite": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "静态预授权清单（覆盖原值）",
+				},
+				"enabled": map[string]any{"type": "boolean", "description": "启用/停用"},
 			},
 			"required": []string{"jobId"},
 		},
@@ -647,6 +656,7 @@ func execListAIJobs(s *Server, ctx iris.Context, args map[string]any) any {
 		items = append(items, map[string]any{
 			"id": j.ID, "name": j.Name, "cron": j.CronExpr,
 			"enabled": j.Enabled, "isGlobal": j.IsGlobal,
+			"targetType": j.TargetType, "target": j.Target, "allowWrite": j.AllowWrite,
 			"lastRunAt": j.LastRunAt, "lastStatus": j.LastStatus,
 		})
 	}
@@ -678,9 +688,13 @@ func execCreateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if b == nil {
 		return map[string]any{"error": msg}
 	}
-	id, err := s.db.CreateAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), b.Name, b.CronExpr, b.Prompt, *b.Enabled)
+	id, err := s.db.CreateAIJobWithSpec(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), aiJobSpecFromBody(b))
 	if err != nil {
 		return map[string]any{"error": "create ai job failed"}
+	}
+	if err := s.upsertAIJobTrigger(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), id, b.CronExpr, *b.Enabled); err != nil {
+		_ = s.db.DeleteAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), id)
+		return map[string]any{"error": "create ai job trigger failed"}
 	}
 	slog.Info("ai tool create ai job", "user", currentUserID(ctx), "job", b.Name, "cron", b.CronExpr)
 	return map[string]any{"ok": true, "jobId": id, "name": b.Name, "cron": b.CronExpr, "note": "下一分钟生效"}
@@ -700,7 +714,10 @@ func execUpdateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 		return map[string]any{"error": "job not found (系统公共任务不可修改)"}
 	}
 	// 合并：未提供的字段沿用现值
-	merged := &aiJobBody{Name: cur.Name, CronExpr: cur.CronExpr, Prompt: cur.Prompt}
+	merged := &aiJobBody{
+		Name: cur.Name, CronExpr: cur.CronExpr, Prompt: cur.Prompt,
+		Target: cur.Target, AllowWrite: cur.AllowWrite, Context: cur.Context, Notify: cur.Notify,
+	}
 	enabled := cur.Enabled
 	merged.Enabled = &enabled
 	if v, ok := args["name"].(string); ok && strings.TrimSpace(v) != "" {
@@ -715,11 +732,38 @@ func execUpdateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if v, ok := args["enabled"].(bool); ok {
 		merged.Enabled = &v
 	}
+	if v, ok := args["target"].(map[string]any); ok {
+		if raw, err := json.Marshal(v); err == nil {
+			merged.Target = raw
+		}
+	}
+	if v, ok := args["allowWrite"].([]any); ok {
+		list := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				list = append(list, s)
+			}
+		}
+		merged.AllowWrite = list
+	}
+	if v, ok := args["context"].(map[string]any); ok {
+		if raw, err := json.Marshal(v); err == nil {
+			merged.Context = raw
+		}
+	}
+	if v, ok := args["notify"].(map[string]any); ok {
+		if raw, err := json.Marshal(v); err == nil {
+			merged.Notify = raw
+		}
+	}
 	if msg := validateAIJobBody(merged); msg != "" {
 		return map[string]any{"error": msg}
 	}
-	if err := s.db.UpdateAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), merged.Name, merged.CronExpr, merged.Prompt, *merged.Enabled); err != nil {
+	if err := s.db.UpdateAIJobWithSpec(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), aiJobSpecFromBody(merged)); err != nil {
 		return map[string]any{"error": "update ai job failed"}
+	}
+	if err := s.upsertAIJobTrigger(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), merged.CronExpr, *merged.Enabled); err != nil {
+		return map[string]any{"error": "update ai job trigger failed"}
 	}
 	return map[string]any{"ok": true, "jobId": int64(jobID), "name": merged.Name, "cron": merged.CronExpr}
 }
@@ -736,6 +780,9 @@ func execDeleteAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	}
 	if cur == nil {
 		return map[string]any{"error": "job not found"}
+	}
+	if err := s.deleteAIJobTriggers(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID)); err != nil {
+		return map[string]any{"error": "delete ai job triggers failed"}
 	}
 	if err := s.db.DeleteAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID)); err != nil {
 		return map[string]any{"error": "delete ai job failed"}

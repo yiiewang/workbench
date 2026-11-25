@@ -390,7 +390,8 @@ func (s *Service) ReindexTree(ctx context.Context, orgID, userID int64, root str
 		if p.Processed%20 == 0 || p.Processed == p.Total {
 			slog.Info("rag: reindex progress", "owner", p.Owner,
 				"processed", p.Processed, "total", p.Total,
-				"indexed", stats.Indexed, "skipped", stats.Skipped, "failed", stats.Failed)
+				"indexed", stats.Indexed, "skipped", stats.Skipped, "failed", stats.Failed,
+				"pruned", stats.Pruned)
 		}
 	}
 	return stats, nil

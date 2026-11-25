@@ -46,7 +46,7 @@ func TestRunCronTriggersDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = d.CreateCronTrigger(ctx, 1, 2, "report_job", 8, "0 18 * * *", true) // 时刻不命中
+	_, _ = d.CreateCronTrigger(ctx, 1, 2, "report_job", 8, "0 18 * * *", true)  // 时刻不命中
 	_, _ = d.CreateCronTrigger(ctx, 1, 2, "report_job", 11, "0 9 * * *", false) // 停用
 	unknownID, _ := d.CreateCronTrigger(ctx, 1, 2, "mystery", 9, "0 9 * * *", true)
 	badID, _ := d.CreateCronTrigger(ctx, 1, 2, "report_job", 10, "not a cron", true)

@@ -150,11 +150,25 @@ func (d *DB) DeleteCronTriggersForTarget(ctx context.Context, orgID, userID int6
 	return err
 }
 
-// MarkCronTriggerRun 记录最近一次触发（分钟键用于 cron 防重）。
-// 注意按 id 更新即可：规则行本身已带归属，扫描时已完成用户隔离。
+// ClaimCronTrigger CAS 占用一次触发：同分钟不重跑，且租约未过期时不重复触发。
+// leaseUntil 为本次执行允许占用的截止时刻（YYYY-MM-DD HH:mm）。
+func (d *DB) ClaimCronTrigger(ctx context.Context, id int64, nowKey, leaseUntil string) (bool, error) {
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE schedule_triggers
+		 SET last_run_at = ?, lease_until = ?, last_status = 'running'
+		 WHERE id = ? AND last_run_at <> ? AND (lease_until = '' OR lease_until < ?)`,
+		nowKey, leaseUntil, id, nowKey, nowKey)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// MarkCronTriggerRun 记录最近一次触发结果并释放租约（分钟键用于 cron 防重）。
 func (d *DB) MarkCronTriggerRun(ctx context.Context, id int64, status, at string) error {
 	_, err := d.conn.ExecContext(ctx,
-		`UPDATE schedule_triggers SET last_run_at = ?, last_status = ?, updated_at = datetime('now') WHERE id = ?`,
+		`UPDATE schedule_triggers SET last_run_at = ?, last_status = ?, lease_until = '', updated_at = datetime('now') WHERE id = ?`,
 		at, status, id)
 	return err
 }

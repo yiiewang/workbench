@@ -124,6 +124,21 @@ func (s *Server) handleMkdir(ctx iris.Context) {
 	})
 }
 
+// indexIsDir 判断 RAG 索引清理是否按目录前缀处理。
+// 与操作目标的判定不同：符号链接删除/改名只动链接本身（Lstat 非目录），
+// 但链接指向目录时，索引里存的是 /link/... 子路径，需按前缀清理，故这里跟随链接（Stat）。
+// 断链时 Stat 失败，退化为非目录（精确路径清理）。
+func indexIsDir(fsPath string, info os.FileInfo) bool {
+	if info.IsDir() {
+		return true
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	target, err := os.Stat(fsPath)
+	return err == nil && target.IsDir()
+}
+
 // ============================================================
 // DELETE /api/file?path= — 删除文件或目录（目录递归，不可恢复）
 // ============================================================
@@ -147,13 +162,15 @@ func (s *Server) handleDeleteFile(ctx iris.Context) {
 		return
 	}
 
+	// 索引判定需在删除前算：删除后符号链接已不存在，Stat 无法再跟随
+	ragDir := indexIsDir(fsPath, info)
 	if err := os.RemoveAll(fsPath); err != nil {
 		serverError(ctx, "delete failed", err, "path", cleanRel)
 		return
 	}
 	// RAG 索引同步清理（目录递归删前缀）
 	if s.rag != nil {
-		s.rag.HandleDelete(currentOrgID(ctx), currentUserID(ctx), cleanRel, info.IsDir())
+		s.rag.HandleDelete(currentOrgID(ctx), currentUserID(ctx), cleanRel, ragDir)
 	}
 
 	slog.Info("fsop delete", "user", currentUserID(ctx), "org", currentOrgID(ctx), "path", cleanRel, "isDir", info.IsDir())
@@ -195,6 +212,8 @@ func (s *Server) handleRename(ctx iris.Context) {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "Already exists")
 		return
 	}
+	// 索引判定需在改名之前算：改名后符号链接原路径已不存在，Stat 无法再跟随
+	ragDir := indexIsDir(srcFs, info)
 	if err := os.Rename(srcFs, dst); err != nil {
 		serverError(ctx, "rename failed", err, "path", srcRel, "newName", newName)
 		return
@@ -202,7 +221,7 @@ func (s *Server) handleRename(ctx iris.Context) {
 	newRel := strings.TrimSuffix(filepath.Dir(srcRel), "/") + "/" + newName
 	// RAG 索引路径改写（内容与向量不变）
 	if s.rag != nil {
-		s.rag.HandleRename(currentOrgID(ctx), currentUserID(ctx), srcRel, newRel, info.IsDir())
+		s.rag.HandleRename(currentOrgID(ctx), currentUserID(ctx), srcRel, newRel, ragDir)
 	}
 
 	slog.Info("fsop rename", "user", currentUserID(ctx), "org", currentOrgID(ctx), "path", srcRel, "newName", newName)
@@ -260,6 +279,8 @@ func (s *Server) handleMove(ctx iris.Context) {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "Already exists in destination")
 		return
 	}
+	// 索引判定需在移动之前算：移动后符号链接原路径已不存在，Stat 无法再跟随
+	ragDir := indexIsDir(srcFs, info)
 	if err := os.Rename(srcFs, dst); err != nil {
 		serverError(ctx, "move failed", err, "path", srcRel, "dest", dstRel)
 		return
@@ -268,7 +289,7 @@ func (s *Server) handleMove(ctx iris.Context) {
 	newPath := strings.TrimSuffix(dstRel, "/") + "/" + name
 	// RAG 索引路径改写（内容与向量不变）
 	if s.rag != nil {
-		s.rag.HandleRename(currentOrgID(ctx), currentUserID(ctx), srcRel, newPath, info.IsDir())
+		s.rag.HandleRename(currentOrgID(ctx), currentUserID(ctx), srcRel, newPath, ragDir)
 	}
 	slog.Info("fsop move", "user", currentUserID(ctx), "org", currentOrgID(ctx), "path", srcRel, "dest", dstRel)
 	writeOK(ctx, map[string]interface{}{"path": newPath})

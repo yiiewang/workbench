@@ -1,6 +1,6 @@
 # 配置与运维
 
-> 面向：部署运维、开发者 ｜ 代码基线：`v1.3.0-25-g517f88c`
+> 面向：部署运维、开发者 ｜ 代码基线：`v1.3.0-26-gc0577c4` + 工作树迁移 000021–000024
 > 首次启动见 [`01-getting-started.md`](01-getting-started.md)；构建与发布见 [`04-build-and-release.md`](04-build-and-release.md)；功能参数见 [`02-functional-guide.md`](02-functional-guide.md)。
 
 ## 1. 配置加载与合并语义
@@ -25,7 +25,7 @@
 | `server` | `port` / `static_dir` / `allow_symlink` / `hidden` | `8080` / `./static` / `false` / `.*,*.zip,*.tar,*.gz,*.tgz,*.rar,*.7z,*.bz2,*.xz` | `8001` / `./preview` / `false` / 使用默认 |
 | `database` | `path` | `./data/workbench.db` | 同 |
 | `auth` | `token_expiry_days` / `admin_setup_token` | `30` / `""` | `7` / 环境变量注入 |
-| `routes` | 路径 → `__spa__` / `__listdir__` / 别名 / 302 目标 | 3 个历史键 | 全部 SPA 入口 |
+| `routes` | 路径 → `__spa__` / `__listdir__` / 别名 / 302 目标 | 3 个历史键 | 全部 SPA 入口（示例共 13 个 `__spa__` 键，含 `/pipelines`） |
 | `logging` | `dir` / `level` | `~/.local/state/workbench` / `info` | `logs` / `info` |
 | `ai.chat` | `base_url` / `api_key` / `model` / `tools` | OpenAI 默认端点 / `""` / `gpt-4o-mini` / `false` | 内部网关 / 环境变量 / `hy4` / `true` |
 | `ai.embedding` | `base_url` / `api_key` / `model` / `dim` / `max_distance` / `judge_model` / `digest_model` | `""`/`""`/`""`/`1024`/`0.9`/`""`/`""` | 模型网关 / `Qwen3-Embedding-8B` / `1024` / `0.9` / `deepseek-flash` ×2 |
@@ -57,7 +57,8 @@
 | RAG 语义检索 | `ai.embedding.base_url` 与 `model` 非空 | `s.rag == nil`，写钩子与检索静默跳过；`reindex` 返回 `50301` |
 | 相关性预判 / 摘要卡 | `judge_model` / `digest_model` 非空 | 关闭，不影响检索 |
 | 外部 MCP 工具 | `ai.mcp.servers` 配置有效 | 无外部工具；配置缺 `name`/`url` 启动 fail fast，服务不可达仅告警跳过 |
-| 定时调度 | `schedule.enabled: true` | 不启动 cron，任务提醒与 AI 定时任务都不执行 |
+| 定时调度 | `schedule.enabled: true` | 不启动 cron，任务提醒、定时任务与通用触发规则（模板 / job）都不执行 |
+| 通用定时触发 | `schedule.enabled: true` + 规则 `enabled=true` + 合法 `cronExpr` + 目标（模板 / job）存在且归属当前身份 | `cron_triggers_runner` 不扫描或跳过该规则；手动触发与 `POST /api/pipeline/run` 直调不受影响 |
 | 邮件通知 | `notify.email.enabled: true` **且** `schedule.enabled: true`，`host`/`user` 非空、`EMAIL_PASS` 已注入 | 事件照常发布但无订阅者；配置缺失时启动直接报错 |
 | 邮件跳转按钮 | `site_url` 为合法 http(s) 地址 | 邮件不含任何链接（避免 `localhost` 死链） |
 
@@ -122,7 +123,7 @@
 | 手段 | 作用 |
 |---|---|
 | `GET /api/ai/index-status` | 汇总 `files/chunks/errors` + 明细（最多 500 条），可看到路径、块数、错误状态 |
-| AI 面板「索引状态」抽屉 | 同上，绿点 ok / 红点失败，可刷新 |
+| AI 面板左栏「索引状态」tab | 同上，绿点 ok / 红点失败，可刷新；原独立抽屉已并入左栏三 tab |
 | `POST /api/ai/reindex` | **按 owner 清孤儿索引** + 重建现存文件；进度 `pruned` 显示清理数量 |
 | `make ragclean` | 默认按 `junkPath`（`/.`、`node_modules`、`__pycache__`、`vendor`、`target`）清隐藏/依赖目录索引；不处理孤儿（已由 reindex 负责），也不删 FTS 行 |
 | `make ragclean ARGS=--reset` | **全表（所有用户）重置**：`DROP file_chunk_vec`、`DROP file_chunk_fts`、`DELETE file_chunks`、`DELETE file_index_state`、清 `rag_meta(vec_dim)`、`VACUUM` |
@@ -168,12 +169,13 @@ HTTP 与 Agent 共用同一套「RAG 可用性检查 → org:user 防重 → 后
 - **备份必须包含 `-wal` / `-shm`**，或使用 SQLite 在线备份 API / `VACUUM INTO`；只复制主库文件可能丢失未 checkpoint 的写入。
 - `app_secrets` 存 token 签名密钥（`LoadOrCreateSecret`，兼容迁移旧 `.token_secret` 文件）。**token 无法单独吊销**：轮换该密钥或删库重建会使全部 token 失效，所有用户需重新登录。
 - 用户文件在 `static_dir/{orgName}/{userName}/`，需与数据库一起备份；两者是「整数 id 存储 / 名称路径」双轨，改名需同步迁移磁盘目录。
-- 分享记录、AI 会话、后台运行记录、任务、索引状态均在库内，删库即全丢。
+- 分享记录、AI 会话、后台运行记录、编排模板 / 通用触发规则 / 编排运行记录、任务、索引状态均在库内，删库即全丢。
 
 ## 7. 升级与迁移
 
-`internal/db/migrations/` 用 golang-migrate 管理，`//go:embed` 内嵌；当前基线 **000016_ai_runs**（16 个版本 / 32 个脚本，每个版本一对 `.up.sql` / `.down.sql`）。
+`internal/db/migrations/` 用 golang-migrate 管理，`//go:embed` 内嵌；当前基线 **000024_ai_job_runs_detail**（24 个版本 / 48 个脚本，每个版本一对 `.up.sql` / `.down.sql`）。
 
+- 000017 新建 `pipeline_runs`；000018 新建 `pipeline_templates`（初版含 cron / 启停 / 状态列）；000019 新建 `schedule_triggers` 并从模板 `cron_expr <> ''` 回填已有规则；000020 重建模板表删掉 4 个调度列；000021 新建 `ai_session_messages`；000022 给 `ai_jobs` 加 target 五列并回填 `prompt`；000023 调度收敛（`ai_jobs` 去 4 个调度列、`schedule_triggers` 加 `lease_until`、回填 `target_type='job'`）；000024 给 `ai_job_runs` 加详情列。000020 / 000023 的 `.down.sql` 都按规则反向回填调度列，回滚不丢配置。
 - 启动时自动 `m.Up()`；`sqlite3.Config{NoTxWrap:true}`（`PRAGMA foreign_keys` 在事务内无效）。
 - 存量库无 `schema_migrations` 但有 `users` 时 `Force(1)` 跳过 baseline。
 - **生产不自动执行 down**；需要回滚时用 CLI 或显式调用 `m.Steps(-1)` / `m.Down()`。
@@ -188,7 +190,7 @@ HTTP 与 Agent 共用同一套「RAG 可用性检查 → org:user 防重 → 后
 | `logging.dir/preview.log` | 每请求访问日志（时间/IP/UA/path/status）；SSE 与媒体路径跳过 `ctx.Record()` 以保持流式 |
 | `rag: reindex progress` | 全量重建每 20 个文件输出一次进度 |
 | 审计日志 | 文件写操作记录 user/org/path |
-| 告警示例 | 「首个注册者将成为超管」、MCP 服务不可达、cron/时区非法、RAG 建表失败降级、索引钩子失败 |
+| 告警示例 | 「首个注册者将成为超管」、MCP 服务不可达、cron/时区非法、RAG 建表失败降级、索引钩子失败、`cron trigger done/failed`（未知 `target_type`、非法 cron 与目标不存在会写 `error: ...` 状态） |
 
 ## 9. 常见运维问题
 
@@ -200,7 +202,8 @@ HTTP 与 Agent 共用同一套「RAG 可用性检查 → org:user 防重 → 后
 | 索引重建一直 `running` | 查 `currentPath` 与日志 `rag: reindex progress`；单文件超时 5 分钟，embedding 失败记 `error` 状态行，下次钩子或重建重试 |
 | 数据库很大但文件不多 | vec0/FTS5 惰性删除残留；`make ragclean ARGS=--reset` + 重启 + reindex |
 | 上传成功但目录树看不到 | 命中 `server.hidden`；查看上传响应 `hiddenNames` 或调整 `hidden` |
-| 刷新 `/file`、`/jobs` 等返回 401 | `config.yaml` 的 `routes` 未把该路径注册为 `__spa__` |
+| 刷新 `/file`、`/jobs`、`/pipelines` 等返回 401 | `config.yaml` 的 `routes` 未把该路径注册为 `__spa__` |
+| 模板的定时触发没执行 | 依次查 `schedule.enabled` → `cronExpr` 合法性 → 规则 `enabled` → `lastRunAt` / `lastStatus`（未知 `target_type` / 目标不存在会写 `error: ...`）→ 目标模板归属与是否被删 → 15 分钟单次超时 → 分钟键防重 → 删模板时的级联清理；规则增删改下一分钟生效 |
 | 收不到提醒邮件 | 依次查 `schedule.enabled`、`notify.email.enabled` + `host`/`user`、`EMAIL_PASS`、用户邮箱、任务是否 `done`、当天是否已去重（去重在发布前，SMTP 失败不重投） |
 | 邮件里没有跳转按钮 | `site_url` 未配置或不是 http(s) |
 | AI 入口不显示 | `GET /api/ai/status` 的 `enabled`；检查 `AI_API_KEY` 与 `base_url` |

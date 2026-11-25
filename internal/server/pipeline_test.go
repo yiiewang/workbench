@@ -118,3 +118,28 @@ func TestValidatePipelineTemplateBody(t *testing.T) {
 		}
 	}
 }
+
+func TestExecPipelineAPIQuery(t *testing.T) {
+	secret := []byte("pipeline-test-secret")
+	app := iris.New()
+	app.Get("/api/echo", AuthMiddleware(secret, func(_ context.Context, userID, orgID int64) (int64, string, string, string, bool, error) {
+		return orgID, "org", "user", "member", false, nil
+	}), func(ctx iris.Context) {
+		writeOK(ctx, map[string]any{"date": ctx.URLParam("date"), "kind": ctx.URLParam("kind")})
+	})
+	if err := app.Build(); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{app: app, tokenSecret: secret}
+	out, err := s.execPipelineAPI(context.Background(), "echo", map[string]any{
+		"method": "GET",
+		"query":  map[string]any{"date": "2026-11-25", "kind": "daily"},
+	}, pipeline.Definition{}, pipeline.NewRunContext(3, 42))
+	if err != nil {
+		t.Fatalf("api step failed: %v", err)
+	}
+	m, ok := out.(map[string]any)
+	if !ok || m["date"] != "2026-11-25" || m["kind"] != "daily" {
+		t.Fatalf("query not propagated: %+v", out)
+	}
+}

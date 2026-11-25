@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // PC 端 AI 对话浮动面板：核心对话逻辑在 composables/useAIChat（与移动端 MAI 共用），
 // 本组件只保留面板形态特有部分：fab/开关、宽度拖拽、外部事件监听。
-import { ref, nextTick, onMounted, onUnmounted, provide } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, provide } from 'vue'
 import { loggedIn } from '../../stores/auth'
 import { showToast } from '../../lib/common'
 import { hasOpenModal } from '../../lib/modalEsc'
@@ -88,6 +88,34 @@ async function loadIndexStatus() {
   } finally {
     indexLoading.value = false
   }
+}
+
+// 明细按目录分组（后端已按 path 排序），目录只显示一次、组内只留文件名
+type IndexRow = AIIndexStatus['items'][number] & { name: string }
+type IndexGroup = { dir: string; rows: IndexRow[]; chunks: number; errors: number }
+
+const indexGroups = computed<IndexGroup[]>(() => {
+  const groups: IndexGroup[] = []
+  for (const it of indexData.value?.items ?? []) {
+    const i = it.path.lastIndexOf('/')
+    const dir = it.path.slice(0, i + 1)
+    let g = groups[groups.length - 1]
+    if (!g || g.dir !== dir) {
+      g = { dir, rows: [], chunks: 0, errors: 0 }
+      groups.push(g)
+    }
+    g.rows.push({ ...it, name: it.path.slice(i + 1) })
+    g.chunks += it.chunkCount
+    if (it.status !== 'ok') g.errors++
+  }
+  return groups
+})
+
+const collapsedDirs = ref<string[]>([])
+function toggleIndexGroup(dir: string) {
+  collapsedDirs.value = collapsedDirs.value.includes(dir)
+    ? collapsedDirs.value.filter(d => d !== dir)
+    : [...collapsedDirs.value, dir]
 }
 
 // ---- 面板特有：开关 / 自动恢复 ----
@@ -319,23 +347,37 @@ function onResizeStart(e: MouseEvent) {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
                 </button>
               </div>
-              <div class="ai-index-summary">
-                <template v-if="indexData">
-                  <span>{{ indexData.summary.files }} 个文件</span>
-                  <span>{{ indexData.summary.chunks }} 个文本块</span>
-                  <span :class="{ err: indexData.summary.errors > 0 }">{{ indexData.summary.errors }} 个失败</span>
-                </template>
+              <div v-if="indexData" class="ai-index-summary">
+                <div class="ai-index-stat"><b>{{ indexData.summary.files }}</b><span>文件</span></div>
+                <div class="ai-index-stat"><b>{{ indexData.summary.chunks }}</b><span>文本块</span></div>
+                <div class="ai-index-stat" :class="{ bad: indexData.summary.errors > 0 }"><b>{{ indexData.summary.errors }}</b><span>失败</span></div>
               </div>
-              <div class="ai-sessions-list">
+              <div class="ai-sessions-list ai-index-list">
                 <div v-if="indexLoading && !indexData" class="ai-sessions-empty">加载中…</div>
                 <div v-else-if="!indexData?.items?.length" class="ai-sessions-empty">
                   暂无索引（上传文本文件或触发全量重建）
                 </div>
-                <div v-for="it in indexData?.items" :key="it.path" class="ai-index-item" :title="it.error ? it.path + '：' + it.error : it.path">
-                  <span class="ai-index-dot" :class="it.status"></span>
-                  <span class="ai-index-path">{{ it.path }}</span>
-                  <span class="ai-index-meta">{{ it.status === 'ok' ? it.chunkCount + ' 块' : '失败' }}</span>
-                </div>
+                <template v-for="g in indexGroups" :key="g.dir">
+                  <button class="ai-index-group" :class="{ collapsed: collapsedDirs.includes(g.dir) }" @click="toggleIndexGroup(g.dir)">
+                    <span class="ai-index-chev">▾</span>
+                    <span class="ai-index-dir">{{ g.dir }}</span>
+                    <span class="ai-index-group-meta" :class="{ bad: g.errors > 0 }">{{ g.rows.length }} 个文件 · {{ g.chunks }} 块<span v-if="g.errors"> · {{ g.errors }} 失败</span></span>
+                  </button>
+                  <template v-if="!collapsedDirs.includes(g.dir)">
+                    <div
+                      v-for="it in g.rows"
+                      :key="it.path"
+                      class="ai-index-item"
+                      :class="{ error: it.status !== 'ok' }"
+                      :title="it.error ? it.path + '：' + it.error : it.path"
+                    >
+                      <span class="ai-index-dot-slot"><span v-if="it.status !== 'ok'" class="ai-index-dot"></span></span>
+                      <span class="ai-index-name">{{ it.name }}</span>
+                      <span v-if="it.status === 'ok'" class="ai-index-chunks"><b>{{ it.chunkCount }}</b> 块</span>
+                      <span v-else class="ai-index-fail">失败</span>
+                    </div>
+                  </template>
+                </template>
               </div>
             </template>
 
@@ -692,25 +734,60 @@ function onResizeStart(e: MouseEvent) {
 
 /* 会话 / 索引状态列表（侧栏内容区，窄栏适配） */
 .ai-index-summary {
-  display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 6px 10px;
-  font-size: 10px; color: var(--text-dim);
+  display: flex; flex: none; gap: 6px; padding: 6px 10px 8px;
   border-bottom: 1px solid var(--border);
 }
-.ai-index-summary .err { color: #c04040; }
-.ai-index-item {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 8px; font-size: 10px; cursor: default;
+.ai-index-stat {
+  flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 4px;
+  padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--code-bg);
 }
-.ai-index-dot {
-  flex: none; width: 7px; height: 7px; border-radius: 50%;
-  background: #4caf50;
+.ai-index-stat b { font-size: 13px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.ai-index-stat span { font-size: 9.5px; color: var(--text-dim); }
+.ai-index-stat.bad b { color: #c04040; }
+
+.ai-sessions-list.ai-index-list { gap: 0; }
+.ai-index-group {
+  position: sticky; top: 0; z-index: 1;
+  flex: none; display: flex; align-items: center; gap: 6px;
+  width: 100%; height: 20px; margin-top: 3px; padding: 0 6px 0 4px;
+  border: none; border-bottom: 1px solid var(--border); border-radius: 0;
+  background: var(--bg); color: var(--text-dim);
+  font-family: var(--font-mono, monospace); font-size: 9.5px;
+  text-align: left; cursor: pointer;
 }
-.ai-index-dot.error { background: #c04040; }
-.ai-index-path {
+.ai-index-group:first-child { margin-top: 0; }
+.ai-index-group:hover { color: var(--text); }
+.ai-index-chev {
+  flex: none; width: 9px; font-size: 9px; line-height: 1;
+  color: var(--text-muted); transition: transform .12s;
+}
+.ai-index-group.collapsed .ai-index-chev { transform: rotate(-90deg); }
+.ai-index-dir {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: var(--font-mono, monospace); color: var(--text);
 }
-.ai-index-meta { flex: none; color: var(--text-dim); }
+.ai-index-group-meta {
+  flex: none; font-family: inherit; font-size: 9.5px; color: var(--text-muted);
+}
+.ai-index-group-meta.bad { color: #c04040; }
+
+.ai-index-item {
+  flex: none; display: flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 6px 0 14px; font-size: 11.5px; cursor: default;
+}
+.ai-index-item:hover { background: var(--code-bg); }
+.ai-index-dot-slot { flex: none; width: 7px; }
+.ai-index-dot { display: block; width: 7px; height: 7px; border-radius: 50%; background: #c04040; }
+.ai-index-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text);
+}
+.ai-index-item.error .ai-index-name { color: #c04040; }
+.ai-index-chunks {
+  flex: none; font-size: 10px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.ai-index-chunks b { font-weight: 500; color: var(--text-dim); }
+.ai-index-fail { flex: none; font-size: 9.5px; color: #c04040; }
 
 .ai-sessions-list {
   flex: 1;

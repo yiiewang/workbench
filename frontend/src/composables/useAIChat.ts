@@ -5,7 +5,7 @@ import { ref, computed, watch, reactive, shallowReactive, type InjectionKey } fr
 import { loggedIn, currentUser } from '../stores/auth'
 import {
   getAIStatus, chatStream, approveAITool, getAIRun,
-  listAISessions, getAISession, createAISession, updateAISession, deleteAISession,
+  listAISessions, getAISession, createAISession, appendAISessionMessages, deleteAISession,
   type ChatMessage, type AISessionSummary, type AiPayloadMessage,
   type MsgStep, type ToolCallView, type AIRun,
 } from '../api/ai'
@@ -16,6 +16,12 @@ import { renderMarkdown, linkRagRefs } from '../lib/markdownRenderer'
 function newId(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
   return 'xxxxxxx-xxxx-4xxx'.replace(/x/g, () => Math.floor(Math.random() * 16).toString(16))
+}
+
+// 消息级持久化的稳定主键：历史会话沿用后端返回的 id，新建/恢复路径缺失时补一个。
+// 统一在这里兜底，避免每个消息创建点都要记得赋值。
+function msgId(m: ChatMessage): string {
+  return m.clientMsgId || (m.clientMsgId = newId())
 }
 
 // 消息渲染段：连续的过程步骤（思考/工具）归为一个可折叠过程块，正文片段独立成段
@@ -40,6 +46,10 @@ interface ChatSession {
   persisting: boolean
   persistQueued: boolean
   lastPersistAt: number
+  /** clientMsgId -> 上次成功落库的消息 JSON，用于只提交变动的消息 */
+  saved: Map<string, string>
+  /** regenerate 待提交的截断锚点：删掉该消息之后的旧回复 */
+  truncateAfter: string | null
 }
 
 interface PendingRun { id: string; key: string; sessionId: string; dbSessionId: number | null }
@@ -50,11 +60,16 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   // shallowReactive 让会话增删也进响应式依赖，streamingSessions 才能随新会话更新
   const chatSessions = shallowReactive(new Map<string, ChatSession>())
   function newSession(msgs: ChatMessage[] = [], dbId: number | null = null): ChatSession {
+    const list = reactive<ChatMessage[]>(msgs)
+    // 历史会话载入时自带 clientMsgId，先记为已落库，避免切回后重发整份消息
+    const saved = new Map<string, string>()
+    for (const m of list) if (m.clientMsgId) saved.set(m.clientMsgId, JSON.stringify(m))
     const s = shallowReactive<ChatSession>({
-      key: 'n:' + newId(), messages: reactive<ChatMessage[]>(msgs), dbSessionId: dbId,
+      key: 'n:' + newId(), messages: list, dbSessionId: dbId,
       sessionId: newId(), streaming: false, abortCtrl: null, runId: null,
       resumeStopped: false, resumedRunId: null,
       persisting: false, persistQueued: false, lastPersistAt: 0,
+      saved, truncateAfter: null,
     })
     chatSessions.set(s.key, s)
     return s
@@ -213,7 +228,9 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   const sessions = ref<AISessionSummary[]>([])
   const sessionsLoading = ref(false)
 
-  // 持久化绑定会话：后台会话的流结束也只写自己的会话记录，不会串到当前展示的会话
+  // 持久化绑定会话：只提交与上次落库快照不同的消息；后台会话的流也只写自己的记录。
+  // 展示态消息在流式过程中会被反复增量修改（正文/思考/工具结果/usage），
+  // 用 JSON 快照 diff 而不是在各回调里打脏标记，任何字段变化都能被捕获。
   async function persistSession(s: ChatSession) {
     // 防重入 + 排队补一轮：流末的最终保存（含 usage）可能与节流保存竞态，
     // 直接丢弃会让库停留在中途快照（usage 丢失、刷新后看不到 token 消耗）。
@@ -228,18 +245,32 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         s.persistQueued = false
         const msgs = s.messages
         if (!msgs.length) return
+        const changed: { id: string; json: string }[] = []
+        for (const m of msgs) {
+          const id = msgId(m)
+          const json = JSON.stringify(m)
+          if (s.saved.get(id) !== json) changed.push({ id, json })
+        }
+        if (!changed.length && !s.truncateAfter) return
+        // 用提交时的快照而非当前对象：保存期间新产生的增量留到下一轮 diff 继续提交
+        const payload = changed.map(c => JSON.parse(c.json) as ChatMessage)
         try {
           if (s.dbSessionId == null) {
             const firstUser = msgs.find(m => m.role === 'user')
             const data = await createAISession({
               title: (firstUser?.content || '新对话').slice(0, 30),
-              messages: msgs,
+              messages: payload,
             })
             s.dbSessionId = data.id
             backfillPendingRuns(s)
           } else {
-            await updateAISession(s.dbSessionId, { messages: msgs })
+            await appendAISessionMessages(s.dbSessionId, {
+              messages: payload,
+              truncateAfter: s.truncateAfter || undefined,
+            })
           }
+          for (const c of changed) s.saved.set(c.id, c.json)
+          s.truncateAfter = null
           // 新内容已落库："点过新对话"的空白语义失效——不清除的话，
           // 该 tab 内刷新页面将永远不自动恢复历史（标记只在明确空白时有效）。
           // 后台会话的保存不该抹掉用户刚点的新对话空白语义
@@ -310,9 +341,13 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
       sessions.value = sessions.value.filter(s => s.id !== id)
       const s = findByDbId(id)
       if (s) {
+        // 先判后删：delete 之后 current 已解析为 undefined，
+        // 再比较 s === current.value 恒为 false，删掉当前会话不会切新会话，
+        // currentKey 悬空后 streaming/dbSessionId 等 computed 直接抛错
+        const isCurrent = s === current.value
         s.abortCtrl?.abort()
         chatSessions.delete(s.key)
-        if (s === current.value) activate(newSession())
+        if (isCurrent) activate(newSession())
       }
       writePendingRuns(readPendingRuns().filter(r => r.dbSessionId !== id))
     } catch {
@@ -720,6 +755,9 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     let userIdx = s.messages.length - 1
     while (userIdx >= 0 && s.messages[userIdx].role !== 'user') userIdx--
     if (userIdx < 0) return
+    // 追加式存储不会删除内存里已 pop 的旧回复，靠截断锚点让后端删掉它及其后的消息
+    const anchor = s.messages[s.messages.length - 1]
+    if (anchor) s.truncateAfter = msgId(anchor)
     await streamReply(s.messages[userIdx], s)
   }
 

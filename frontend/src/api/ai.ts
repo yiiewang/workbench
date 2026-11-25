@@ -49,6 +49,8 @@ export interface TokenUsage {
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
   content: string
+  /** 会话行级存储的稳定主键；发给上游 LLM 时会剥掉，仅用于持久化增量提交 */
+  clientMsgId?: string
   /** 引用的文件路径（仅前端 UI 展示用，后端忽略） */
   files?: string[]
   /** 推理模型思考过程（仅前端 UI 展示用，后端忽略） */
@@ -134,7 +136,7 @@ export async function listAISessions(): Promise<{ sessions: AISessionSummary[] }
   return apiCall('/api/ai/sessions')
 }
 
-// 创建会话 — POST /api/ai/sessions（title 默认取首条用户消息截断）
+// 创建会话并写入首批消息 — POST /api/ai/sessions
 export async function createAISession(body: { title: string; messages: ChatMessage[] }): Promise<{ id: number }> {
   return apiCall('/api/ai/sessions', {
     method: 'POST',
@@ -148,9 +150,10 @@ export async function getAISession(id: number): Promise<AISessionDetail> {
   return apiCall(`/api/ai/sessions/${id}`)
 }
 
-// 更新会话（保存消息快照；title 传空保留原标题）— PUT /api/ai/sessions/{id}
-export async function updateAISession(id: number, body: { title?: string; messages: ChatMessage[] }): Promise<void> {
-  return apiCall(`/api/ai/sessions/${id}`, {
+// 追加/更新一批消息 — PUT /api/ai/sessions/{id}/messages
+// truncateAfter：保留该锚点消息、删除其后的旧回复（regenerate 重新生成末尾回复）
+export async function appendAISessionMessages(id: number, body: { messages: ChatMessage[]; truncateAfter?: string }): Promise<void> {
+  return apiCall(`/api/ai/sessions/${id}/messages`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

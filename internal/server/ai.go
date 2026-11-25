@@ -15,7 +15,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -248,7 +250,7 @@ func (s *Server) handleAIStatus(ctx iris.Context) {
 // /api/ai/sessions — 会话历史 CRUD（回到历史会话继续沟通）
 // ============================================================
 
-// aiSessionMaxMessagesJSON messages 快照大小上限（防滥用）
+// aiSessionMaxMessagesJSON 新建会话时首批消息大小上限（防滥用）
 const aiSessionMaxMessagesJSON = 256 * 1024
 
 func (s *Server) handleAISessionsList(ctx iris.Context) {
@@ -322,24 +324,84 @@ func (s *Server) handleAISessionGet(ctx iris.Context) {
 	writeOK(ctx, sess)
 }
 
-func (s *Server) handleAISessionUpdate(ctx iris.Context) {
+// ============================================================
+// PUT /api/ai/sessions/{id}/messages — 消息级追加写入
+// ============================================================
+
+const (
+	// aiSessionMaxBatchMessages 单批增量消息条数上限（防滥用）
+	aiSessionMaxBatchMessages = 50
+	// aiSessionMaxBatchBytes 单批消息体大小上限
+	aiSessionMaxBatchBytes = 512 * 1024
+	// aiSessionMaxClientMsgID clientMsgId 长度上限
+	aiSessionMaxClientMsgID = 64
+)
+
+type aiSessionMessagesBody struct {
+	Messages      json.RawMessage `json:"messages"`
+	TruncateAfter string          `json:"truncateAfter"`
+}
+
+// validateAISessionMessagesBody 消息级写入要求每条都带 clientMsgId：
+// 增量提交没有数组下标可用，缺 id 就无法区分「新增」与「更新」。
+func validateAISessionMessagesBody(b *aiSessionMessagesBody) string {
+	if len(b.Messages) == 0 {
+		b.Messages = json.RawMessage("[]")
+	}
+	if len(b.Messages) > aiSessionMaxBatchBytes {
+		return "messages too large (max 512KB)"
+	}
+	if len(b.TruncateAfter) > aiSessionMaxClientMsgID {
+		return "truncateAfter too long (max 64)"
+	}
+	var arr []map[string]json.RawMessage
+	if err := json.Unmarshal(b.Messages, &arr); err != nil {
+		return "messages must be a JSON array"
+	}
+	if len(arr) > aiSessionMaxBatchMessages {
+		return "too many messages (max 50)"
+	}
+	for _, m := range arr {
+		var id, role string
+		if v, ok := m["clientMsgId"]; !ok || json.Unmarshal(v, &id) != nil || id == "" || len(id) > aiSessionMaxClientMsgID {
+			return "each message requires a clientMsgId (max 64)"
+		}
+		if v, ok := m["role"]; !ok || json.Unmarshal(v, &role) != nil || role == "" {
+			return "each message requires role"
+		}
+		if _, ok := m["content"]; !ok {
+			return "each message requires content"
+		}
+	}
+	return ""
+}
+
+// handleAISessionMessagesUpsert 只提交变动的那几条消息；truncateAfter 用于
+// regenerate：保留锚点消息，删掉它之后的旧回复，再写入新回复。
+func (s *Server) handleAISessionMessagesUpsert(ctx iris.Context) {
 	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
 	if err != nil || id <= 0 {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
 		return
 	}
-	var req aiSessionBody
+	var req aiSessionMessagesBody
 	if err := readJSON(ctx, &req); err != nil {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
 		return
 	}
-	if msg := validateAISessionBody(&req); msg != "" {
+	if msg := validateAISessionMessagesBody(&req); msg != "" {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, msg)
 		return
 	}
-	// title 为空时由 SQL 层保留旧值（COALESCE/NULLIF），无需先查再写
-	if err := s.db.UpdateAISession(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, req.Title, string(req.Messages)); err != nil {
-		serverError(ctx, "update ai session failed", err)
+	err = s.db.UpsertAISessionMessages(ctx.Request().Context(),
+		currentOrgID(ctx), currentUserID(ctx), id, string(req.Messages), req.TruncateAfter)
+	if errors.Is(err, sql.ErrNoRows) {
+		// 会话不存在，或 truncateAfter 指向的锚点消息不在该会话里
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
+	}
+	if err != nil {
+		serverError(ctx, "upsert ai session messages failed", err)
 		return
 	}
 	writeOK(ctx, map[string]any{"status": "ok"})
@@ -769,21 +831,8 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 }
 
 // ============================================================
-// 非流式单次调用（AI 定时任务等后台场景用）
+// 非流式单次调用（编排 llm 步骤等后台场景用）
 // ============================================================
-
-// aiJobLLM 定时任务的 LLM 调用（LLMCaller 装配，见 schedule.NewAIJobsRunnerJob）：
-// RAG 前置检索注入——日报/总结类 prompt 与用户文件语义相关（周报文档、项目
-// 笔记），以任务归属用户身份检索命中片段拼进 prompt。检索失败静默降级
-// （定时任务可用性优先）。签名匹配 schedule.LLMCaller。
-func (s *Server) aiJobLLM(ctx context.Context, orgID, userID int64, prompt string) (string, error) {
-	if s.rag != nil {
-		if hits, err := s.rag.Search(ctx, orgID, userID, prompt, 3); err == nil && len(hits) > 0 {
-			prompt = rag.ReferencePrompt(hits) + "\n\n" + prompt
-		}
-	}
-	return s.aiChatOnce(ctx, prompt)
-}
 
 // aiChatOnce 非流式调用上游 /chat/completions，返回首个回复文本。
 // 不走 Agent 循环/工具（定时任务是后台生成型任务，无需交互）。
@@ -845,15 +894,21 @@ func truncateStr(s string, n int) string {
 // AI 定时任务 CRUD — /api/ai/jobs
 // ============================================================
 
-// aiJobBody 创建/更新请求体
+// aiJobBody 创建/更新请求体。prompt 与 target 至少提供一项：
+// 只给 prompt 等价于 target={"type":"ai","prompt":prompt}（老客户端零改动）。
 type aiJobBody struct {
-	Name     string `json:"name"`
-	CronExpr string `json:"cronExpr"`
-	Prompt   string `json:"prompt"`
-	Enabled  *bool  `json:"enabled"`
+	Name       string          `json:"name"`
+	CronExpr   string          `json:"cronExpr"`
+	Prompt     string          `json:"prompt"`
+	Enabled    *bool           `json:"enabled"`
+	Target     json.RawMessage `json:"target,omitempty"`
+	AllowWrite []string        `json:"allowWrite,omitempty"`
+	Context    json.RawMessage `json:"context,omitempty"`
+	Notify     json.RawMessage `json:"notify,omitempty"`
 }
 
-// validateAIJobBody 校验：name/cron/prompt 必填，cron 表达式可解析
+// validateAIJobBody 校验：name/cron 必填；prompt 或 target 至少一项；
+// target 按类型校验字段完整性，allowWrite 为静态预授权清单。
 func validateAIJobBody(b *aiJobBody) string {
 	b.Name = strings.TrimSpace(b.Name)
 	b.CronExpr = strings.TrimSpace(b.CronExpr)
@@ -870,17 +925,89 @@ func validateAIJobBody(b *aiJobBody) string {
 	if _, err := schedule.ParseCron(b.CronExpr); err != nil {
 		return "invalid cron expression: " + err.Error()
 	}
-	if b.Prompt == "" {
-		return "prompt is required"
-	}
 	if len(b.Prompt) > 16*1024 {
 		return "prompt too long (max 16KB)"
+	}
+	if len(b.Target) == 0 {
+		if b.Prompt == "" {
+			return "prompt or target is required"
+		}
+	} else {
+		if len(b.Target) > 64*1024 {
+			return "target too large (max 64KB)"
+		}
+		var t aiJobTarget
+		if err := json.Unmarshal(b.Target, &t); err != nil {
+			return "invalid target: " + err.Error()
+		}
+		if t.Type == "" {
+			t.Type = aiJobTypeAI
+		}
+		if t.Type == aiJobTypeAI && strings.TrimSpace(t.Prompt) == "" {
+			t.Prompt = b.Prompt
+		}
+		if err := t.validate(); err != nil {
+			return err.Error()
+		}
+	}
+	if len(b.AllowWrite) > 64 {
+		return "allowWrite too many entries (max 64)"
 	}
 	if b.Enabled == nil {
 		t := true
 		b.Enabled = &t
 	}
 	return ""
+}
+
+// aiJobSpecFromBody 请求体 → db 层规格；target 缺省时按历史 prompt 兼容。
+func aiJobSpecFromBody(b *aiJobBody) db.AIJobSpec {
+	spec := db.AIJobSpec{
+		Name: b.Name, CronExpr: b.CronExpr, Prompt: b.Prompt, Enabled: *b.Enabled,
+		AllowWrite: b.AllowWrite,
+	}
+	if len(b.Target) == 0 {
+		spec.TargetType = aiJobTypeAI
+		return spec
+	}
+	var t aiJobTarget
+	_ = json.Unmarshal(b.Target, &t)
+	if t.Type == "" {
+		t.Type = aiJobTypeAI
+	}
+	if t.Type == aiJobTypeAI && strings.TrimSpace(t.Prompt) == "" {
+		t.Prompt = b.Prompt
+	}
+	if raw, err := json.Marshal(t); err == nil {
+		spec.TargetJSON = string(raw)
+	}
+	spec.TargetType = t.Type
+	if len(b.Context) > 0 {
+		spec.ContextJSON = string(b.Context)
+	}
+	if len(b.Notify) > 0 {
+		spec.NotifyJSON = string(b.Notify)
+	}
+	// ai 类型把 prompt 同步到历史列，老前端与只读查询零改动。
+	if t.Type == aiJobTypeAI {
+		spec.Prompt = t.Prompt
+	}
+	return spec
+}
+
+// aiJobPreview 用请求体构造未入库任务，供创建/更新时做调度预检。
+func aiJobPreview(spec db.AIJobSpec, orgID, userID int64) db.AIJobWithOwner {
+	return db.AIJobWithOwner{
+		AIJob: db.AIJob{
+			Name:       spec.Name,
+			Prompt:     spec.Prompt,
+			TargetType: spec.TargetType,
+			Target:     json.RawMessage(spec.TargetJSON),
+			AllowWrite: spec.AllowWrite,
+			Context:    json.RawMessage(spec.ContextJSON),
+		},
+		OrgID: orgID, UserID: userID,
+	}
 }
 
 func (s *Server) handleAIJobsList(ctx iris.Context) {
@@ -902,9 +1029,19 @@ func (s *Server) handleAIJobCreate(ctx iris.Context) {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, msg)
 		return
 	}
-	id, err := s.db.CreateAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), req.Name, req.CronExpr, req.Prompt, *req.Enabled)
+	spec := aiJobSpecFromBody(&req)
+	if err := s.validateAIJobTarget(ctx.Request().Context(), aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))); err != nil {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
+		return
+	}
+	id, err := s.db.CreateAIJobWithSpec(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), spec)
 	if err != nil {
 		serverError(ctx, "create ai job failed", err)
+		return
+	}
+	if err := s.upsertAIJobTrigger(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, req.CronExpr, *req.Enabled); err != nil {
+		_ = s.db.DeleteAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id)
+		serverError(ctx, "create ai job trigger failed", err)
 		return
 	}
 	slog.Info("ai job created", "user", currentUserID(ctx), "job", req.Name, "cron", req.CronExpr)
@@ -936,8 +1073,17 @@ func (s *Server) handleAIJobUpdate(ctx iris.Context) {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return
 	}
-	if err := s.db.UpdateAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, req.Name, req.CronExpr, req.Prompt, *req.Enabled); err != nil {
+	spec := aiJobSpecFromBody(&req)
+	if err := s.validateAIJobTarget(ctx.Request().Context(), aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))); err != nil {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
+		return
+	}
+	if err := s.db.UpdateAIJobWithSpec(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, spec); err != nil {
 		serverError(ctx, "update ai job failed", err)
+		return
+	}
+	if err := s.upsertAIJobTrigger(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, req.CronExpr, *req.Enabled); err != nil {
+		serverError(ctx, "update ai job trigger failed", err)
 		return
 	}
 	slog.Info("ai job updated", "user", currentUserID(ctx), "job", req.Name)
@@ -948,6 +1094,10 @@ func (s *Server) handleAIJobDelete(ctx iris.Context) {
 	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
 	if err != nil || id <= 0 {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		return
+	}
+	if err := s.deleteAIJobTriggers(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id); err != nil {
+		serverError(ctx, "delete ai job triggers failed", err)
 		return
 	}
 	if err := s.db.DeleteAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id); err != nil {

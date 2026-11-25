@@ -1,6 +1,6 @@
 # Workbench 文档中心
 
-> 文档版本：`docs v2.1`｜ 更新日期：2026-11-24 ｜ 状态：现行
+> 文档版本：`docs v2.2`｜ 更新日期：2026-11-25 ｜ 状态：现行
 > 本文件是 `docs/` 的 **00 号入口**：统一组织全部文档，定义编号规则、目录结构、版本说明、更新记录与维护规范。
 
 ## 1. 文档编号规则
@@ -9,7 +9,6 @@
 |---|---|
 | 主文档 | 文件名 `NN-name.md`，`NN` 为两位序号，按**阅读顺序**排列；序号即文档清单中的编号 |
 | 入口 | `README.md` 固定为 **00**（GitHub 自动展示入口，故不加数字前缀） |
-| 归档 | `archive/` 下的历史文档编号 `A1`–`A3`，文件名保持不变，不参与主序列 |
 | 章节 | 文内用 `## N.` / `### N.M` 编号；跨文档引用写作「`NN-name.md` §N.M」 |
 | 新增文档 | 优先**追加末尾序号**（插入中间会导致全量链接改写）；新增后同步本文件 §2/§3/§4 与根 `CHANGELOG.md` |
 
@@ -26,10 +25,7 @@ workbench/
     ├── 03-design.md                # 03 软件设计
     ├── 04-build-and-release.md     # 04 构建与发布
     ├── 05-operations.md            # 05 配置与运维
-    └── archive/                    # 归档
-        ├── rbac-design.md           # A1 [归档] RBAC 方案设计稿
-        ├── migration-strategy.md    # A2 [归档] 数据库迁移方案设计稿
-        └── email-template-preview.html  # A3 邮件模板预览（开发辅助产物）
+    └── 06-schedule-executable-design.md  # 06 定时任务可执行对象设计
 ```
 
 | 序号 | 文档 | 读者 | 内容 | 何时读 |
@@ -40,17 +36,13 @@ workbench/
 | 03 | [`03-design.md`](03-design.md) | 开发者 | 架构、模块划分、关键流程、数据模型、接口/SSE、安全模型、扩展点、设计取舍 | 改代码、做方案评审 |
 | 04 | [`04-build-and-release.md`](04-build-and-release.md) | 开发者、发布者 | 工具链、Makefile target、构建约束、质量门禁、xgo 打包、发布流程、构建故障 | 构建、发版、排查编译问题 |
 | 05 | [`05-operations.md`](05-operations.md) | 运维、开发者 | 配置与合并语义、启用矩阵、**RAG 索引运维**、备份、迁移、日志、故障排查 | 配置、升级、索引清理、线上排查 |
-| A1 | [`archive/rbac-design.md`](archive/rbac-design.md) | — | 2026-08-21 RBAC 设计稿 | 仅历史背景，**不代表现行实现** |
-| A2 | [`archive/migration-strategy.md`](archive/migration-strategy.md) | — | 2026-08-21 迁移方案设计稿 | 同上 |
-| A3 | [`archive/email-template-preview.html`](archive/email-template-preview.html) | 开发者 | 邮件模板预览 | 调整邮件模板时对照 |
+| 06 | [`06-schedule-executable-design.md`](06-schedule-executable-design.md) | 开发者 | 定时任务四种执行对象、target 归一化、调度收敛、静态预授权、迁移 000022–000024 | 改定时任务、评审调度方案 |
 
 | 状态 | 含义 | 处理 |
 |---|---|---|
 | 现行 | 与当前代码一致，随功能变更同步更新 | 按 §5 触发规则维护 |
-| 归档 | 历史设计稿，方案已实施或被取代 | 不删除、不静默改写；文件头保留归档提示（§5.6） |
-| 开发辅助 | 本地预览产物，非规范文档 | 随对应功能更新 |
 
-**事实优先级**：代码 → `02` / `03` / `04` / `05` → 本文件偏差清单 → 根 `README.md` → `archive/`。冲突时以代码为准并登记到 §6。
+**事实优先级**：代码 → `02` / `03` / `04` / `05` → 本文件偏差清单 → 根 `README.md`。冲突时以代码为准并登记到 §6。
 
 ## 3. 版本说明
 
@@ -64,31 +56,33 @@ workbench/
 
 | 项 | 值 |
 |---|---|
-| 文档版本 | `docs v2.1`（2026-11-24；v2.0 重建 + 孤儿索引清理同步） |
-| 代码基线 | `v1.3.0-25-g517f88c`（HEAD `517f88c`，含 `000016_ai_runs` 与 1b 前端恢复） |
-| 工作树增量 | **未提交的 000017 编排引擎**（`internal/pipeline`、`pipeline_runs`、`run_pipeline`、`/api/pipeline/runs`）已纳入正文；提交后需在 §4 记一笔并复核基线 |
-| 撰写结束后新增 | **未提交的 000018 编排模板**（`pipeline_templates`、HTTP 入口、cron 触发）在本批收尾时出现，**尚未纳入正文**，登记为 D18 |
+| 文档版本 | `docs v2.3`（2026-11-25；追平定时任务四种执行对象、调度收敛与执行历史详情） |
+| 代码基线 | `v1.3.0-26-gc0577c4` + 工作树 000021–000024（AI 会话消息、target 五列、调度收敛、执行历史详情） |
+| 工作树增量 | 000021–000024 与定时任务 P0/P1 代码；`make test`、`pnpm build` 通过 |
+| 撰写结束后新增 | 000021 已纳入本版；000022–000024 随定时任务改造同批纳入 |
 | 最近已发布版本 | `v1.3.0`（2026-11-10） |
-| 数据库迁移基线 | `000017_pipeline_runs`（17 个版本 / 34 个脚本） |
-| 内置 AI 工具 | 16 个 |
+| 数据库迁移基线 | `000024_ai_job_runs_detail`（24 个版本 / 48 个脚本） |
+| 内置 AI 工具 | 16 个（含运行时合成的 `run_pipeline`；8 个需审批） |
 | SSE 自定义事件 | 8 类（含 `run_id`） |
 | 运行时 | Go 1.25.0、`CGO_ENABLED=1`、tag `sqlite_fts5`；Vue 3 + Vite 5；SQLite WAL |
 
 ### 3.3 基线策略
 
-重建后采用**以眼前代码为准**：已提交的 HEAD 内容全部纳入；工作树中已调研确认、且具备迁移/测试/`CHANGELOG` 条目的未提交变更也纳入正文，并在 §3.2「工作树增量」显式标注，避免文档因排除 WIP 而反复滞后。**撰写结束后新出现的变更不追写正文**，一律登记为 §6 的待同步项，下一轮按 §5.2 统一纳入——代码并行开发期间，文档基线以批次为单位锁定，避免与进行中的特性互相追赶。若某变更被回滚，按 §5.2 同步回退并更新本表。
+重建后采用**以眼前代码为准**：已提交的 HEAD 内容全部纳入；工作树中已调研确认、且具备迁移/测试/`CHANGELOG` 条目的未提交变更也纳入正文，并在 §3.2「工作树增量」显式标注，避免文档因排除 WIP 而反复滞后。**撰写结束后新出现的变更不追写正文**，一律登记为 §6 的待同步项，下一轮按 §5.2 统一纳入——代码并行开发期间，文档基线以批次为单位锁定，避免与进行中的特性互相追赶。若某变更被回滚，按 §5.2 同步回退并更新本表。`docs v2.2` 已按此规则把上一批登记的待同步项统一纳入正文，当前基线对应一次干净的工作树。
 
 ## 4. 文档更新记录
 
 | 版本 | 日期 | 变更 | 对应代码基线 |
 |---|---|---|---|
+| `docs v2.3` | 2026-11-25 | 定时任务执行对象多态化与调度收敛：`ai_jobs` target 五列（000022）、`ai_jobs` 去调度列 + `schedule_triggers.lease_until` + job 规则回填（000023）、`ai_job_runs` 详情列（000024）；`02` §2.1/§8.3/§10/§13/§14、`03` §2.1/§5.8/§5.9/§6/§7.2/§8/§10、本文件 §2/§3.2/§6 同步；新增 `06` 设计文档；迁移基线 20/40 → 24/48，关闭 D20 | `v1.3.0-26-gc0577c4` + 工作树 000021–000024 |
+| `docs v2.2` | 2026-11-25 | 追平 `c0577c4`：编排模板 CRUD/手动触发、通用定时触发规则（000018–000020）、DAG `needs`/`when`/`retry` 与同层并行、`/pipelines` 流程图与模板页、AI 对话 300ms 游标恢复/多会话/`AiMessage`/PC 左栏三 tab；同步 `01`/`02`/`03`/`04`/`05` 的文件头与正文，迁移基线 17/34 → 20/40、表 21 → 23 项，关闭 D16/D18；**移除 `archive/` 归档目录与 A1–A3 编号、删除 §5.6 归档规则**，关闭 D14、D19 收敛为代码注释旧路径 | `v1.3.0-26-gc0577c4` |
 | `docs v2.1` | 2026-11-24 | 全量重建新增孤儿索引清理（严格「文件已不存在」判定、按 owner 隔离、`pruned` 计数）；同步 `05` §5.3–§5.5/§9、`02` §8.4/§14、`03` §5.5/§10 | 同一代码基线 + 本次未提交改动 |
 | `docs v2.0` | 2026-11-24 | **重建**：主文档加两位序号并重命名；新增 `01` 快速开始、`04` 构建与发布、`05` 配置与运维；`02`/`03` 全量重写并追平后台 run / 1b 恢复 / 声明式编排；根 `README.md` 的 Quick Start 与 Release Process 迁入 `01`/`04` 并改为链接；历史设计稿与模板预览归拢 `archive/`；建立编号规则；偏差清单复核 | `v1.3.0-25-g517f88c` + 工作树 000017 |
 | `docs v1.0` | 2026-11-24 | 初建三套文档（功能说明 / 软件设计 / 文档中心）+ 维护规范与偏差清单 | `v1.3.0-23-g8f70235` / 迁移 000015 |
 | （历史）v1 | 2026-08-21 | `rbac-design.md`、`migration-strategy.md` 设计稿 | 当时的存量库与自愈式迁移 |
 | （历史）— | 未记录 | 邮件模板预览 | 随邮件模板功能引入 |
 
-> 本表只记文档变更；功能与缺陷变更见根 `CHANGELOG.md`。
+> 本表只记文档变更；功能与缺陷变更见根 `CHANGELOG.md`。历史行中的 `archive/` 与旧设计稿 / 模板预览文件名仅为追溯记录，当前 `docs/` 已不含这些文件。
 
 ## 5. 文档维护规范
 
@@ -156,29 +150,16 @@ workbench/
 | 配置与环境变量 | `internal/config/config.go` 的 `DefaultConfig` / `mergeConfig` / `ApplyEnv`、`config.yaml` | `05` §1–§4 |
 | 表与迁移 | `internal/db/migrations/*.sql`、`EnsureVecIndex` / `EnsureFTS` | `03` §6、`05` §7 |
 | 内置工具 | `internal/server/aitools.go` 的 `aiTools`（`Name`/`NeedApproval`）与 `pipelineTool()` | `02` §8.3、`03` §9 |
-| SSE 事件 | `internal/server/ai.go` 的 `sseWriteEvent`、`frontend/src/api/ai.ts` | `03` §7.3、`02` §8.2 |
-| 编排定义 | `internal/pipeline/pipeline.go` 的 `Definition`/`Runner` | `02` §9、`03` §5.9 |
+| SSE 事件 | `internal/server/ai.go` 的 `sseWriteEvent`、`frontend/src/api/ai.ts`（含 `getAIRun(offset)` 的 `delta`） | `03` §7.3、`02` §8.2 |
+| 编排定义 | `internal/pipeline/pipeline.go` 的 `Definition`/`Step.Needs`/`When`/`Retry`/`Layers()`/`Runner`、`server/pipeline.go` 的 `runPipeline` | `02` §9、`03` §5.9 |
+| 模板与通用触发 | `internal/db/pipeline_templates.go`、`cron_triggers.go`、`internal/schedule/triggers.go` 的 `NewTriggersJob`/`TriggerHandler`、`server/pipeline_http.go`、`server/schedule_triggers.go` | `02` §9、`03` §5.8/§5.9/§6/§7.2 |
 | 事件 topic | `internal/schedule/jobs.go` 的 `KnownTopics`、`notify/email.go` | `03` §5.8 |
 | 业务码 | `internal/server/codes.go` | `02` §3 |
-| 前端路由与分流 | `frontend/src/router/index.ts`、`config.yaml` 的 `routes` | `02` §12、`03` §5.10 |
+| 前端路由与分流 | `frontend/src/router/index.ts`（含 `/pipelines`）、`config.yaml` 的 `routes` | `02` §12、`03` §5.10 |
 | 构建与发布 | `Makefile`、`frontend/package.json`、`vite.config.ts`、`scripts/package.sh` | `04` |
 | 版本基线 | `git describe --tags --always --dirty`、迁移目录最大编号 | 本文件 §3.2 |
 
-建议节奏：**每次功能变更随提交核对**；**发版前**全量复核 §6；**每季度**复核归档文档状态。
-
-### 5.6 归档规则
-
-设计稿一旦实施完成或被后续方案取代，**不删除、不静默改写为现行描述**：
-
-1. 文件头加归档提示（模板见下），保留原有日期与状态行；
-2. 移入 `archive/`，修正相对链接为 `../NN-name.md` / `../README.md`；
-3. 本文件 §2 标为「归档」、§4 保留历史行、§6 登记主要漂移点；
-4. 现行事实统一由 `02` / `03` / `04` / `05` 承载。
-
-```markdown
-> ⚠️ **归档文档（历史设计稿）**：本文写于 <日期>，记录当时的方案设计与评审状态，**不代表当前实现**。
-> 现行架构、数据模型与接口请以 `../03-design.md` 与代码为准；偏差清单见 `../README.md`。
-```
+建议节奏：**每次功能变更随提交核对**；**发版前**全量复核 §6。
 
 ## 6. 已知文档偏差清单
 
@@ -187,7 +168,7 @@ workbench/
 | # | 位置 | 过时/不准确描述 | 当前事实 | 状态 |
 |---|---|---|---|---|
 | D01 | 根 `README.md` API Endpoints | `/__map__`、`/__tree__`、`/tasks.json` GET/PUT | 实际 `/api/map`、`/api/tree`、`/api/tasks*`；`PUT /api/tasks` 自 1.3.0 废弃，改为带 `baseRevision` 的 `PATCH/POST/DELETE /api/tasks/{id}` | 待修正 |
-| D02 | 根 `README.md` Database | 表清单含 `visit_logs`、`version_json`，密码写 SHA-256 | 两表/列已删；密码 bcrypt（仅兼容旧 SHA-256 存量）；现行 **21 项表**见 `03-design.md` §6.2 | 待修正 |
+| D02 | 根 `README.md` Database | 表清单含 `visit_logs`、`version_json`，密码写 SHA-256 | 两表/列已删；密码 bcrypt（仅兼容旧 SHA-256 存量）；现行 **23 项表**见 `03-design.md` §6.2 | 待修正 |
 | D03 | 根 `README.md` Directory Structure | `internal/` 只列 3 个包；Vite 多入口 `todo.html`；`scripts/` 只列 `package.sh` | 9 个包（含 `pipeline`/`rag`/`schedule`/`notify`/`mcpclient`/`sqlitevec`）；Vite 单入口；`scripts/` 另有 `ragclean.go` | 待修正 |
 | D04 | 根 `README.md` AI Agent Tools | 标题写「13 个」，表格列 12 个 | 实际 **16 个**（缺 `search_files`、`reindex_files`、`reindex_status`、`run_pipeline`）；8 个需审批，`create_task` 不需要 | 待修正 |
 | D05 | 根 `README.md` Quick Start | "open http://localhost:80" | 代码默认 `8080`，`config.yaml` 示例 `8001` | **已修正**（v2.0 迁入 `01`） |
@@ -199,10 +180,12 @@ workbench/
 | D11 | `embed.go` 注释、`isUIAsset` 白名单、`config.yaml` 的 `/todo.html` 别名 | 存在 `todo.html` 多入口 | `frontend/dist` 无该文件，属历史遗留 | 待修正 |
 | D12 | `internal/notify/email.go` 头注释 | 提到 `EMAIL_USER` 环境变量 | 实际只有 `EMAIL_PASS`；`user` 来自 `config.yaml` | 待修正 |
 | D13 | `internal/server/upload.go` 注释 | 「编辑器保存也走本接口」 | 前端仅侧栏上传、文件选择器上传、AI「回复保存为文件」调用 `uploadFiles` | 待修正 |
-| D14 | `archive/rbac-design.md`、`archive/migration-strategy.md` | 状态「设计中 / 未实施」，含 `CGO_ENABLED=0` + modernc、`org_features`、自愈式迁移 | 已实施/被取代：mattn + cgo + sqlite-vec、`user_org_feature`、golang-migrate 版本化迁移（基线 000017） | **已处理**：归档提示 + 移入 `archive/` |
+| D14 | 原 `archive/rbac-design.md`、`archive/migration-strategy.md` | 状态「设计中 / 未实施」，含 `CGO_ENABLED=0` + modernc、`org_features`、自愈式迁移 | 结论早已被取代：mattn + cgo + sqlite-vec、`user_org_feature`、golang-migrate 版本化迁移（基线 000020）；`docs v2.2` 已移除归档目录与这两份设计稿 | **已移除（docs v2.2）** |
 | D15 | 提交 `5d28238`（000016 `ai_runs` 等） | 初版文档未包含 | v2.0 已纳入 `02` §8.5、`03` §5.3/§5.4/§6 | **已同步** |
-| D16 | 工作树未提交的 000017 编排引擎 | 无历史文档 | v2.0 已纳入 `02` §9、`03` §3/§5.9/§6/§10，并在 §3.2 标注为工作树增量 | **已纳入，待提交后复核** |
-| D17 | 根 `README.md` Features / API Endpoints | 未覆盖后台运行、编排、断点恢复等新能力 | 见 `02-functional-guide.md` §8.5/§9 与 `03-design.md` §7.2 | 待补充 |
-| D18 | 工作树未提交的 000018 编排模板 | v2.0 正文未包含（`pipeline_templates` 表、HTTP 直调入口、cron 触发模板、共享 `runPipeline` 核心） | 根 `CHANGELOG.md` 已记录「编排能力第 2 步（后端）」；按 §3.3 批次基线策略留待下一轮同步 `02` §9、`03` §5.9/§6/§7.2、`05` §7 | 待同步 |
+| D16 | 提交 `c0577c4`（000017 编排引擎） | v2.0 撰写时属未提交的工作树增量 | `02` §9、`03` §3/§5.9/§6/§10 已纳入；000017 已随 `c0577c4` 提交 | **已提交并复核（docs v2.2）** |
+| D17 | 根 `README.md` Features / API Endpoints | 未覆盖后台运行、编排模板/定时触发、断点恢复等新能力 | 见 `02-functional-guide.md` §8.5/§9/§12 与 `03-design.md` §5.9/§7.2 | 待补充 |
+| D18 | 提交 `c0577c4`（000018–000020 编排模板与通用定时触发） | v2.0 正文未包含（`pipeline_templates` 表、HTTP 直调入口、cron 触发模板、共享 `runPipeline` 核心） | 模板只存 Definition，cron/启停/状态已迁至 `schedule_triggers`（000019/000020）；`docs v2.2` 已写入 `02` §9、`03` §5.9/§6/§7.2、`05` §4/§7 | **已同步（docs v2.2）** |
+| D19 | `internal/notify/email_template.go` 注释、根 `CHANGELOG.md` 历史条目 | 仍写 `docs/email-template-preview.html` 及旧 `design.md` / 迁移基线 000015 路径 | 邮件模板预览与两份历史设计稿已删除；`CHANGELOG.md` 历史条目按「不删历史行」保留 | 代码注释待修正 |
+| D20 | 本文件 §3.2 / `03` §6.1 迁移基线 | `docs v2.2` 写 `000020_pipeline_templates_pure`（20 个版本 / 40 个脚本） | 工作树已有 000021（AI 会话消息）与 000022–000024，现为 24 个版本 / 48 个脚本；§3.2 与 `03` §6.1 已更新 | **已修正（docs v2.3）** |
 
 新增偏差时追加一行并写清「位置 / 描述 / 当前事实 / 状态」；修正后把状态改为「已修正（版本）」，不删除历史行，便于追溯。

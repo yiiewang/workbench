@@ -7,6 +7,10 @@ import "testing"
 func TestCronTriggerCRUD(t *testing.T) {
 	d := newTestDB(t)
 	ctx := ctx()
+	// 000023 会从 seed 的全局任务回填 job 规则；本用例只验证 CRUD，先清空隔离。
+	if _, err := d.conn.ExecContext(ctx, `DELETE FROM schedule_triggers`); err != nil {
+		t.Fatal(err)
+	}
 
 	id, err := d.CreateCronTrigger(ctx, 1, 2, "pipeline_template", 7, "0 9 * * *", true)
 	if err != nil {
@@ -87,6 +91,14 @@ func TestDeleteCronTriggersForTarget(t *testing.T) {
 func TestScheduleTriggersBackfill(t *testing.T) {
 	d := newTestDB(t)
 	ctx := ctx()
+	// 000023 会从 seed 的全局任务回填 job 规则；本用例只验证模板回填，先清空隔离。
+	if _, err := d.conn.ExecContext(ctx, `DELETE FROM schedule_triggers`); err != nil {
+		t.Fatal(err)
+	}
+	// 000023 会从 seed 的全局任务回填 job 规则；本用例只验证模板回填，先清空隔离。
+	if _, err := d.conn.ExecContext(ctx, `DELETE FROM schedule_triggers`); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, ddl := range []string{
 		`ALTER TABLE pipeline_templates ADD COLUMN cron_expr TEXT NOT NULL DEFAULT ''`,

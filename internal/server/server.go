@@ -108,16 +108,10 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 			return nil, fmt.Errorf("init time reminder job: %w", terr)
 		}
 		sched.AddJob(timeJob)
-		// AI 定时任务执行（用户自建，cron 命中 → LLM 生成 → 邮件通知）；
-		// aiJobLLM 在调用前按任务归属用户做 RAG 检索注入（日报可引用个人文件）
-		aiJobsRunner, ajerr := schedule.NewAIJobsRunnerJob(database, srv.aiJobLLM, loc)
-		if ajerr != nil {
-			return nil, fmt.Errorf("init ai jobs runner: %w", ajerr)
-		}
-		sched.AddJob(aiJobsRunner)
-		// 通用定时触发：schedule 只按 target_type 分发，pipeline 在此注册自己的执行入口
+		// 通用定时触发：schedule 只按 target_type 分发，pipeline / 定时任务各自注册执行入口
 		triggersJob, tjerr := schedule.NewTriggersJob(database, map[string]schedule.TriggerHandler{
 			"pipeline_template": srv.triggerPipelineTemplate,
+			"job":               srv.triggerJob,
 		}, loc)
 		if tjerr != nil {
 			return nil, fmt.Errorf("init cron triggers job: %w", tjerr)
@@ -257,8 +251,8 @@ func (s *Server) App() *iris.Application {
 	api.Get("/ai/sessions", auth, s.handleAISessionsList)
 	api.Post("/ai/sessions", auth, s.handleAISessionCreate)
 	api.Get("/ai/sessions/{id}", auth, s.handleAISessionGet)
-	api.Put("/ai/sessions/{id}", auth, s.handleAISessionUpdate)
 	api.Delete("/ai/sessions/{id}", auth, s.handleAISessionDelete)
+	api.Put("/ai/sessions/{id}/messages", auth, s.handleAISessionMessagesUpsert)
 
 	// Admin API（需鉴权 + admin 或 org_admin 角色，admin 跨 org、org_admin 仅本 org）
 	admin := api.Party("/admin", auth, RequireUserManager)

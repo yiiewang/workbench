@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -99,16 +100,17 @@ func (s *Server) execPipelineLLM(ctx context.Context, args map[string]any) (any,
 // execPipelineAPI 调用站内 /api/*：自签 token 携带当前用户身份，
 // 非 GET 方法需在 allowWrite 里按 "api/<path>" 显式授权。
 func (s *Server) execPipelineAPI(ctx context.Context, name string, args map[string]any, def pipeline.Definition, rctx *pipeline.RunContext) (any, error) {
-	path := "/api/" + strings.TrimPrefix(name, "/")
-	if strings.Contains(path, "..") || strings.Contains(path, "://") || strings.ContainsAny(path, " \t\r\n") {
-		return nil, fmt.Errorf("invalid api path %q", path)
+	path, method, err := resolveAPIRequest(name, args, def)
+	if err != nil {
+		return nil, err
 	}
-	method := http.MethodGet
-	if m, ok := args["method"].(string); ok && strings.TrimSpace(m) != "" {
-		method = strings.ToUpper(strings.TrimSpace(m))
-	}
-	if method != http.MethodGet && !containsString(def.AllowWrite, "api/"+name) {
-		return nil, fmt.Errorf("api step %q with %s must be listed in allowWrite", path, method)
+	target := path
+	if q, ok := args["query"].(map[string]any); ok && len(q) > 0 {
+		values := url.Values{}
+		for k, v := range q {
+			values.Set(k, fmt.Sprint(v))
+		}
+		target += "?" + values.Encode()
 	}
 	var body io.Reader
 	if args["body"] != nil {
@@ -118,7 +120,7 @@ func (s *Server) execPipelineAPI(ctx context.Context, name string, args map[stri
 		}
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://pipeline.internal"+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, "http://pipeline.internal"+target, body)
 	if err != nil {
 		return nil, err
 	}

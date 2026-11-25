@@ -1,6 +1,6 @@
 # 软件设计文档
 
-> 面向：开发者、维护者 ｜ 代码基线：`v1.3.0-25-g517f88c` + 工作树中的编排引擎（迁移 000017）
+> 面向：开发者、维护者 ｜ 代码基线：`v1.3.0-26-gc0577c4` + 工作树迁移 000021–000024
 > 使用者视角见 [`02-functional-guide.md`](02-functional-guide.md)；构建与发布见 [`04-build-and-release.md`](04-build-and-release.md)；配置与运维见 [`05-operations.md`](05-operations.md)；文档维护规范与基线说明见 [`README.md`](README.md)。
 
 ## 1. 关于本文档
@@ -12,7 +12,7 @@
 | 阅读路径 | §2 架构 → §4 启动装配 → §6 数据模型 / §7 接口 → §5 流程 → §9 扩展点 |
 | 引用约定 | 「文件路径 + 函数/类型/常量名」，不写行号 |
 
-`docs/archive/` 下的 RBAC / 迁移方案设计稿是 2026-08-21 的历史文档，其中 `CGO_ENABLED=0` + modernc、`org_features` 等结论已被取代，**不作为现行设计依据**。
+2026-08-21 的 RBAC / 迁移方案设计稿与邮件模板预览已从 `docs/` 移除；其中的 `CGO_ENABLED=0` + modernc、`org_features`、自愈式迁移等结论早已被取代，本文件只描述现行实现，历史决策见根 `CHANGELOG.md`。
 
 ## 2. 架构总览
 
@@ -39,7 +39,8 @@
 │  └───────┬──┘ └──────┬─────┘ └──┬───────┘ └─────────┘ └─────────┘│
 │          │           │          │ notify（邮件订阅者）            │
 │  ┌───────▼───────────▼──────────▼───────────────────────────────┐ │
-│  │ SQLite 单文件：业务表 + ai_runs + pipeline_runs + vec0 + FTS5 │ │
+│  │ SQLite 单文件：业务表 + ai_runs + pipeline_runs/templates │ │
+│  │                + schedule_triggers + vec0 + FTS5             │ │
 │  │ sqlitevec 静态扩展 / sqlite_fts5 build tag                    │ │
 │  └───────────────────────────────────────────────────────────────┘ │
 │  ┌───────────────────────────────────────────────────────────────┐ │
@@ -80,13 +81,13 @@
 | 包 | 职责 | 关键文件与符号 | 主要依赖 |
 |---|---|---|---|
 | `config` | YAML 结构、默认值、非零值合并、环境变量覆盖、`~/` 展开 | `config.go`：`Config`、`DefaultConfig`、`Load`、`mergeConfig`、`ApplyEnv`、`ResolvePath` | yaml.v3 |
-| `db` | SQLite 连接/迁移、RBAC、任务、分享、会话、AI job、后台 run、编排 run、RAG 表读写、密钥与限流 | `db.go`（`Open`/`TaskItem`）、`migrate.go`（`detectBaseVersion`）、`users.go`、`tasks.go`、`shares.go`、`ai_sessions.go`、`ai_runs.go`、`pipeline_runs.go`、`time_reminders.go`、`rag.go`（`EnsureVecIndex`/`EnsureFTS`）、`secrets.go` | mattn/go-sqlite3、golang-migrate、sqlitevec |
-| `server` | iris 路由与全部 handler、鉴权、沙箱、AI 代理/Agent/审批、后台 run、编排能力装配 | `server.go`（`Server`/`New`/`App`/`safeJoin`）、`auth.go`、`ai.go`（`handleAIChat`/`aiRunWriter`/`handleAIRuns*`）、`aitools.go`、`aitools_mcp.go`、`aiapproval.go`、`pipeline.go`、`fsops.go`、`upload.go`、`media.go`、`share.go`、`admin.go`、`org.go`、`codes.go`、`response.go` | iris、db、rag、schedule、notify、mcpclient、pipeline、UIFS |
+| `db` | SQLite 连接/迁移、RBAC、任务、分享、会话、AI job、后台 run、编排运行/模板/触发规则、RAG 表读写、密钥与限流 | `db.go`（`Open`/`TaskItem`）、`migrate.go`（`detectBaseVersion`）、`users.go`、`tasks.go`、`shares.go`、`ai_sessions.go`、`ai_runs.go`、`pipeline_runs.go`、`pipeline_templates.go`、`cron_triggers.go`、`time_reminders.go`、`rag.go`（`EnsureVecIndex`/`EnsureFTS`）、`secrets.go` | mattn/go-sqlite3、golang-migrate、sqlitevec |
+| `server` | iris 路由与全部 handler、鉴权、沙箱、AI 代理/Agent/审批、后台 run、编排与通用触发的装配层 | `server.go`（`Server`/`New`/`App`/`safeJoin`）、`auth.go`、`ai.go`（`handleAIChat`/`aiRunWriter`/`handleAIRuns*`）、`aitools.go`、`aitools_mcp.go`、`aiapproval.go`、`pipeline.go`（`runPipeline`）、`pipeline_http.go`、`aijob_target.go`（`ResolveTarget`/`ValidateJobTarget`）、`aijob_exec.go`、`aijob_trigger.go`、`schedule_triggers.go`（`supportedTriggerTargets`/`validateTriggerTarget`）、`fsops.go`、`upload.go`、`media.go`、`share.go`、`admin.go`、`org.go`、`codes.go`、`response.go` | iris、db、rag、schedule、notify、mcpclient、pipeline、UIFS |
 | `rag` | 文件索引与混合检索、LLM 相关性预判与摘要卡 | `service.go`（`Service`/`IndexFile`/`ReindexTree`/`Search`）、`chunk.go`、`embedding.go`、`judge.go`、`extract.go` | db、OpenAI 兼容 HTTP |
-| `schedule` | 手写 cron 引擎、进程内事件总线、内置与 AI job | `scheduler.go`（`ParseCron`/`Scheduler`）、`bus.go`（`EventBus`）、`jobs.go`（`KnownTopics`）、`aijobs.go` | db、标准库 |
+| `schedule` | 手写 cron 引擎、进程内事件总线、通用定时触发分发 | `scheduler.go`（`ParseCron`/`Scheduler`）、`bus.go`（`EventBus`）、`jobs.go`（`KnownTopics`）、`triggers.go`（`NewTriggersJob`/`TriggerHandler`/`runCronTriggers`/`ClaimCronTrigger`） | db、标准库；包内无业务对象类型 |
 | `notify` | 订阅事件总线并发邮件 | `email.go`（`SubscribeEmailNotifier`）、`email_template.go`（`mdToHTML`/`safeHref`）、`email_helper.go` | net/smtp、schedule、db |
 | `mcpclient` | MCP Streamable HTTP 最小客户端 | `client.go`（`initialize` → `notifications/initialized` → `tools/list` / `tools/call`） | net/http |
-| `pipeline` | **声明式编排执行引擎**，不依赖 HTTP/iris/db | `pipeline.go`：`Definition` / `Step` / `StepResult` / `RunContext.Interpolate` / `Runner.Run` / `Executor` | 仅标准库 |
+| `pipeline` | **声明式编排执行引擎**（DAG 分层 + 同层并行），不依赖 HTTP/iris/db | `pipeline.go`：`Definition` / `Step`（`Needs`/`When`/`Retry`）/ `StepResult` / `Layers()` / `RunContext.Interpolate` / `Runner.Run` / `Executor` | 仅标准库 |
 | `sqlitevec` | 注册 sqlite-vec 静态扩展、向量序列化 | `vec.go`（`Auto`/`SerializeFloat32`）+ vendor C 源码 | cgo |
 
 顶层还有 `embed.go`（`UIFS`）、`cmd/workbench/main.go`、`cmd/probedb`、`cmd/probeui`、`scripts/ragclean.go`（运维工具，不参与主服务启动）。
@@ -95,12 +96,12 @@
 
 | 目录 | 职责 | 代表文件 |
 |---|---|---|
-| `api/` | 按域封装 HTTP 与 SSE | `ai.ts`（`chatStream`/`listAIRuns`/`getAIRun`）、`auth.ts`、`files.ts`、`share.ts`、`tasks.ts`、`aiJobs.ts`、`admin.ts` |
-| `lib/` | 请求/渲染/工具层 | `common.ts`（`authHeaders`/`apiCall`/401 拦截）、`markdownRenderer.ts`、`ragNav.ts` |
+| `api/` | 按域封装 HTTP 与 SSE | `ai.ts`（`chatStream`/`listAIRuns`/`getAIRun(id, offset)`）、`pipelines.ts`、`scheduleTriggers.ts`、`auth.ts`、`files.ts`、`share.ts`、`tasks.ts`、`aiJobs.ts`、`admin.ts` |
+| `lib/` | 请求/渲染/工具层 | `common.ts`（`authHeaders`/`apiCall`/401 拦截）、`markdownRenderer.ts`、`ragNav.ts`、`modalEsc.ts`（`escStack`/`hasOpenModal`） |
 | `stores/` | 跨组件状态与身份作用域清理 | `auth.ts`、`indexStore.ts`（`resetIdentityScopedState`）、`todoStore.ts` |
-| `composables/` | 组件无关业务逻辑 | `useAIChat.ts`（SSE/审批/会话/**`pollRun`/`resumePendingRun`/`applyRunSnapshot`**）、`todoSync.ts`、`useTodoApp.ts` + `todo/*`、`useTreeStore.ts` |
-| `components/` | 展示与交互，按域分目录 | `ai/`、`editor/`、`markdown/`、`modal/`、`sidebar/`、`tab/`、`todo/` |
-| `views/` + `views/mobile/` | PC 与移动两套独立视图 | `IndexView`、`TodoView`、`AdminView`、`AiJobsView`；`MobileLayout`、`MAI`、`MTodo`、`MShareView` 等 |
+| `composables/` | 组件无关业务逻辑 | `useAIChat.ts`（`ChatSession`/`aiChatKey`/`PendingRun`/SSE/审批/会话/**`pollRun`/`resumePendingRuns`/`resumeOne`**）、`todoSync.ts`、`useTodoApp.ts` + `todo/*`、`useTreeStore.ts` |
+| `components/` | 展示与交互，按域分目录 | `ai/`（`AiMessage.vue`/`PipelineTriggerCard.vue`）、`pipeline/PipelineGraph.vue`、`sidebar/PipelineSidebar.vue`、`editor/`、`markdown/`、`modal/`、`tab/`、`todo/` |
+| `views/` + `views/mobile/` | PC 与移动两套独立视图 | `IndexView`、`TodoView`、`PipelineView`、`AdminView`、`AiJobsView`；`MobileLayout`、`MAI`、`MTodo`、`MShareView` 等 |
 | `router/` / `layouts/` / `styles/` | 路由与设备分流 / PC 外壳 / 全局样式 | `router/index.ts`、`DefaultLayout.vue`、`style.css` |
 
 **PC 与移动端共享业务层、只拆视图层**：`useAIChat`、`FileViewer`、`ModalShell`、`api/*` 两侧复用，断连恢复逻辑也由同一 composable 承担。
@@ -115,7 +116,7 @@ cmd/workbench/main.go
   └─ server ─┬─ db ──────┤
              ├─ config ──┘
              ├─ rag ───────── db / embedding 网关
-             ├─ schedule ──── db / aiJobLLM(server) / bus
+             ├─ schedule ──── db / bus（handler 由 server 装配注入）
              ├─ notify ────── schedule.EventBus / db / SMTP
              ├─ mcpclient ─── 外部 MCP HTTP 服务
              ├─ pipeline ──── 仅标准库；Executor 由 server 注入
@@ -138,7 +139,7 @@ cmd/workbench/main.go
 | 1 | 默认 JSON `slog`；解析 `-config`（默认 `config.yaml`） |
 | 2 | `config.Load` → 按 `logging.level` 重建 logger → `config.ApplyEnv` |
 | 3 | `ResolvePath` 展开 `staticDir`/`dbPath`/`logDir` 的 `~/`；`MkdirAll` |
-| 4 | `db.Open`：注册 sqlite-vec → WAL + `busy_timeout=5000` + `foreign_keys=on` + `SetMaxOpenConns(1)` → 执行 17 个内嵌迁移 |
+| 4 | `db.Open`：注册 sqlite-vec → WAL + `busy_timeout=5000` + `foreign_keys=on` + `SetMaxOpenConns(1)` → 执行 20 个内嵌迁移 |
 | 5 | `db.LoadOrCreateSecret("token", ...)` 取/生成 32 字节签名密钥 |
 | 6 | 无用户且未配置 `ADMIN_SETUP_TOKEN` 时打印抢占窗口告警 |
 | 7 | `server.New(...)`（见 4.2）→ `srv.App()` 注册路由与中间件 |
@@ -153,10 +154,10 @@ cmd/workbench/main.go
 | 1 | 解析并创建 `static_dir` 绝对路径与 `{static_dir}/_admin` | 返回 error |
 | 2 | `initMCPTools()` 拉取各 MCP 服务 `tools/list` 转静态 `aiTool` 表 | 配置缺 `name`/`url` fail fast；不可达仅告警跳过 |
 | 3 | `schedule.NewEventBus()` → `notify.SubscribeEmailNotifier(...)` | `enabled=true` 且缺 `host`/`user` 返回 error |
-| 4 | `schedule.enabled`：`time.LoadLocation` → `NewScheduler` → AddJob 三个 job → `Start` | 时区非法回退 UTC；cron 非法 fail fast |
+| 4 | `schedule.enabled`：`time.LoadLocation` → `NewScheduler` → AddJob **四个** job（含 `cron_triggers_runner`）→ `Start` | 时区非法回退 UTC；cron 非法 fail fast |
 | 5 | `embedding.Enabled()`：`EnsureVecIndex(dim)` → `EnsureFTS()` → `rag.NewService` | vec 建表失败 RAG 关闭；FTS 失败降级纯向量 |
 
-`Server` 持有的跨请求状态：`aiApprovals`（审批 hub）、`scheduler`、`bus`、`rag`、`mcpTools`、`tokenSecret`。编排能力**不在启动时装配**：`pipelineTool()` 由 `allTools()` 在运行时合成，用于规避「`aiTools` → `execRunPipeline` → `execAITool` → `aiToolByName` → `aiTools`」的包级变量初始化环。
+`Server` 持有的跨请求状态：`aiApprovals`（审批 hub）、`scheduler`、`bus`、`rag`、`mcpTools`、`tokenSecret`。`New()` 提前创建 `iris.Application`，并把 `triggerPipelineTemplate` 以 `TriggerHandler` 注册进 `NewTriggersJob` 的 `target_type` 分发表，使 `schedule` 包只认通用规则行、不 import 任何业务对象类型。编排工具**不进 `aiTools` 静态表**：`pipelineTool()` 由 `allTools()` 在运行时合成，用于规避「`aiTools` → `execRunPipeline` → `execAITool` → `aiToolByName` → `aiTools`」的包级变量初始化环。
 
 ### 4.3 生命周期约束
 
@@ -213,7 +214,7 @@ POST /api/ai/chat（SSE）
        forwardAIStream 逐行透传；tool_calls 分片按 index 累积
        无 tool_calls → 补 [DONE]；有 → tool_call/tool_result → 回传继续
        达上限轮：不下发 tools + system 提示「基于已有结果直接回答」
-  → flush 落库（每轮快照 + defer 最终态 done/failed）
+  → 增量落库（aiRunWriter 按 300ms maybeFlush 写 result + defer 最终态 done/failed）
   → usage 事件（多轮累加）→ [DONE]
 ```
 
@@ -222,20 +223,22 @@ POST /api/ai/chat（SSE）
 ### 5.4 前端断连恢复（1b）
 
 ```
-chatStream 分发 run_id → useAIChat 存 sessionStorage['workbench-ai-active-run']
+chatStream 分发 run_id → useAIChat 把 PendingRun 存 sessionStorage
   ├─ 正常收到 [DONE] → onDone → 常规收尾，清 runId
   ├─ 静默断流（reader 正常结束但无 [DONE]）→ 保持 streaming → pollRun
-  │    每 2s GET /api/ai/runs/{id}，上限 15min
-  │    applyRunSnapshot：后端 result 覆盖半截正文；按 id 补齐工具/引用/usage；
-  │    steps 置空交 legacySteps 归一化重建
-  └─ 用户主动停止 / 业务错误 → 原有收尾（停止轮询，服务端 run 仍跑完）
+  │    每 300ms GET /api/ai/runs/{id}?offset=<游标>，上限 15min
+  │    服务端 splitRunResult 按 offset 切出 delta → 续写到对应 ChatSession
+  │    的消息并推进 offset；工具/引用/usage 按 id 补齐
+  └─ 用户主动停止 / 服务端业务错误（error.business）→ 原有收尾
+     刷新/网络中断的 ReadableStream 原生异常判为可恢复，保留 pending 记录
 
-刷新 / 打开面板 → maybeRestoreLastSession → resumePendingRun
-    本地 runId 优先（含已完成遗留，30min 过期保护）
+刷新 / 打开面板 → maybeRestoreLastSession → resumePendingRuns()
+    sessionStorage 的 PendingRun[] 按 ChatSession 归属逐个 resumeOne
+    （含已完成遗留，30min 过期保护）
     本地丢失 → GET /api/ai/runs 找仍 running 的兜底
 ```
 
-PC 面板与移动端共用 `useAIChat`，组件零改动。
+PC 面板与移动端共用 `useAIChat` 与 `AiMessage.vue`（经 `aiChatKey` provide/inject 各自实例），恢复逻辑只落在 composable 里；多个会话可同时生成并各自恢复。
 
 ### 5.5 RAG：索引与混合检索
 
@@ -282,43 +285,56 @@ Scheduler（整分钟 ticker，Vixie cron bitset 匹配）
   │    ScanDueTasks → MarkNotified(INSERT OR IGNORE) → task.due
   ├─ todo_time_reminder cron = * * * * *
   │    ScanTimeReminders → MarkNotified → task.reminder（start / due）
-  └─ ai_jobs_runner     cron = * * * * *
-       每分钟重读 ai_jobs → Matches && last_run_at != 当前分钟 → goroutine
-       → buildAIJobPrompt（角色 + ≤50 条任务 + prompt + Markdown 格式）
-       → aiJobLLM（RAG top-3 前置 + 非流式 aiChatOnce，5min）
-       → MarkAIJobRun（output 前 4KB）→ bus.Publish(context.Background(), user.notify)
+  └─ cron_triggers_runner cron = * * * * *
+       ListEnabledCronTriggers → Matches && last_run_at != 当前分钟
+       → ClaimCronTrigger(nowKey, leaseUntil) CAS 占租约
+         （同分钟不重跑；超过 1 分钟的长任务租约未过期不会被重复触发）
+       → handlers[target_type]（15min 独立 runCtx，状态回写用独立 ctx）
+            job               → triggerJob：读 ai_jobs → ResolveTarget/Validate
+                                → runPipeline → MarkAIJobRunDetail → user.notify
+            pipeline_template → triggerPipelineTemplate：读模板 Definition → runPipeline
+       → MarkCronTriggerRun(ok / "error: ...", nowKey)（同时清租约）
 
 EventBus.Publish → 每 handler 独立 goroutine（panic recover）
   → EmailNotifier.onTaskDue / onTaskReminder / onUserNotify
   → GetUserEmail（空跳过）→ SMTP STARTTLS → multipart/alternative
 ```
 
-`KnownTopics`：`task.due`、`task.reminder`、`user.notify`（仅 `user.notify` 允许 AI 发布）。全局公共任务（`user_id IS NULL`）按 `ListUsersWithEmail` 展开为每用户独立执行，`last_run_at` 只记一次。
+`KnownTopics`：`task.due`、`task.reminder`、`user.notify`（仅 `user.notify` 允许 AI 发布）。全局公共任务（`user_id IS NULL`）的 job 规则用 `org_id=0 / user_id=0` 标记，`triggerJob` 内按 `ListUsersWithEmail` 展开为每用户独立执行与投递；规则行的 `last_run_at` 记录本次触发。`cron_triggers_runner` 不走事件总线：只按 `target_type` 调装配层 `TriggerHandler`，未注册类型或非法 cron 记 `error: ...` 状态并跳过，不影响其他规则。
 
-### 5.9 声明式编排
+### 5.9 声明式编排、模板与通用触发
+
+四条执行入口共用 `runPipeline(ctx, org, user, runID, def)`（`server/pipeline.go`）：
 
 ```
-AI 构造 Definition（纯数据）→ run_pipeline（写类，一次界面确认）
-  → execRunPipeline：Validate（步骤非空、≤50、id 唯一合法、uses 形态合法）
+run_pipeline 工具（一次界面确认） / POST /api/pipeline/run（直调 Definition）
+POST /api/pipeline/templates/{id}/run（读模板）/ triggerPipelineTemplate（定时触发）
+triggerJob（定时任务：ResolveTarget 归一化后进入同一核心）
   → db.CreatePipelineRun(status=running)
-  → pipeline.NewRunner(exec, onStep) 顺序执行，每步 5min 超时
+  → Definition.Validate：步骤非空、≤50、id 唯一合法、uses/when/retry 合法、
+    needs 引用存在且无环
+  → Definition.Layers() 拓扑分层，同层并行（maxParallelSteps=4）
        withToolContext 从 app.ContextPool 合成 iris.Context 预置 userID/orgID，
        Request().Context() 绑后台 run ctx（工具层零改动）
-       RunContext.Interpolate 替换 {{ steps.<id>.output }}
+       RunContext.Interpolate 在启动 goroutine 前替换 {{ steps.<id>.output }}
+       when 判定：缺省 on_success；on_failure / always 作补偿步骤
        Executor 按 uses 分派：
          tool/<name> → execAITool（复用内置/MCP 工具）
          api/<path>  → 站内 /api/*，自签短期 token + X-Org-Id，
                         经 app.ServeHTTP 内部调用
          llm         → aiChatOnce 非流式
-       失败即停，剩余步骤 skipped；每步 onStep 落库
-  → 工具只回步骤摘要；完整输出 GET /api/pipeline/runs/{id}
+       execWithRetry：retry ≤5、固定退避 200ms×次数、每步 5min 超时
+  → 每层结束 onStep 落一次 pipeline_runs 全量快照；主流程失败即停
+  → 工具只回步骤摘要；直调/手动触发返回 runId；完整输出 GET /api/pipeline/runs/{id}
 ```
 
-安全模型：`allowWrite` 必须显式列出写类工具与非 GET 的 api 步骤，否则该步失败；`api/<path>` 限定站内 `/api/*`，不能外访。`internal/pipeline` 不依赖 HTTP/iris/db，`Executor` 由 server 注入，可独立单测。
+**领域解耦**：`pipeline_templates` 只存 `id / org_id / user_id / name / definition / created_at / updated_at`（000020 删掉 cron_expr / enabled / last_run_at / last_status），调度配置归 `schedule_triggers`；`ai_jobs` 同样只存执行定义（`target_type` / `target_json` / `allow_write` / context / notify，000023 删掉 4 个调度列），cron / 启停 / 最近状态由 `target_type='job'` 的规则提供。`db` 层不解析 Definition、列表不取 definition。`schedule.NewTriggersJob` 只按 `target_type` 分发，目标是否存在与归谁所有由 `server/schedule_triggers.go` 的 `validateTriggerTarget` 在装配层校验（创建后目标绑定不可变）；删除模板 / 任务经 `DeleteCronTriggersForTarget` 清理孤儿规则。四张表都按 `org_id + user_id` 隔离，跨身份读模板或任务返回 `40401`。
+
+安全模型：`allowWrite` 必须显式列出写类工具与非 GET 的 api 步骤，否则该步失败；`api/<path>` 限定站内 `/api/*`，不能外访。定时执行无人审批，创建 / 更新时即做 Definition 级预检，并拒绝 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*`。`internal/pipeline` 不依赖 HTTP/iris/db，`Executor` 由 server 注入，可独立单测。
 
 ### 5.10 SPA 路由与深链兜底
 
-前端用 `createWebHistory()`，深链由后端兜底：`handleStaticWithAuth` → `handleRouteRedirect`，`routes` 为 `__spa__` 时返回 embed 的 `index.html`，`__listdir__` 时列目录。**新增前端路由必须同步在 `config.yaml` 的 `routes` 注册**，否则刷新该 URL 得到 401。
+前端用 `createWebHistory()`，深链由后端兜底：`handleStaticWithAuth` → `handleRouteRedirect`，`routes` 为 `__spa__` 时返回 embed 的 `index.html`，`__listdir__` 时列目录。**新增前端路由必须同步在 `config.yaml` 的 `routes` 注册**，否则刷新该 URL 得到 401。`/pipelines` 是本批新增的 `__spa__` 键，与 `/jobs` 一样不进 `PC_TO_MOBILE` 映射，窄视口走响应式 PC 布局。
 
 ## 6. 数据模型
 
@@ -337,16 +353,25 @@ AI 构造 Definition（纯数据）→ run_pipeline（写类，一次界面确�
 | 000007 | `users.revision` | 000016 | `ai_runs`（后台对话运行） |
 | 000008 | 用户邮箱 + `notify_log` | 000017 | `pipeline_runs`（编排运行） |
 | 000009 | 任务精确时刻 + `ai_jobs` | | |
+| 000018 | `pipeline_templates`（初版含 `cron_expr` / `enabled` / `last_run_at` / `last_status`） | | |
+| 000019 | `schedule_triggers` 通用规则表，并从模板 `cron_expr <> ''` 回填已有配置 | | |
+| 000020 | 模板表纯化：建新表 → 复制 → 删旧表 → 改名，删掉 4 个调度列 | | |
+| 000021 | AI 会话消息表（`ai_session_messages`，行级消息） | 000022 | `ai_jobs` 执行对象：target 五列 + `prompt` 回填 |
+| 000023 | 调度收敛：`ai_jobs` 去 4 个调度列 + `schedule_triggers.lease_until` + job 规则回填 | 000024 | `ai_job_runs` 详情列（run id / steps / 耗时） |
 
-### 6.2 现行表清单（21 项，含虚拟表与框架表）
+000020 是 SQLite 无 `DROP COLUMN` 时的标准重建写法；其 `.down.sql` 建回 `pipeline_templates_legacy`，按 `target_type='pipeline_template'` 从 `schedule_triggers` 取最近一条反向回填调度列。
+
+### 6.2 现行表清单（23 项，含虚拟表与框架表）
 
 | 组 | 表 | 关键列 / 约束 |
 |---|---|---|
 | 组织权限 | `orgs`、`roles`、`users`、`user_orgs`、`user_org_feature`、`app_secrets`、`rate_limits` | `users` 含 `is_platform_admin`/`revision`/`email`；`user_org_feature` 唯一 `(user_id,org_id,feature_code)` |
 | 业务 | `tasks`、`shares`、`notify_log` | `tasks.PK(id,user_id,org_id)` + `files`/`scheduled_time`/`due_time`；`notify_log` 唯一 `(topic,dedup_key,notify_date)` |
-| AI 会话调度 | `ai_sessions`、`ai_jobs`、`ai_job_runs` | `ai_sessions.messages` 为前端快照 JSON；`ai_jobs.user_id NULL` = 全局公共任务 |
+| AI 会话调度 | `ai_sessions`、`ai_jobs`、`ai_job_runs` | `ai_sessions.messages` 为前端快照 JSON；`ai_jobs` 只存执行定义（`target_type`/`target_json`/`allow_write`/context/notify，无调度列）；`ai_job_runs` 含 `target_type`/`pipeline_run_id`/`steps_summary`/`err_msg`/`duration_ms`/`finished_at` |
 | **后台运行** | `ai_runs` | `id TEXT PK`、org/user、`qa_id`/`session_id`、`status running/done/failed`、`events JSON`、`result`、`err_msg`、时间戳；索引 `(org_id,user_id,started_at DESC)` |
 | **编排运行** | `pipeline_runs` | `id TEXT PK`、org/user、`name`、`definition JSON`、`status`、`steps JSON`、`err_msg`、时间戳；同款 owner 索引 |
+| **编排模板** | `pipeline_templates` | `id INTEGER PK AUTOINCREMENT`、org/user、`name`、`definition JSON`（纯 Definition，不含调度字段）、时间戳；索引 `(org_id,user_id,id DESC)` |
+| **通用触发规则** | `schedule_triggers` | `id`、org/user、`target_type`（`pipeline_template` / `job`）、`target_id`、`cron_expr`、`enabled`、`last_run_at`/`last_status`、`lease_until`、时间戳；索引含 owner、enabled 与 `(target_type,target_id)` |
 | RAG | `file_index_state`、`file_chunks`、`rag_meta`、`file_chunk_fts`、`file_chunk_vec` | `file_chunks.chunk_index=-1` 为摘要卡；FTS5 `tokenize=trigram`，`rowid = file_chunks.id`；vec0 的 `owner = "orgID:userID"` 为分区键，**运行时由 `EnsureVecIndex` 创建，不在迁移脚本中** |
 | 框架 | `schema_migrations` | golang-migrate 维护 |
 
@@ -356,9 +381,13 @@ AI 构造 Definition（纯数据）→ run_pipeline（写类，一次界面确�
 
 ```
 orgs ─< user_orgs >─ users ─< tasks / ai_sessions / ai_jobs / shares
-                        └─< ai_runs / pipeline_runs（org_id+user_id 隔离）
+                        └─< ai_runs / pipeline_runs / pipeline_templates
+                             / schedule_triggers（org_id+user_id 隔离）
 user_orgs ─< user_org_feature
 ai_jobs ─< ai_job_runs
+pipeline_templates ─< schedule_triggers（target_type='pipeline_template'
+                                         + target_id；逻辑关联，无外键）
+ai_jobs ─< schedule_triggers（target_type='job' + target_id；逻辑关联，无外键）
 RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 ```
 
@@ -366,7 +395,7 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 - 存储层整数 id / 磁盘路径 `orgName/userName` 双轨，改名需同步迁移目录。
 - `users.revision` 是所有任务写入的单调版本号；`tasks.files` 为 JSON 数组，空关联归一 `nil` + `omitempty`。
 - `notify_log` 去重在 **Publish 之前**用 `INSERT OR IGNORE` + `RowsAffected` 原子判定，SMTP 失败不重投；`user.notify` 不去重。
-- `ai_runs` / `pipeline_runs` 均按 org+user 隔离，列表不含大字段（events / steps 由详情接口返回）。
+- `ai_runs` / `pipeline_runs` / `pipeline_templates` / `schedule_triggers` 均按 org+user 隔离；列表不含大字段（events / steps / definition 由详情接口返回）；模板详情跨身份访问返回 `40401`。
 
 ## 7. 接口设计
 
@@ -401,14 +430,24 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | POST | `/api/ai/approval` | 写工具审批 `{id, approved}` |
 | POST | `/api/ai/reindex` | 全量重建（并发 `40902`）；与 `reindex_*` 工具共用 `startReindex` |
 | GET | `/api/ai/reindex/status` · `/api/ai/index-status` | 进度 / 文件索引状态 |
-| GET | `/api/ai/runs` · `/api/ai/runs/{id}` | 后台运行列表（不含 events）/ 详情（含 events） |
-| GET · POST | `/api/ai/jobs` | 定时任务列表 / 创建 |
-| PUT · DELETE | `/api/ai/jobs/{id}` | 更新 / 删除 |
-| GET | `/api/ai/jobs/{id}/runs` | 执行历史 |
+| GET | `/api/ai/runs` · `/api/ai/runs/{id}?offset=` | 后台运行列表（不含 events）/ 详情（含 events，按 `offset` 切出 `delta` 与新游标） |
+| GET · POST | `/api/ai/jobs` | 定时任务列表 / 创建（`target` 四类执行对象；老 `prompt` 兼容） |
+| PUT · DELETE | `/api/ai/jobs/{id}` | 更新 / 删除（同步 `/api/schedule/triggers` 的 job 规则） |
+| GET | `/api/ai/jobs/{id}/runs` | 执行历史（含 targetType / pipelineRunId / stepsSummary / durationMs） |
 | GET · POST | `/api/ai/sessions` | 会话列表 / 创建 |
 | GET · PUT · DELETE | `/api/ai/sessions/{id}` | 会话详情 / 更新 / 删除 |
 
-**编排**：`GET /api/pipeline/runs?limit=`、`GET /api/pipeline/runs/{id}`（按 org+user 隔离）。
+**编排与通用触发**（14 条，全部带 `auth` 且按 org+user 隔离）：
+
+| Method | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/pipeline/runs` · `/api/pipeline/runs/{id}` | 运行列表（不含 steps）/ 详情（含逐步结果） |
+| POST | `/api/pipeline/run` | 直调 Definition，后台异步执行，返回 `runId` |
+| GET · POST | `/api/pipeline/templates` | 模板列表（不含 definition）/ 创建 |
+| GET · PUT · DELETE | `/api/pipeline/templates/{id}` | 详情（含 definition）/ 覆盖更新 / 删除（级联清触发规则） |
+| POST | `/api/pipeline/templates/{id}/run` | 手动触发，返回 `runId` |
+| GET · POST | `/api/schedule/triggers` | 规则列表（可按 `targetType`/`targetId` 过滤）/ 创建 |
+| GET · PUT · DELETE | `/api/schedule/triggers/{id}` | 规则详情 / 更新 / 删除 |
 
 **管理**（`auth` + `RequireUserManager`）：`GET|POST /api/admin/users`、`PATCH|DELETE /api/admin/users/{id}`、`GET /api/admin/roles`、`GET /api/admin/users/{id}/dashboard`、`GET /api/admin/users/{id}/features`、`PATCH /api/admin/users/{id}/features/{code}`。handler 内另有细粒度约束（组织管理员仅本组织、不能授予 `admin`、禁止删自己或最后一个 admin）。
 
@@ -425,9 +464,9 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | `tool_call` / `tool_result` | `aiToolCall{...}` / `{id,name,result}` | 每轮工具调用与结果 |
 | `approval_request` / `approval_resolved` | `{id,name,arguments}` / `{id,outcome}` | 写工具等待 / 定格 |
 | `usage` | `{prompt_tokens,completion_tokens,total_tokens}` | 最终轮（Agent 多轮累加） |
-| `error` | `{msg}` | 流已开启后上游失败 |
+| `error` | `{msg}` | 流已开启后上游失败；前端重抛时打 `business=true`，与刷新/网络造成的客户端流中断区分 |
 
-前端 `api/ai.ts` 逐行解析 `event:` + `data:`，`chatStream` 把 `run_id` / `onDone` 交给 `useAIChat`；历史按「轮」预算（展开后 ≤28 条）裁剪以适配后端 30 条上限。
+前端 `api/ai.ts` 逐行解析 `event:` + `data:`，`chatStream` 把 `run_id` / `onDone` 交给 `useAIChat`；断连后经 `getAIRun(id, offset)` 按 300ms 取 `delta/offset` 增量续写；历史按「轮」预算（展开后 ≤28 条）裁剪以适配后端 30 条上限。
 
 ### 7.4 前端请求封装
 
@@ -441,8 +480,10 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 授权 | 每请求校验 `X-Org-Id` 归属；`RequireUserManager` + handler 内细粒度约束；功能开关控制入口 |
 | 首用户 | `ADMIN_SETUP_TOKEN` 常量时间比较，仅用户表为空时校验 |
 | 路径 | `safeJoin` + `resolveUserPathSafe`（`EvalSymlinks` 双校验）+ `sanitizeUploadName`；软链接条目只操作链接 |
-| 后台 run | `ai_runs` / `pipeline_runs` 按 org+user 隔离；断连后写工具跳过；审批绑定用户且一次性 |
+| 后台 run / 编排数据 | `ai_runs` / `pipeline_runs` / `pipeline_templates` / `ai_jobs` / `schedule_triggers` 按 org+user 隔离；断连后写工具跳过；审批绑定用户且一次性 |
 | 编排 | `run_pipeline` 一次确认覆盖整条流程；`allowWrite` 显式预授权；`api/<path>` 限站内 `/api/*`，自签短期 token 带当前身份 |
+| 定时任务 | 创建 / 更新时按 Definition 预检 `allowWrite`；执行不进审批分支；拒绝 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*`；外部 MCP 仅白名单 |
+| 通用触发 | 创建规则时校验 `target_type` 白名单与目标归属，创建后目标绑定不可变；模板 / 规则详情跨身份返回 `40401`，不泄露存在性 |
 | 凭据 | AI keys / SMTP 授权码 / MCP header token 走环境变量（`${ENV_VAR}` 展开），不落仓库 |
 | 渲染 | Markdown 经 DOMPurify；HTML 预览用无 `allow-same-origin` 沙箱 iframe + null-origin CORS |
 | 邮件 | 用户内容 HTML 转义；`safeHref` 只允许 http(s) 且与 `site_url` 同 host |
@@ -459,10 +500,11 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 内置 AI 工具 | `aitools.go` 的 `aiTools` 表 + `execAITool`；写类设 `NeedApproval` | 路径走 `resolveUserPathSafe`；结果 32KB；当前 16 个工具，更新后同步 `02-functional-guide.md` §8.3 |
 | 外部工具 | `ai.mcp.servers` 配置（无需改代码） | stateless HTTP；`mcp_<server>_<tool>` 命名空间；一律审批 |
 | 编排能力类别 | `internal/pipeline` 的 `parseUses` + `server/pipeline.go` 的 `Executor` 分派 | 本包保持零外部依赖；新类别需补 `allowWrite` 判定 |
+| 通用触发目标类型 | `server/schedule_triggers.go` 的 `supportedTriggerTargets` + `Server.New` 注册 `TriggerHandler` + `validateTriggerTarget` | `schedule` 包只认 `target_type/target_id`；目标归属在装配层校验 |
 | 事件 topic | `schedule/jobs.go` 的 `KnownTopics` + 载荷 + 发布方 | 订阅者在 `Server.New` 注册；异步 handler 不依赖发布方 ctx |
 | 通知渠道 | 实现 `schedule.Handler` 并在 `Server.New` 订阅 | `Publish` 不等待、panic 隔离；渠道自管去重与失败 |
-| 定时 job | `schedule/` 新增 `New*Job` 并在 `Server.New` 中 `AddJob` | cron 非法 fail fast；DB 扫描要短 |
-| 前端页面 | `router/index.ts` + `views/` + `api/` | **同步 `config.yaml` 的 `routes`**；移动版需加 `/m/*` 与分流映射 |
+| 定时 job | `schedule/` 新增 `New*Job` 并在 `Server.New` 中 `AddJob` | cron 非法 fail fast；DB 扫描要短；通用触发复用 `NewTriggersJob`，无需新增 job |
+| 前端页面 | `router/index.ts` + `views/` + `api/` + `components/` | **同步 `config.yaml` 的 `routes`**；移动版需加 `/m/*` 与分流映射；`/pipelines` 未进映射，走响应式 PC 布局 |
 | 预览类型 | `FileViewer.vue` 分派 + `mimeTypeByExt` | 二进制走下载/blob；媒体需 ticket + Range |
 | 配置项 | `config.go` 结构体 + `DefaultConfig` + `mergeConfig` + 可选 `ApplyEnv` | 注意非零值合并语义；同步 `config.yaml`、`05-operations.md` 与两份文档 |
 
@@ -482,16 +524,21 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 任务同步 | 服务端 `revision` + 乐观锁 + 30s 轮询 | 增量写、多设备对账 | 1.3.0 起废弃 `PUT /api/tasks`，前后端须同版本 |
 | 列表瘦身 | `content` → `contentPreview` + 详情接口 | 省带宽 | `PATCH` 必须实现「缺省保留」语义 |
 | **对话与请求解耦** | 后台 run（`runCtx` 15min + `aiRunWriter` 镜像输出） | 断网/关面板不掐断 Agent 循环，结果可查 | 状态不跨进程重启；断连后写类工具跳过；15min 总超时 |
-| **断连恢复** | `run_id` + 2s 轮询 `/api/ai/runs/{id}` | 无需 WebSocket/推送，改动集中在一个 composable | 轮询上限 15min、本地 runId 30min 过期保护；静默断流需与 `[DONE]` 区分 |
-| **编排 vs 改造 Agent** | 声明式纯数据 `Definition` + 独立 Runner | 模型自主规划多步，Agent 循环零改动；借鉴 GitLab CI 逐步状态、GitHub Actions `uses`/`with`/插值 | 第一版仅顺序执行；无模板存库 / HTTP 直调 / cron / 条件 / 重试 |
+| **断连恢复** | `run_id` + 300ms 游标轮询 `/api/ai/runs/{id}?offset=` | 无需 WebSocket/推送，改动集中在一个 composable，多个会话可并行恢复 | 轮询上限 15min、本地 runId 30min 过期保护；静默断流需与 `[DONE]` 区分；刷新中断判为可恢复，SSE `error` 带 `business` 才是业务错误 |
+| **编排 vs 改造 Agent** | 声明式纯数据 `Definition` + 独立 Runner | 模型自主规划多步，Agent 循环零改动；借鉴 GitLab CI 逐步状态、GitHub Actions `uses`/`with`/插值 | Definition 由模型生成需校验；写步骤须 `allowWrite` 预授权 |
+| **DAG 分层并行** | `needs` 缺省依赖前一步（默认顺序），显式 `needs` 拓扑分层 + 同层并发 4 | 保留旧定义的顺序语义，同时支持并行；`when`/`retry` 补条件与补偿 | 插值在启动 goroutine 前完成，层内不共享写；每层落一次全量快照 |
+| **模板与调度解耦** | 模板只存 Definition，规则存 `schedule_triggers`（000019/000020） | 调度不绑定业务对象，模板可直调 / 手动 / 定时共用同一 `runPipeline` | 模板不再有 cron/启停/状态列；删模板需级联清规则 |
+| **通用定时触发** | `cron_triggers_runner` + `TriggerHandler` 按 `target_type` 分发 | `schedule` 包零业务依赖，新增领域只需装配层注册 | `ClaimCronTrigger` CAS 租约（同分钟 + 长任务跨分钟防重）、15min 独立超时、无持久化队列 |
+| **定时任务执行对象** | `ai_jobs.target` 四类对象（ai / tool / interface / pipeline）归一化为 `Definition`，复用 `runPipeline`；cron 与启停归 `schedule_triggers` | 不为 schedule 写四套执行器，AI 工具 / 站内接口能力直接复用 | 写操作必须静态 `allowWrite`；外部 MCP 仅白名单；`api/*` 限站内；`pipeline` 单次总超时 15min |
+| **消息渲染共用** | PC/移动共用 `AiMessage.vue` + `aiChatKey` provide/inject | 消除两套消息模板分叉，审批/重新生成作用于正确会话 | 子组件依赖注入，不能独立调用 `useAIChat` |
 | 编排执行器注入 | `internal/pipeline` 不依赖 HTTP/iris/db，`Executor` 由 server 注入 | 可独立单测、职责清晰 | `withToolContext` 需从 `ContextPool` 合成 iris.Context 预置身份 |
 | 编排写授权 | 一次审批覆盖整条流程 + `allowWrite` 显式列出 | 不让模型在长流程里绕过确认 | 写步骤未预授权即失败；Definition 由模型生成需校验 |
 | 工具表合成 | `pipelineTool()` 由 `allTools()` 运行时合成 | 规避包级变量初始化环（`aiTools → execRunPipeline → aiToolByName → aiTools`） | 工具表分两段，查询统一走 `aiToolByName` 合并表 |
 | API 步骤 | 自签短期 token + 内部 `ServeHTTP` | 复用现有 handler 与鉴权语义 | 只能调站内 `/api/*`，不能外访 |
-| AI 会话持久化 | 前端 UI 快照 JSON 存 `ai_sessions.messages` | 刷新/断网保住半截回复 | 服务端不理解消息语义；按「轮」预算裁剪 ≤28 条；快照 ≤256KB |
+| AI 会话持久化 | 前端 UI 快照 JSON 存 `ai_sessions.messages` | 刷新/断网保住半截回复 | 服务端不理解消息语义；按「轮」预算裁剪 ≤28 条；快照 ≤256KB；后台 run 正文另按 300ms 增量落 `ai_runs.result` 供游标恢复 |
 | MCP 接入 | 仅 stateless HTTP | 不引入会话生命周期与权限模型 | 不支持 stdio / 有状态 SSE / 重连 |
 | 可用性 | RAG / FTS / embedding / judge / MCP 失败静默降级 | 对话主链路优先 | 检索不完整时用户无感，需查 `/api/ai/index-status` |
-| 前端形态 | PC 与移动两套视图，共用业务层 | 浏览优先、PC 零改动 | 两套视图需同步能力；`PC_TO_MOBILE` 未含 `/jobs` |
+| 前端形态 | PC 与移动两套视图，共用业务层与 `AiMessage.vue` | 浏览优先、PC 零改动 | 两套视图需同步能力；`PC_TO_MOBILE` 未含 `/jobs` 与 `/pipelines` |
 | 优雅关闭 | 无自定义信号处理，仅 `defer db.Close()` | job 为短扫描，中断无害 | 长请求/SSE 可能被截断；后台 run 重启不恢复 |
 
 **其他已核实的实现现状（中性记录，非缺陷判断）**：
@@ -512,9 +559,9 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 认证与沙箱 | `internal/server/auth.go`、`server.go`（`safeJoin`/`resolveUserPathSafe`）、`fsops.go` |
 | 响应与错误码 | `internal/server/response.go`、`codes.go` |
 | 数据层 | `internal/db/*.go`、`internal/db/migrations/*.sql` |
-| AI / 后台 run | `internal/server/ai.go`（`handleAIChat`/`aiRunWriter`/`handleAIRuns*`）、`aitools.go`、`aiapproval.go`、`aitools_mcp.go` |
-| 编排 | `internal/pipeline/pipeline.go`、`internal/server/pipeline.go`、`internal/db/pipeline_runs.go` |
+| AI / 后台 run | `internal/server/ai.go`（`handleAIChat`/`aiRunWriter`/`handleAIRuns*`）、`aitools.go`、`aiapproval.go`、`aitools_mcp.go`、`internal/db/ai_runs.go`（`splitRunResult`） |
+| 编排 | `internal/pipeline/pipeline.go`、`internal/server/pipeline.go`（`runPipeline`）、`pipeline_http.go`、`schedule_triggers.go`、`internal/db/pipeline_runs.go`、`pipeline_templates.go`、`cron_triggers.go` |
 | RAG | `internal/rag/*.go`、`internal/db/rag.go`、`internal/sqlitevec/vec.go` |
-| 调度与通知 | `internal/schedule/*.go`、`internal/notify/*.go` |
-| 前端 | `frontend/src/router/index.ts`、`lib/common.ts`、`api/ai.ts`、`composables/useAIChat.ts`、`composables/todoSync.ts` |
+| 调度与通知 | `internal/schedule/*.go`（含 `triggers.go` 的 `NewTriggersJob`/`runCronTriggers`）、`internal/notify/*.go` |
+| 前端 | `frontend/src/router/index.ts`、`lib/common.ts`、`api/ai.ts`、`api/pipelines.ts`、`api/scheduleTriggers.ts`、`composables/useAIChat.ts`、`components/ai/AiMessage.vue`、`components/pipeline/PipelineGraph.vue`、`views/PipelineView.vue`、`composables/todoSync.ts` |
 | 构建 | `Makefile`、`frontend/vite.config.ts`、`embed.go`（详见 [`04-build-and-release.md`](04-build-and-release.md)） |

@@ -7,6 +7,15 @@
 
 ### Fixed
 
+- **每次打开文件都会多一条 `GET /api/tree?path=<文件>` 404**：打开文件 → `activeTabPath` 变化 → `ExplorerSidebar` watch → `treeStore.expandTo(文件路径)`，`expandTo` 为区分「未加载的目录」与「文件」会直接对目标调 `loadDir`，而 `/api/tree` 只接受目录，文件必然 404（前端 catch 静默忽略，功能正常但控制台每次一条红）。新增 `knownFile`：探测前先查父目录 `dirCache` 清单，该名字已出现在 `files` 里就跳过 `loadDir`（根目录/祖先目录在展开时必然已加载，常规打开文件都能命中），实现放在 `useTreeStore.ts`；`pnpm exec vue-tsc --noEmit` 通过
+- **删除当前 AI 会话后页面报 `TypeError: can't access property "streaming", w.value is undefined`**：`removeSession` 先 `chatSessions.delete(s.key)` 再判断 `s === current.value`，删除后 `current`（`chatSessions.get(currentKey.value)`）已解析为 `undefined`，比较恒为 `false`，`activate(newSession())` 永不执行，`currentKey` 悬空指向已删除会话；随后 `streaming` / `dbSessionId` 等 `computed` 重算直接读 `undefined.streaming` 抛错（只有一个会话时必然命中，删非当前会话不受影响）。改为删除前先取 `isCurrent = s === current.value`，删除后据此切换新会话；`pnpm exec vue-tsc --noEmit` 通过
+- **删除指向目录的符号链接后，RAG 索引残留成孤儿**：`handleDeleteFile` 用 `os.Lstat` 的 `info.IsDir()` 作索引清理的目录判定，符号链接返回 `ModeSymlink`、`IsDir()` 恒为 `false`，于是 `HandleDelete` 走精确路径分支 `path = '/docs'`，索引里实际存的 `/docs/xxx` 子路径（实测 151 个文件 / 3937 个 chunk）一条也没删掉——文件已不可达却仍被 AI 检索命中。新增 `indexIsDir`：链接条目用 `os.Stat` 跟随目标判定目录（断链退化为非目录），在 `os.RemoveAll` 之前求值（删除后链接不存在，无法再 Stat），磁盘操作仍只删链接本身、不动目标；日志里的 `isDir` 保留 `Lstat` 语义，表示被删除的条目类型
+  - 同一判定用在 `handleRename` / `handleMove`：`HandleRename` 收到的 `IsDir()` 同样来自 `Lstat`，重命名/移动目录链接时走精确路径改写，`/link/...` 子路径索引全部留在旧路径下（指向已不存在的路径），改为在 `os.Rename` 之前用 `indexIsDir` 求值并按前缀改写
+- **`000021` 迁移在存量库半途中断，留下 `dirty version 21` 导致服务无法启动**：`ai_sessions_v2` 声明了 `FOREIGN KEY(user_id) REFERENCES users(id)`，连接串又开启 `_foreign_keys=on`，历史库里 2 条会话的 `user_id`（2、5）指向已删除用户，复制进新表时被 `FOREIGN KEY constraint failed` 拒绝；`golang-migrate` 把版本标为 dirty，此后每次 `m.Up()` 都直接报 `Dirty database version 21`：
+  - `000021` 的 `up`/`down` 脚本在表重建段用 `PRAGMA foreign_keys=OFF` → 重建 → `PRAGMA foreign_keys=ON` 包裹（与 `000003`/`000007` 一致；`migrate.go` 的 `NoTxWrap=true` 保证 PRAGMA 在事务外生效），孤儿会话不再阻断迁移与回滚
+  - 新增 `TestMigration000021WithOrphanSession`：`Migrate(20)` 后造一条孤儿会话再 `Up()`，复现并锁住该场景；此前 `TestMigration000021RoundTrip` 为省事关掉了 FK，与生产环境不一致，未能暴露该问题
+  - 修复前用 `sqlite3 .backup` 做了库备份；当前库在单事务里补完半迁移状态（复制 4 行会话 → 重建主表 → 恢复索引 → `dirty=0`），实测重新编译后启动正常
+  - 校验：`go test -tags sqlite_fts5 ./...` 全绿
 - **工具审批卡片下方多出一条空白条**：`ToolCallList.vue` 的结果区 `<pre class="ai-tool-result">` 在卡片处于「待确认」时被 watch 预先展开，但此时工具尚未执行、`c.result === undefined`，`resultText()` 返回空串，于是渲染出只有 padding 与上边框的空白区域；改为 `v-show="open.has(i) && c.result !== undefined"`，结果到达后才显示。同时修正 watch 注释——原写「自动展开是为让批准/拒绝按钮可见」，实际按钮由独立的 `v-if="c.approval === 'pending'"` 控制，预先展开是为了批准后结果直接可见
 - **编排流程图画布未铺满、圆角双层缝隙**：`PipelineGraph` 的 `.pg-scroll` 自带 `border` + `border-radius` 且高度只随内容，父级 `.pipe-board` 同样是圆角容器，导致左上角出现双重描边缝隙、点阵网格只占顶部一条、下方大片空白。改为 `.pg-wrap` / `.pg-scroll` 在 board 内 `flex:1` 撑满剩余高度，去掉内部边框与圆角（由父级 `overflow:hidden` 统一裁切），画布用 `flex + margin:auto` 在可用空间居中（超宽时仍可横向滚动且不裁左侧）
 - **刷新后 AI 回复变成 `⚠ Error in input stream` 且不再续输出**：上一轮把 `streamReply` finally 里的 `setRunId(s, null)` 改为无条件执行，而 catch 又把任何异常（含浏览器刷新导致的 `ReadableStream` 中断）一律设为 `recoverable=false` —— pending run 记录被清、reader 的原生错误被当作业务错误写成 `⚠` 占位并落进会话快照，刷新后 `resumePendingRuns()` 无记录可恢复。实测服务端 `ai_runs` 里对应 run 已 `status=done` 且有完整回复，纯前端误判：
@@ -18,6 +27,25 @@
 
 ### Changed
 
+- **全量重建索引的周期进度行补打孤儿清理数量**：`pruneOrphans` 的结果原先只写进 `ReindexStats.Pruned` / 进度快照 `pruned` 与收尾的 `rag: reindex done` 一行，每 20 个文件的 `rag: reindex progress` 只有 `processed/total/indexed/skipped/failed`，长任务中途看不出「跳过 407 条」之外还删了多少孤儿索引（本次 `/docs` 链接删除后的 151 条正是靠重建顺带清掉的）。进度行追加 `pruned` 字段，中途即可确认清理数量，收尾行不变
+- **AI 会话消息从全量覆盖改为行级追加**：此前 `ai_sessions.messages` 是整份 UI 快照 JSON，前端每 3s 与流末都用 `PUT /api/ai/sessions/{id}` 全量覆盖——长会话反复传几百 KB、多 tab 写同一会话时后写者抹掉先写的内容，且 256KB 单列上限会截断带工具结果的历史。改为一行一消息 + `clientMsgId` UPSERT：
+  - 迁移 `000021_ai_session_messages`：新建 `ai_session_messages(session_id, client_msg_id, org_id, user_id, role, content, extras)` 与 `UNIQUE(session_id, client_msg_id)`；用 `json_each` 把存量快照按下标展开导入（`client_msg_id = idx:<n>`，与缺少 id 时的兜底一致），`role/content` 单独成列、其余展示字段（`reasoning`/`toolCalls`/`steps`/`usage`/`ragHits`/`files`）留在 `extras`；重建 `ai_sessions` 物理删掉 `messages` 列。子表刻意不声明外键：连接串 `_foreign_keys=on`，删主表会级联删掉刚导入的消息，改由 `DeleteAISession` 在事务里显式清理；`down` 用 `json_patch` + 有序 `group_concat` 把行聚合回旧列，保证可回滚
+  - 后端：新增 `PUT /api/ai/sessions/{id}/messages`，只提交变动的一批消息（≤50 条 / 512KB、每条必带 `clientMsgId`），事务内按 `ON CONFLICT DO UPDATE` 逐条写入；`truncateAfter` 保留锚点消息、删除其后的旧回复供「重新生成」使用，锚点不存在返回 404 且事务回滚不误删。`GET /api/ai/sessions/{id}` 从子表按写入顺序组装回展示态数组并带回 `clientMsgId`；旧全量接口 `handleAISessionUpdate` / `UpdateAISession` / `updateAISession` 与路由全部移除
+  - 前端：`ChatMessage` 增加 `clientMsgId`（发给上游 LLM 时由 `toPayloadMessages` 剥掉）；`ChatSession` 维护 `saved` 快照表与 `truncateAfter`，`persistSession` 用 JSON diff 只提交变化的消息、用提交时快照更新 `saved`，保存期间的增量由排队补一轮继续提交；`regenerate` pop 掉旧回复后设置截断锚点；历史会话载入时沿用后端返回的 id，切回后不重发整份消息
+  - 局限：跨 tab 写同一会话不再互相覆盖，但 `truncateAfter` 会删掉其它 tab 在锚点之后写入的消息——这是「重新生成」的预期语义
+  - 校验：`go test -tags sqlite_fts5 ./...` 全绿（含消息级写入端到端路由测试、`000021` up→down→up 往返测试），`pnpm exec vue-tsc --noEmit` 通过
+- **AI 对话面板「索引」tab 改为按目录分组的紧凑列表**：此前明细平铺，每行是「绿点 + 完整路径 + `N 块`」，窄栏里路径前缀占满宽度、文件名全被省略号吃掉，同类目录反复出现，异常项也不醒目：
+  - `AiChat.vue` 新增 `indexGroups` computed，按 `path.lastIndexOf('/')` 拆出目录与文件名，借助后端 `ListFileIndexState` 的 `ORDER BY path` 顺序把相邻同目录项合并；每组累加块数与失败数，接口与 `AIIndexStatus` 类型均不变
+  - 模板改为「可折叠分组头 + 组内单行文件」：分组头 `position: sticky` 吸顶，显示目录、文件数、块数合计（有失败时追加红色失败数），点击经 `collapsedDirs` 收起/展开该组；组内只显示文件名，完整路径与错误信息保留在 `title`
+  - 汇总区由三个纯文字标签改为 `ai-index-stat` 卡片，数字与单位并排（数字 13px 粗体、tabular 对齐）；失败数非 0 时数字转红
+  - 列表减噪：成功项不再逐行显示绿点、块数改为数字深色单位淡色的弱化样式；只有失败项显示红点、红色文件名与「失败」标记，异常更易定位
+  - 行距收紧：文件行 22px、分组头 20px、组间距 3px、`.ai-sessions-list.ai-index-list` 的 gap 归零，字号保持 11.5px；hover 为通栏 `--code-bg` 淡底，不带圆角卡片感
+  - 校验：`AiChat.vue` lint 无告警；`pnpm exec vue-tsc --noEmit` 未对本文件报错（工作区现存 `useAIChat.ts` 的 3 处 TS 错误属其它未提交改动，与本次无关）
+- **文档体系追平 `c0577c4`（`docs v2.2`）**：把上一轮登记在 `docs/README.md` §6 的待同步项按 §3.3「下一轮统一纳入」写进正文，代码基线从 `v1.3.0-25-g517f88c` / 迁移 000017 刷新为 `v1.3.0-26-gc0577c4` / `000020_pipeline_templates_pure`（20 版本 / 40 脚本）：
+  - `docs/README.md`：§3.2 基线、迁移数与 16 个工具 / 8 类 SSE 事件复核，`docs v2.2` 更新记录、§5.5 一致性核对表；§6 偏差清单 D02 表数 21→23、D14 迁移基线 000020、D16/D18 关闭、D17 事实补充，新增 D19 登记代码注释与历史条目里的旧 `design.md` / `docs/email-template-preview.html` 路径漂移；归档目录移除另见本段下方的 `Removed` 条目
+  - `docs/02-functional-guide.md`：§9 重写为编排模板 CRUD / Definition 直调 / 手动触发 / 通用定时触发 / `/pipelines` 流程图页，补 DAG `needs`（缺省依赖前一步、`needs: []` 并行）、`when`（`on_success`/`on_failure`/`always`）、`retry`（0–5）、同层并发 4 与 `allowWrite`；§8.5 断连恢复改为 300ms `offset`/`delta` 游标与多会话 `resumePendingRuns()`，§8.6 改为 `AiMessage.vue` + PC 左栏三 tab；§2.1/§8.3/§12/§13/§14/§15 的功能地图、参数、能力矩阵、限制汇总、FAQ 与术语表同步
+  - `docs/03-design.md`：§5.9 编排流程改为 `runPipeline` 共享核心 + `Layers()` 分层并行 + 模板/调度解耦，§5.8 补 `cron_triggers_runner` 的分钟键防重与状态回写，§7.2 补 14 条编排/通用触发路由，§6 表清单 21→23 项并补 000018–000020 迁移；§3/§4/§5.4/§7.3/§8/§9/§10/§11 同步模块清单、四个 job、增量游标、`error.business`、安全模型、扩展点与设计取舍
+  - `docs/01-getting-started.md` / `docs/04-build-and-release.md` / `docs/05-operations.md`：文件头基线刷新；SPA 路由清单与启动验证补 `/pipelines`；单测覆盖清单补 DAG、通用触发与增量游标用例；§7 迁移基线从 000016 直接追到 000020，启用矩阵、备份清单、告警示例与故障排查补定时触发和 `pipeline_templates` / `schedule_triggers` 两张表
 - **编排流程图组件归位到 `components/pipeline/`**：`PipelineGraph.vue` 原本放在 `components/ai/`，但它只服务编排模板详情（`PipelineView.vue` 的 DAG 画布），与 AI 对话无关；本轮 `ai/` 收敛成清一色的对话组件后，这个错位更明显：
   - `frontend/src/components/ai/PipelineGraph.vue` → `frontend/src/components/pipeline/PipelineGraph.vue`（新建 `components/pipeline/`），文件内容零改动：组件内部只 import `../../api/pipelines`，新旧目录同为 `components/<子目录>/`，相对层级不变
   - `PipelineView.vue` 的 import 路径同步更新；全仓仅此一处代码引用（`[Unreleased] Added` 的历史条目记录的是组件创建时路径，按事实保留不改）
@@ -65,6 +93,27 @@
 
 ### Added
 
+- **定时任务执行对象多态化（P0-a，迁移 000022）**：`ai_jobs` 从固定 `prompt` 扩展为多态 `target`，四类执行对象统一归一化为 `pipeline.Definition` 后复用 `runPipeline`，不再为定时任务单独写执行器：
+  - 迁移 000022 加 `target_type` / `target_json` / `allow_write` / `context_json` / `notify_json` 五列，并从 `prompt` 回填 `{"type":"ai","prompt":...}`；`prompt` 列保留，老前端与只读查询零改动；down 删除五列可完整回滚（迁移测试覆盖往返）
+  - `target.type` 支持 `ai`（单 `llm` 步 + 任务数据 ≤50 条 + RAG top3，保持日报正文形态）、`tool`（`tool/<name>`）、`interface`（站内 `api/<path>`，method/query/body，`/api/` 前缀由执行器补）、`pipeline`（内联 Definition 或模板引用）；解析与归一化集中在 `server/aijob_target.go`
+  - 调度安全：创建/更新 job 时都用与执行期共享的 `allowWrite` 判定做 Definition 级预检（`ai` 预检不查任务数据/RAG），拒绝 `tool/run_pipeline`、`tool/create_ai_job|update_ai_job|delete_ai_job`、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*`，避免「创建时放过、执行时才失败」；定时执行不进入 SSE 审批分支，不存在「无人确认挂死」
+  - `interface` 的 `query` 拼进站内请求 URL；`pipeline` 的 `params` 支持 `{{run.date}}` / `{{run.datetime}}` / `{{params.*}}` 展开（参数值本身也可引用 `{{run.*}}`）；执行前写审计日志（job_id / target / steps / allowWrite）
+  - runner 改为注入 `JobExecutor`（`schedule` 包只负责扫描/判重/超时/通知），`buildAIJobPrompt` 与 `aiJobLLM` 的 RAG 注入迁到 server 侧；单次执行总超时 5min → 15min（对齐编排多步）
+  - API/工具：`POST/PUT /api/ai/jobs`、`create_ai_job` / `update_ai_job` 接受 `target` / `allowWrite` / `context` / `notify`，`prompt` 仍兼容（等价 `target={"type":"ai","prompt":...}`）；`list_ai_jobs` 返回 `targetType` / `target` / `allowWrite`；旧 `UpdateAIJob` 不清空已有 target
+  - 单测覆盖 target 解析与非法输入、调度黑名单/预授权、结果摘要、target 列 CRUD 与旧更新兼容；迁移测试改为按版本回滚（不再依赖「最新版恰好是 000021」）；`go vet` + `go test -tags sqlite_fts5 ./internal/...` 全绿
+- **定时任务调度收敛（P0-b，迁移 000023）**：`cron` / 启停 / 最近执行状态统一归 `schedule_triggers`，`ai_jobs` 只留执行定义，全仓只剩一个 `cron_triggers_runner`：
+  - 迁移 000023：`schedule_triggers` 加 `lease_until`；从 `ai_jobs.cron_expr <> ''` 回填 `target_type='job'` 规则（全局任务用 org/user=0 标记）；重建 `ai_jobs` 删掉 `cron_expr/enabled/last_run_at/last_status`；`.down` 加回 4 列并从 job 规则反向回填（多规则取最近一条），回滚不丢配置
+  - `internal/schedule/aijobs.go`（`ai_jobs_runner` / `LLMCaller` / `buildAIJobPrompt`）删除；`server.go` 在 `NewTriggersJob` 注册 `"job": srv.triggerJob`，`triggerJob` 负责读任务、全局按有邮箱用户展开、执行、写 `ai_job_runs`、发 `user.notify`
+  - `ClaimCronTrigger` 用 CAS + 租约占用：同分钟不重跑，跑超过 1 分钟的任务在租约过期前不会被下一分钟重复触发；`MarkCronTriggerRun` 完成时清租约
+  - `AIJob` 的 `cronExpr` / `enabled` / `lastRunAt` / `lastStatus` 改为从 job 规则派生（子查询），`ListAIJobs` / `GetAIJob` 响应字段不变；创建/更新/删除经 `upsertAIJobTrigger` / `deleteAIJobTriggers` 维护规则，REST 与三个 AI 工具行为一致；旧 `prompt` / `cronExpr` / `enabled` 请求字段仍兼容
+  - `supportedTriggerTargets` 增加 `job`，`validateTriggerTarget` 校验 job 归属；`internal/schedule` 不再含任何业务标识符
+  - 测试：000023 往返（回填/去列/回滚）、调度字段派生、租约下的触发分发与状态回写；`go vet` + `go test -tags sqlite_fts5 ./internal/...` 全绿
+- **定时任务 P1：执行历史联动、邮件分型与前端类型选择器（迁移 000024）**：
+  - 迁移 000024 给 `ai_job_runs` 加 `target_type` / `pipeline_run_id` / `steps_summary` / `err_msg` / `duration_ms` / `finished_at`；`MarkAIJobRunDetail` 落详情，`ListAIJobRuns` 一并返回，`/api/ai/jobs/{id}/runs` 可直接跳 `/pipelines?run=<id>`
+  - `execAIJob` 返回结构化结果（输出、runID、步骤、耗时）；邮件按 target 分型：`ai` 原正文、`tool`/`interface` 代码块、`pipeline` 步骤摘要 + `site_url` 详情链接
+  - `AiJobsView`：任务类型选择器（AI 提示词 / 工具 / 站内接口 / 编排）；工具参数、接口 method/path/query/body、模板 ID 或 Definition 分别编辑，`allowWrite` 逗号分隔；编辑按 `target` 回填，启停只改规则不动 target
+  - 模板引用：`target.templateId` 走现有 `/api/pipeline/templates`，执行时读 Definition；外部 MCP 沿用 `allowWrite` 白名单判定（`NeedApproval` 工具必须在清单中），未额外放宽
+  - 测试：000024 往返、后端全量 `go test`、前端 `vue-tsc` + `pnpm build` 全绿
 - **通用定时触发规则（调度领域自己的持久化对象）**：`schedule_triggers` 表 + `GET/POST /api/schedule/triggers`、`GET/PUT/DELETE /{id}`，让任何领域对象都能成为「可被 schedule 执行的目标」：
   - 迁移 000019 建表（org/user、`target_type`、`target_id`、`cron_expr`、`enabled`、`last_run_at/last_status` + owner/enabled/target 三个索引），并从 000018 的 `pipeline_templates` **回填**已有 cron 配置（含停用状态与最近执行状态；纯手动模板不产生规则）；`internal/db/cron_triggers.go` 提供 CRUD、按类型/目标可选过滤、启用规则全库扫描、分钟键状态回写、按目标批量删除
   - `internal/schedule/triggers.go`：`TriggerHandler func(ctx, db.CronTriggerWithOwner) error` + handlers 注册表；`cron_triggers_runner` 每分钟只扫通用规则、按 `target_type` 分发、`YYYY-MM-DD HH:mm` 分钟键防重，非法 cron / 未注册类型各记状态互不阻塞，15min 超时 + 独立 ctx 回写；复用现有 `Job`/`Scheduler`，调度内核不动，**schedule 生产代码零 pipeline 标识符**
@@ -186,6 +235,10 @@
 ### Removed
 
 - **访问统计（visit_logs）**（迁移 000012 drop 表）：移除 `GET /api/stats` 接口与每请求的 visit_logs INSERT（无谓写放大）；文本访问日志（access log 文件）保留。历史统计数据随表删除，需要时可经 down 迁移恢复表结构重新启用
+- **移除 `docs/archive/` 归档目录**：`rbac-design.md`、`migration-strategy.md` 两份 2026-08-21 历史设计稿与 `email-template-preview.html` 邮件模板预览不再随仓库分发；设计稿结论早已被现行实现取代（mattn + cgo + sqlite-vec、`user_org_feature`、golang-migrate 版本化迁移），历史背景以根 `CHANGELOG.md` 与 `docs/README.md` §4 更新记录为准：
+  - `docs/README.md`：删除 A1–A3 编号、目录树与导航表 / 状态表中的归档条目、事实优先级里的 `archive/` 及 §5.6 归档规则；§4 历史行按「不删历史行」保留并加注；D14 关闭，D19 收敛为代码注释里的旧路径引用
+  - `docs/03-design.md`：开头的归档设计稿说明改为「已从 `docs/` 移除」，不再指向不存在的文件；根 `README.md` 原本就没有 `archive/` 引用
+  - `internal/notify/email_template.go` 注释仍写 `docs/email-template-preview.html`（本就指向重命名前的旧路径），登记为 D19 待修正，本次不改代码；`CHANGELOG.md` 历史条目按「不删历史行」保留
 
 ### Added
 

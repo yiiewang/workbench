@@ -1,27 +1,45 @@
-/* AI 对话消息区公共样式：PC 浮动面板（AiChat.vue）与移动端全屏页（MAI.vue）共用。
-   类名两边模板保持一致；布局差异（面板/页面外壳、输入区）由各自 scoped 样式实现。 */
+/* AI 对话消息区公共样式：AiMessage.vue 的视图层（PC 面板与移动端共用）。
+   面板/页面外壳、侧栏、输入区样式由各自 scoped 样式实现。 */
 
-/* 消息行 */
+/* 消息行：头像 + 内容列（assistant 正文流 / user 气泡 + 元信息行） */
 .ai-msg { display: flex; gap: 8px; align-items: flex-start; position: relative; }
 .ai-msg.user { flex-direction: row-reverse; }
-
-/* 消息操作条：两种形态——
-   user：hover 时显示在气泡下方（右对齐，流内换行，不悬浮压住头像）；
-   assistant：常驻显示在气泡下方（左对齐）。均为轻量线性图标（无边框）。 */
-.ai-msg-actions {
+.ai-msg-col {
+  flex: 1;
+  min-width: 0;
   display: flex;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity .15s;
-  order: 3;
-  width: 100%;
-  margin-top: -4px; /* 抵消 flex 换行的 row gap，紧凑贴合气泡 */
+  flex-direction: column;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+  word-break: break-word;
 }
-.ai-msg { flex-wrap: wrap; }
+.ai-msg.user .ai-msg-col { align-items: flex-end; }
+
+/* 元信息行：操作 / 引用来源 / token 消耗统一为一条轻量行 */
+.ai-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.ai-msg.user .ai-meta { justify-content: flex-end; }
+.ai-msg-actions { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
 .ai-msg:hover .ai-msg-actions { opacity: 1; }
-/* 按钮对齐到气泡文字列（避开头像列 26px + 8px 间距） */
-.ai-msg.user .ai-msg-actions { justify-content: flex-end; padding-right: 34px; }
-.ai-msg.assistant .ai-msg-actions { opacity: 1; justify-content: flex-start; padding-left: 34px; }
+/* 引用来源组件融入元信息行：toggle 作为行内一项，展开的列表独占一行 */
+.ai-msg .ai-meta .rag-cites { display: contents; }
+.ai-msg .ai-meta .rag-cites-body { flex: 1 1 100%; }
+.ai-usage {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: .8;
+  user-select: none;
+}
 /* 加载更早消息（长会话渲染窗口） */
 .ai-load-more {
   align-self: center;
@@ -70,27 +88,16 @@
 .ai-avatar.assistant { background: linear-gradient(135deg, #6f5fd3, #4d8de0); color: #fff; }
 .ai-avatar.assistant svg { width: 13px; height: 13px; }
 
-/* 气泡 */
-.ai-bubble {
-  min-width: 0;
-  max-width: calc(100% - 40px);
+/* user 气泡：右对齐色块；assistant 无气泡底色，正文直接铺在内容列 */
+.ai-bubble.user {
+  max-width: 100%;
   padding: 8px 12px;
   border-radius: 12px;
-  font-size: 13px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.ai-bubble.user {
+  border-top-right-radius: 4px;
   background: var(--accent);
   color: #fff;
-  border-top-right-radius: 4px;
-}
-.ai-bubble.assistant {
-  background: var(--code-bg);
-  color: var(--text);
-  border-top-left-radius: 4px;
-  white-space: normal;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .ai-cursor { animation: ai-blink 1s steps(2) infinite; }
 @keyframes ai-blink { 0% { opacity: 1; } 50% { opacity: 0; } }
@@ -113,27 +120,19 @@
   background: rgba(255, 255, 255, .18);
   border-radius: 4px;
   padding: 1px 6px;
-  max-width: 130px;
+  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-/* 思考过程（推理模型） */
-.ai-reasoning { margin-bottom: 6px; }
-.ai-reasoning-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: none;
-  background: none;
-  color: var(--text-dim);
-  font-size: 11px;
-  cursor: pointer;
-  padding: 0;
+/* 文件名单独一层才能生效 ellipsis（裸文本节点不参与 text-overflow） */
+.ai-msg-file-name {
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.ai-reasoning-toggle:hover { color: var(--accent); }
-.ai-reasoning-toggle svg { width: 12px; height: 12px; }
 
 /* ---- Agent 工具调用卡片（ToolCallList.vue，PC/移动端共用） ---- */
 .ai-tools { margin-bottom: 6px; display: flex; flex-direction: column; gap: 4px; }
@@ -215,33 +214,8 @@
 .ai-tool-btn.is-ok:hover { background: rgba(60, 160, 70, 0.14); }
 .ai-tool-btn.is-no { color: #a04040; border-color: rgba(220, 80, 80, 0.5); }
 .ai-tool-btn.is-no:hover { background: rgba(220, 80, 80, 0.14); }
-.ai-reasoning-body {
-  margin-top: 4px;
-  padding: 8px 10px;
-  font-size: 11px;
-  color: var(--text-dim);
-  line-height: 1.6;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-/* token 消耗（assistant 气泡底部小字） */
-.ai-usage {
-  margin-top: 6px;
-  font-size: 10px;
-  color: var(--text-dim);
-  opacity: .8;
-  text-align: right;
-  user-select: none;
-}
-
-/* ---- 过程块（思考 + 工具调用，时间序，可折叠）---- */
-.ai-process { margin-bottom: 6px; }
+/* ---- 过程块（思考 + 工具调用，时间序，可折叠）：正文流内的轻量折叠行 ---- */
+.ai-process { margin-bottom: 6px; border-left: 2px solid var(--border); padding-left: 8px; }
 .ai-process-toggle {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; color: var(--text-dim); cursor: pointer;
@@ -253,8 +227,7 @@
 .ai-process-chevron { transition: transform .15s; }
 .ai-process-chevron.open { transform: rotate(180deg); }
 .ai-process-body {
-  margin-top: 4px; padding: 8px 10px;
-  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  margin-top: 4px; padding: 4px 0 6px;
   display: flex; flex-direction: column; gap: 8px;
 }
 .ai-process-reasoning {
@@ -263,7 +236,7 @@
   border-left: 2px solid var(--border); padding-left: 8px;
 }
 
-/* assistant 气泡内 markdown（v-html） */
+/* assistant 正文流内 markdown（v-html）：代码块需自带浅底，否则与页面背景融为一体 */
 .ai-md .rag-ref {
   display: inline-block;
   font-size: 10px;
@@ -286,7 +259,7 @@
 .ai-md code {
   font-family: var(--mono, monospace);
   font-size: 12px;
-  background: var(--bg);
+  background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: 3px;
   padding: 0 4px;
@@ -294,7 +267,7 @@
 .ai-md pre {
   margin: 6px 0;
   padding: 10px 12px;
-  background: var(--bg);
+  background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow-x: auto;

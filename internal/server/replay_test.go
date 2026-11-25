@@ -17,7 +17,7 @@ func TestReplayRealGatewayStream(t *testing.T) {
 	}
 	reader := bufio.NewReader(strings.NewReader(string(raw)))
 	var out flushBuffer
-	res, alive := forwardAIStream(&out, reader)
+	res, alive := forwardAIStream(&out, reader, nil)
 	if !alive {
 		t.Fatal("reported disconnected")
 	}

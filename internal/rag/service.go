@@ -211,6 +211,7 @@ type ReindexStats struct {
 	Indexed int `json:"indexed"` // 实际（重新）向量化写入
 	Skipped int `json:"skipped"` // hash 未变跳过
 	Failed  int `json:"failed"`  // 失败（多为 embedding 上游异常）
+	Pruned  int `json:"pruned"`  // 清理的孤儿索引（库中有记录、磁盘文件已不存在）
 }
 
 // ReindexProgress 全量重建进度（GET /api/ai/reindex/status 查询；
@@ -223,6 +224,7 @@ type ReindexProgress struct {
 	Indexed     int    `json:"indexed"`
 	Skipped     int    `json:"skipped"`
 	Failed      int    `json:"failed"`
+	Pruned      int    `json:"pruned"`      // 本次清理的孤儿索引数
 	CurrentPath string `json:"currentPath"` // 正在处理的文件
 	StartedAt   string `json:"startedAt"`
 	UpdatedAt   string `json:"updatedAt"`
@@ -240,6 +242,37 @@ type reindexEntry struct {
 // 隐藏目录（.venv/.git/.idea）由 "." 前缀规则统一覆盖。
 var reindexIgnoreDirs = map[string]bool{
 	"node_modules": true, "__pycache__": true, "vendor": true, "target": true,
+}
+
+// orphanPaths 从已索引路径中挑出磁盘文件已不存在的项。
+// 用 os.Stat 判定而非与本次遍历结果做差集：collect 遇到目录读取错误会跳过
+// 该子树（只记 warn），差集会把这些「文件仍在但本次没扫到」的索引误删。
+func orphanPaths(root string, paths []string) []string {
+	var out []string
+	for _, rel := range paths {
+		fsPath := filepath.Join(root, strings.TrimPrefix(rel, "/"))
+		if _, err := os.Stat(fsPath); os.IsNotExist(err) {
+			out = append(out, rel)
+		}
+	}
+	return out
+}
+
+// pruneOrphans 清理该用户库中记录、但磁盘文件已不存在的索引。
+// DeleteFileIndex 在事务内同步清 vec / fts / chunks / state 四表。
+func (s *Service) pruneOrphans(ctx context.Context, orgID, userID int64, root string) (int, error) {
+	paths, err := s.db.ListIndexedPaths(ctx, orgID, userID)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, rel := range orphanPaths(root, paths) {
+		if err := s.db.DeleteFileIndex(ctx, orgID, userID, rel); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 // ReindexTree 全量索引（幂等：hash 未变的文件零 embed 成本）。
@@ -317,12 +350,20 @@ func (s *Service) ReindexTree(ctx context.Context, orgID, userID int64, root str
 		return stats, err
 	}
 
+	// 清理孤儿索引：库中有记录但磁盘文件已不存在的路径。
+	// 清理失败只记日志，不中断重建（可用性优先）。
+	pruned, pruneErr := s.pruneOrphans(ctx, orgID, userID, root)
+	if pruneErr != nil {
+		slog.Warn("rag: prune orphan indexes failed", "err", pruneErr, "owner", ownerKeyOf(orgID, userID))
+	}
+	stats.Pruned = pruned
+
 	// 进度快照：处理阶段持续更新（同用户并发 reindex 已被 409 挡，
 	// 快照按 owner 记录互不覆盖）
 	now := time.Now().Format(time.RFC3339)
 	p := &ReindexProgress{
 		Owner: ownerKeyOf(orgID, userID), Running: true,
-		Total: len(entries), StartedAt: now, UpdatedAt: now,
+		Total: len(entries), Pruned: pruned, StartedAt: now, UpdatedAt: now,
 	}
 	s.setProgress(p)
 	defer func() {

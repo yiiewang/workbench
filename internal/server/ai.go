@@ -8,7 +8,8 @@ package server
 //     逐行 flush（与 /api/media 同理，loggingMiddleware 必须跳过 ctx.Record，
 //     否则 ResponseRecorder 会攒内存、无法流式）；
 //   - 上游错误（非 200）在读流之前就能拿到，转成标准 {code,msg} 信封返回；
-//   - 客户端断开时 ctx.Request().Context() 取消，上游请求随之取消，不浪费配额。
+//   - 客户端断开时上游请求不取消，后台 run 继续跑完并把增量与结果落库，
+//     刷新后由 GET /api/ai/runs/{id}?offset= 按游标续读。
 
 import (
 	"bufio"
@@ -49,6 +50,10 @@ const (
 	aiRunStateKey = "aiRunState"
 )
 
+// aiRunFlushInterval 后台 run 正文增量落库的最小间隔：让断连/刷新后的恢复
+// 能按游标持续拿到新文本，又不会每个 token 都写一次 SQLite。
+const aiRunFlushInterval = 300 * time.Millisecond
+
 // aiRunState 一次对话运行的状态：结构化事件、累积回复、断连标记。
 // 由单个 handleAIChat 循环串行读写，无需加锁。
 type aiRunState struct {
@@ -58,6 +63,7 @@ type aiRunState struct {
 	events       []any
 	content      strings.Builder
 	disconnected bool
+	lastFlush    time.Time
 }
 
 func (r *aiRunState) addEvent(name string, data any) {
@@ -73,6 +79,15 @@ func (r *aiRunState) flush(s *Server, status, errMsg string) {
 	}); err != nil {
 		slog.Warn("ai run flush failed", "run", r.id, "err", err)
 	}
+}
+
+// maybeFlush 流式期间按间隔落一次 running 快照，让刷新恢复能持续读到新文本。
+func (r *aiRunState) maybeFlush(s *Server) {
+	if time.Since(r.lastFlush) < aiRunFlushInterval {
+		return
+	}
+	r.lastFlush = time.Now()
+	r.flush(s, "running", "")
 }
 
 // aiRunWriter SSE 镜像输出：写失败即标记断连并静默丢弃后续写入，
@@ -380,7 +395,8 @@ func (s *Server) startReindex(ctx iris.Context) reindexStartStatus {
 			return
 		}
 		slog.Info("rag: reindex done", "user", userID,
-			"indexed", stats.Indexed, "skipped", stats.Skipped, "failed", stats.Failed)
+			"indexed", stats.Indexed, "skipped", stats.Skipped, "failed", stats.Failed,
+			"pruned", stats.Pruned)
 	}()
 	return reindexStarted
 }
@@ -445,6 +461,27 @@ func (s *Server) handleAIRunsList(ctx iris.Context) {
 	writeOK(ctx, map[string]any{"runs": runs})
 }
 
+// aiRunDetail 增量详情响应：带 offset 时只回 delta + 下一游标 + 元信息，
+// result 置空，避免长回复每 300ms 轮询都重复传输一遍全量正文。
+type aiRunDetail struct {
+	db.AIRun
+	Delta  string `json:"delta"`
+	Offset int    `json:"offset"`
+}
+
+// splitRunResult 按 rune 而非字节切增量：中文/emoji 在前后端口径一致。
+// offset 越界时钳到两端，重复请求同一游标只会拿到空增量。
+func splitRunResult(result string, offset int) (string, int) {
+	runes := []rune(result)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(runes) {
+		offset = len(runes)
+	}
+	return string(runes[offset:]), len(runes)
+}
+
 func (s *Server) handleAIRunGet(ctx iris.Context) {
 	run, ok, err := s.db.GetAIRun(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), ctx.Params().Get("id"))
 	if err != nil {
@@ -455,7 +492,16 @@ func (s *Server) handleAIRunGet(ctx iris.Context) {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return
 	}
-	writeOK(ctx, run)
+	rawOffset := ctx.URLParam("offset")
+	if rawOffset == "" {
+		// 不带游标：只查状态/归属的调用，返回原有全量快照
+		writeOK(ctx, run)
+		return
+	}
+	offset, _ := strconv.Atoi(rawOffset)
+	delta, next := splitRunResult(run.Result, offset)
+	run.Result = ""
+	writeOK(ctx, aiRunDetail{AIRun: run, Delta: delta, Offset: next})
 }
 
 // ============================================================
@@ -663,14 +709,18 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 			}
 		}
 
-		// 转发 + 解析本轮流式响应（writer 断连后仍继续解析，只是不再输出）
+		// 转发 + 解析本轮流式响应（writer 断连后仍继续解析，只是不再输出）。
+		// 每个正文分片即时并入后台 run 并节流落库，供刷新后按游标持续续读；
+		// 原先只在整轮结束后 WriteString(res.Content)，断连期间库里看不到增量。
 		reader := bufio.NewReaderSize(resp.Body, 16*1024)
-		res, alive := forwardAIStream(w, reader)
+		res, alive := forwardAIStream(w, reader, func(delta string) {
+			run.content.WriteString(delta)
+			run.maybeFlush(s)
+		})
 		resp.Body.Close()
 		if !alive {
 			return // 非镜像 writer 的断连兜底
 		}
-		run.content.WriteString(res.Content)
 		// 聚合本轮 token 消耗（Agent 多轮累加）
 		if res.Usage != nil {
 			usageSum.PromptTokens += res.Usage.PromptTokens
@@ -1075,7 +1125,7 @@ type aiStreamWriter interface {
 //     由调用方在最终轮后统一补发）；其余行原样透传 + flush；
 //   - tool_calls 分片按 index 累积（id/name 首个分片携带，arguments 逐片拼接）；
 //   - 返回 alive=false 表示客户端已断开。
-func forwardAIStream(w aiStreamWriter, reader *bufio.Reader) (aiRoundResult, bool) {
+func forwardAIStream(w aiStreamWriter, reader *bufio.Reader, onDelta func(string)) (aiRoundResult, bool) {
 	var res aiRoundResult
 	acc := map[int]*aiToolCall{}
 
@@ -1090,7 +1140,9 @@ func forwardAIStream(w aiStreamWriter, reader *bufio.Reader) (aiRoundResult, boo
 				}
 				w.Flush()
 			}
-			parseAIDataLine(line, &res, acc)
+			if delta := parseAIDataLine(line, &res, acc); delta != "" && onDelta != nil {
+				onDelta(delta)
+			}
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -1109,19 +1161,21 @@ func forwardAIStream(w aiStreamWriter, reader *bufio.Reader) (aiRoundResult, boo
 	return res, true
 }
 
-// parseAIDataLine 解析一行 SSE data（data: {...}），累积内容与工具调用分片
-func parseAIDataLine(line string, res *aiRoundResult, acc map[int]*aiToolCall) {
+// parseAIDataLine 解析一行 SSE data（data: {...}），累积内容与工具调用分片，
+// 返回本行的正文增量（供后台 run 即时落库）。
+func parseAIDataLine(line string, res *aiRoundResult, acc map[int]*aiToolCall) string {
 	if !strings.HasPrefix(line, "data:") {
-		return
+		return ""
 	}
 	payload := strings.TrimSpace(line[len("data:"):])
 	if payload == "" || payload == "[DONE]" {
-		return
+		return ""
 	}
 	var chunk aiStreamChunk
 	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-		return // 错误分片/未知格式：透传已做，解析忽略
+		return "" // 错误分片/未知格式：透传已做，解析忽略
 	}
+	var text strings.Builder
 	if chunk.Usage != nil {
 		res.Usage = chunk.Usage
 	}
@@ -1130,6 +1184,7 @@ func parseAIDataLine(line string, res *aiRoundResult, acc map[int]*aiToolCall) {
 			res.FinishReason = ch.FinishReason
 		}
 		res.Content += ch.Delta.Content
+		text.WriteString(ch.Delta.Content)
 		for _, tc := range ch.Delta.ToolCalls {
 			cur, ok := acc[tc.Index]
 			if !ok {
@@ -1145,6 +1200,7 @@ func parseAIDataLine(line string, res *aiRoundResult, acc map[int]*aiToolCall) {
 			cur.Function.Arguments += tc.Function.Arguments
 		}
 	}
+	return text.String()
 }
 
 // sseWriteEvent 向 SSE 流写一个自定义事件（event + data 两行 + 空行）

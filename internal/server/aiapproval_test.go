@@ -50,7 +50,7 @@ func mockAIUpstream(t *testing.T) (*httptest.Server, *int32) {
 			}}})
 			writeSSE(map[string]any{"choices": []any{map[string]any{
 				"delta": map[string]any{"tool_calls": []any{map[string]any{
-					"index": 0,
+					"index":    0,
 					"function": map[string]any{"arguments": `"content":"hi"}`},
 				}}},
 			}}})
@@ -134,7 +134,7 @@ func TestAIWriteToolApprovalFlow(t *testing.T) {
 		t.Fatalf("chat status = %d, body: %s", resp.StatusCode, body)
 	}
 
-	var events []string          // 按序记录事件名（data 行归并到其 event）
+	var events []string // 按序记录事件名（data 行归并到其 event）
 	dataByEvent := map[string][]string{}
 	reader := bufio.NewReader(resp.Body)
 	for {

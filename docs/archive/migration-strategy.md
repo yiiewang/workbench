@@ -1,7 +1,7 @@
 # 数据库版本化迁移方案（golang-migrate）
 
 > ⚠️ **归档文档（历史设计稿）**：本文写于 2026-08-21，记录当时的方案评审状态，**不代表当前实现**。下方原状态行仅为当时的评审进度。
-> 现行架构、数据模型与接口请以 [`design.md`](design.md) 与代码为准；文档状态与偏差清单见 [`README.md`](README.md#6-已知文档偏差清单)。
+> 现行架构、数据模型与接口请以 [`03-design.md`](../03-design.md) 与代码为准；文档状态与偏差清单见 [`README.md`](../README.md#6-已知文档偏差清单)。
 > 主要漂移：版本化迁移已落地（`internal/db/migrations/`，基线 000015）；但驱动已换为 `mattn/go-sqlite3`（cgo）+ 静态 sqlite-vec，本文「保持 `CGO_ENABLED=0`、使用 modernc 纯 Go 驱动」的约束不再成立；`visit_logs` 已删除、`org_features` 已被 `user_org_feature` 取代。
 
 > 版本：v1 ｜ 日期：2026-08-21 ｜ 状态：方案评审中（未实施）

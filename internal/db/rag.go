@@ -201,6 +201,26 @@ func (d *DB) ListFileIndexState(ctx context.Context, orgID, userID int64, limit 
 	return items, rows.Err()
 }
 
+// ListIndexedPaths 列出该用户全部已索引路径（无 limit，供重建时清理孤儿索引）
+func (d *DB) ListIndexedPaths(ctx context.Context, orgID, userID int64) ([]string, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT path FROM file_index_state WHERE org_id = ? AND user_id = ?`,
+		orgID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
 // FileIndexSummaryOf 索引状态汇总（文件数/块数/失败数）
 func (d *DB) FileIndexSummaryOf(ctx context.Context, orgID, userID int64) (FileIndexSummary, error) {
 	var s FileIndexSummary

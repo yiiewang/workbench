@@ -1,14 +1,14 @@
 <script setup lang="ts">
 // PC 端 AI 对话浮动面板：核心对话逻辑在 composables/useAIChat（与移动端 MAI 共用），
 // 本组件只保留面板形态特有部分：fab/开关、宽度拖拽、外部事件监听。
-import { ref, reactive, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, nextTick, onMounted, onUnmounted, provide } from 'vue'
 import { loggedIn } from '../../stores/auth'
 import { showToast } from '../../lib/common'
+import { hasOpenModal } from '../../lib/modalEsc'
 import { getAIIndexStatus, type AIIndexStatus } from '../../api/ai'
-import { useAIChat } from '../../composables/useAIChat'
+import { useAIChat, aiChatKey } from '../../composables/useAIChat'
 import FilePickerModal from '../modal/FilePickerModal.vue'
-import ToolCallList from './ToolCallList.vue'
-import RagCitations from './RagCitations.vue'
+import AiMessage from './AiMessage.vue'
 import RagRefTooltip from './RagRefTooltip.vue'
 
 const listEl = ref<HTMLElement | null>(null)
@@ -38,66 +38,46 @@ async function scrollToBottom(force = false) {
   el.scrollTop = el.scrollHeight
 }
 
-// ---- 对话核心（composable） ----
+// ---- 对话核心（composable）：整份实例 provide 给消息组件 ----
+const chat = useAIChat(scrollToBottom)
+provide(aiChatKey, chat)
 const {
   aiEnabled, aiModel, messages, input, streaming,
   pendingCtxFiles, showFilePicker,
-  dbSessionId, sessions, sessionsOpen, sessionsLoading,
+  dbSessionId, streamingSessions, sessions, sessionsLoading,
   visibleMessages, hiddenCount, showMore,
   maybeRestoreLastSession,
   send, stopStreaming, askWith,
   removeCtxFile, onPickFiles,
-  toggleSessions, loadSessions, loadSession, removeSession, clearChat, timeAgo,
-  copyMessage, regenerate, saveReplyAsFile, approveToolCall,
-  isStreamingTail, messageSegments, renderTextMd, usageText, hasCitedRefs, hasReplyContent, userInitial,
+  loadSessions, loadSession, removeSession, clearChat, timeAgo,
   onInputKeydown: onKeydown,
-} = useAIChat(scrollToBottom)
+} = chat
 
-// ---- 过程块折叠状态（key = 消息idx:段idx）----
-// 默认：流式尾消息展开（看得见执行中），其余折叠；手动 toggle 覆盖默认值
-const processManual = reactive(new Map<string, boolean>())
+// ---- 侧栏：会话 / 索引状态 / 消息目录三合一 ----
+// 三个入口不再各自覆盖消息区，统一在左栏切 tab；同一 tab 再点即收起。
+type RailTab = 'sessions' | 'index' | 'toc'
+const railOpen = ref(false)
+const railTab = ref<RailTab>('sessions')
+const railTabs: { id: RailTab; label: string }[] = [
+  { id: 'sessions', label: '会话' },
+  { id: 'index', label: '索引' },
+  { id: 'toc', label: '目录' },
+]
 
-function processKey(i: number, si: number): string {
-  return `${i}:${si}`
+function openRail(tab: RailTab) {
+  if (railOpen.value && railTab.value === tab) {
+    railOpen.value = false
+    return
+  }
+  railTab.value = tab
+  railOpen.value = true
+  if (tab === 'sessions') loadSessions()
+  if (tab === 'index') loadIndexStatus()
 }
 
-function processOpen(i: number, si: number): boolean {
-  const manual = processManual.get(processKey(i, si))
-  if (manual !== undefined) return manual
-  return isStreamingTail(i)
-}
-
-function toggleProcess(i: number, si: number) {
-  processManual.set(processKey(i, si), !processOpen(i, si))
-}
-
-// 块标题：流式执行中显示动态态；完成后显示工具步数
-function processRunning(i: number, si: number): boolean {
-  const segs = messageSegments(visibleMessages.value[i])
-  return isStreamingTail(i) && si === segs.length - 1 && segs[si]?.kind === 'process'
-}
-
-function processTitle(seg: { kind: string; steps: { kind: string }[] }, i: number, si: number): string {
-  if (processRunning(i, si)) return '思考与工具调用中…'
-  const tools = seg.steps.filter(s => s.kind === 'tool').length
-  return tools > 0 ? `思考与工具调用（${tools} 步）` : '思考过程'
-}
-
-// ---- 索引状态抽屉（RAG 可视化：哪些文件已索引/失败）----
-const indexOpen = ref(false)
+// 索引状态数据（RAG 可视化：哪些文件已索引/失败）
 const indexLoading = ref(false)
 const indexData = ref<AIIndexStatus | null>(null)
-
-function toggleIndexPanel() {
-  indexOpen.value = !indexOpen.value
-  if (indexOpen.value) {
-    sessionsOpen.value = false // 与历史会话抽屉互斥
-    loadIndexStatus()
-  }
-}
-
-// 反向互斥：打开历史会话时收起索引抽屉
-watch(sessionsOpen, (v) => { if (v) indexOpen.value = false })
 
 async function loadIndexStatus() {
   indexLoading.value = true
@@ -129,8 +109,19 @@ function toggleTheater() {
   scrollToBottom()
 }
 
+// ESC 分层处理：弹窗 > 剧场模式 > 侧栏 > 收起面板。
+// 弹窗由 ModalShell 自己响应，这里必须让路，避免一次按键同时关弹窗又收面板。
 function onEsc(e: KeyboardEvent) {
-  if (e.key === 'Escape' && theater.value) theater.value = false
+  if (e.key !== 'Escape' || hasOpenModal()) return
+  if (theater.value) {
+    theater.value = false
+    return
+  }
+  if (railOpen.value) {
+    railOpen.value = false
+    return
+  }
+  if (panelOpen.value) panelOpen.value = false
 }
 window.addEventListener('keydown', onEsc)
 
@@ -156,37 +147,14 @@ function onExternalOpen() {
     showToast('AI 未配置，请在服务端设置 ai.api_key')
     return
   }
-  sessionsOpen.value = false
+  railOpen.value = false
   panelOpen.value = true
   scrollToBottom()
 }
 
-// ---- 消息目录刻度：跳转 + 摘要预览 + 滚动律动 ----
-const tocHover = ref(-1)
-const tocVisible = ref(false)
-const tocTipStyle = ref<Record<string, string>>({})
-// 当前视口对应的消息索引：刻度条随滚动实时高亮（律动跟随）
+// ---- 消息目录：左栏列表 + 跳转 + 滚动高亮同步 ----
 const activeToc = ref(0)
 let tocRaf = 0
-
-// hover 期间 tip 常驻：切换条目只更新内容与垂直位置（水平位置固定在
-// 目录列右缘——不随条宽左右跳动），tip 垂直居中于选中条目
-function onTocEnter(i: number, e: MouseEvent) {
-  tocHover.value = i
-  const item = (e.currentTarget as HTMLElement)
-  const toc = item.parentElement
-  const itemR = item.getBoundingClientRect()
-  const tocR = toc?.getBoundingClientRect()
-  const centerY = itemR.top + itemR.height / 2
-  const left = (tocR ? tocR.right : itemR.right) + 10
-  const top = Math.max(30, Math.min(centerY, window.innerHeight - 60))
-  tocTipStyle.value = { left: left + 'px', top: top + 'px' }
-}
-
-function onTocLeave() {
-  tocVisible.value = false
-  tocHover.value = -1
-}
 
 function jumpTo(i: number) {
   listEl.value?.querySelector(`[data-idx="${i}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -210,14 +178,6 @@ function onListScroll() {
     })
     activeToc.value = idx
   })
-}
-
-// 刻度条宽度：活跃条最长最显眼，相邻按距离衰减（律动），其余基础长
-function tocBarStyle(m: { content: string }, i: number) {
-  if (i === activeToc.value) return { width: '28px' }
-  const d = Math.abs(i - activeToc.value)
-  const w = Math.max(8, 18 - d * 4)
-  return { width: w + 'px' }
 }
 
 function tocSummary(m: { role: string; content: string; toolCalls?: readonly unknown[] }): string {
@@ -285,28 +245,15 @@ function onResizeStart(e: MouseEvent) {
 
       <div class="ai-header">
         <div class="ai-title-wrap">
+          <button class="ai-icon-btn" :class="{ active: railOpen }" :title="railOpen ? '收起侧栏 (Esc)' : '展开侧栏'" @click="railOpen = !railOpen">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>
+            </svg>
+          </button>
           <span class="ai-title">AI 助手</span>
           <span v-if="aiModel" class="ai-model">{{ aiModel }}</span>
         </div>
         <div class="ai-header-actions">
-          <button class="ai-icon-btn" :class="{ active: indexOpen }" title="文件索引状态" @click="toggleIndexPanel">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>
-            </svg>
-          </button>
-          <button v-if="!isMobile" class="ai-icon-btn" :class="{ active: theater }" :title="theater ? '退出剧场模式 (Esc)' : '剧场模式'" @click="toggleTheater">
-            <svg v-if="!theater" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>
-            </svg>
-            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M14 10l7-7"/><path d="M3 21l7-7"/>
-            </svg>
-          </button>
-          <button class="ai-icon-btn" :class="{ active: sessionsOpen }" title="历史会话" @click="toggleSessions">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
-            </svg>
-          </button>
           <button class="ai-icon-btn" title="新对话" @click="clearChat">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 5v14M5 12h14"/>
@@ -318,209 +265,162 @@ function onResizeStart(e: MouseEvent) {
         </div>
       </div>
 
-      <!-- 文件索引状态（覆盖消息区：RAG 可视化，哪些文件已索引/失败） -->
-      <div v-if="indexOpen" class="ai-sessions ai-index">
-        <div class="ai-sessions-head">
-          <span>文件索引状态</span>
-          <button class="ai-icon-btn" title="刷新" @click="loadIndexStatus">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
-          </button>
-        </div>
-        <div class="ai-index-summary">
-          <template v-if="indexData">
-            <span>{{ indexData.summary.files }} 个文件</span>
-            <span>{{ indexData.summary.chunks }} 个文本块</span>
-            <span :class="{ err: indexData.summary.errors > 0 }">{{ indexData.summary.errors }} 个失败</span>
-          </template>
-        </div>
-        <div class="ai-sessions-list">
-          <div v-if="indexLoading && !indexData" class="ai-sessions-empty">加载中…</div>
-          <div v-else-if="!indexData?.items?.length" class="ai-sessions-empty">
-            暂无索引（上传文本文件或触发全量重建）
-          </div>
-          <div v-for="it in indexData?.items" :key="it.path" class="ai-index-item" :title="it.error ? it.path + '：' + it.error : it.path">
-            <span class="ai-index-dot" :class="it.status"></span>
-            <span class="ai-index-path">{{ it.path }}</span>
-            <span class="ai-index-meta">{{ it.status === 'ok' ? it.chunkCount + ' 块' : '失败' }}</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 历史会话列表（覆盖消息区，点击恢复继续沟通） -->
-      <div v-if="sessionsOpen" class="ai-sessions">
-        <div class="ai-sessions-head">
-          <span>历史会话</span>
-          <button class="ai-icon-btn" title="刷新" @click="loadSessions">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
-          </button>
-        </div>
-        <div class="ai-sessions-list">
-          <div v-if="sessionsLoading && !sessions.length" class="ai-sessions-empty">加载中…</div>
-          <div v-else-if="!sessions.length" class="ai-sessions-empty">暂无历史会话</div>
-          <div
-            v-for="s in sessions"
-            :key="s.id"
-            class="ai-session-item"
-            :class="{ current: s.id === dbSessionId }"
-            :title="s.title"
-            @click="loadSession(s.id)"
-          >
-            <div class="ai-session-title">{{ s.title || '新对话' }}</div>
-            <div class="ai-session-meta">
-              <span>{{ timeAgo(s.updatedAt) }}</span>
-              <span v-if="s.id === dbSessionId" class="ai-session-current-tag">当前</span>
-              <button class="ai-session-del" title="删除会话" @click="removeSession(s.id, $event)">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 消息目录刻度（固定于消息区左缘，不随滚动移动；滚动时律动跟随） -->
-      <div
-        v-if="messages.length > 6 && !sessionsOpen"
-        class="ai-toc"
-        @mouseenter="tocVisible = true"
-        @mouseleave="onTocLeave"
-      >
-        <div
-          v-for="(m, i) in visibleMessages"
-          :key="'toc' + i"
-          class="ai-toc-item"
-          :class="{ active: i === activeToc }"
-          @click="jumpTo(i)"
-          @mouseenter="onTocEnter(i, $event)"
-        >
-          <span class="ai-toc-bar" :class="m.role" :style="tocBarStyle(m, i)"></span>
-        </div>
-      </div>
-      <!-- 摘要卡：Teleport 到 body，fixed 定位（不受 toc 容器 overflow 裁剪）；
-           hover 期间常驻，切换条目只更新内容与位置（不闪烁） -->
-      <Teleport to="body">
-        <div v-if="tocVisible && tocHover >= 0 && visibleMessages[tocHover]" class="ai-toc-tip" :style="tocTipStyle">
-          <div class="ai-toc-tip-title">{{ visibleMessages[tocHover].role === 'user' ? '我的提问' : 'AI 回复' }}</div>
-          <div class="ai-toc-tip-body">{{ tocSummary(visibleMessages[tocHover]) }}</div>
-        </div>
-      </Teleport>
-
-      <div v-show="!sessionsOpen" ref="listEl" class="ai-list" @scroll.passive="onListScroll">
-        <button v-if="hiddenCount" class="ai-load-more" @click="showMore">
-          加载更早的 {{ hiddenCount }} 条消息
-        </button>
-
-        <div v-if="messages.length === 0" class="ai-empty">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
-          </svg>
-          <div>有问题尽管问，Enter 发送</div>
-        </div>
-
-        <div v-for="(m, i) in visibleMessages" :key="i" :data-idx="i" class="ai-msg" :class="m.role">
-          <!-- hover 工具条：复制 / 重新生成（末尾回复）/ 保存为文件 -->
-          <div class="ai-msg-actions">
+      <div class="ai-body">
+        <!-- 左栏：会话 / 索引状态 / 消息目录并排展示，不再覆盖消息区 -->
+        <aside v-if="railOpen" class="ai-rail">
+          <div class="ai-rail-tabs">
             <button
-              v-if="m.role === 'assistant' && !streaming && i === visibleMessages.length - 1 && hasReplyContent(m)"
-              class="ai-act" title="重新生成" @click="regenerate"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
-            </button>
-            <button
-              v-if="m.role === 'assistant' && !streaming && m.content"
-              class="ai-act" title="保存为文件（/ai/）" @click="saveReplyAsFile(m, i)"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
-            </button>
-            <button v-if="m.content" class="ai-act" title="复制" @click="copyMessage(m)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            </button>
+              v-for="t in railTabs"
+              :key="t.id"
+              class="ai-rail-tab"
+              :class="{ active: railTab === t.id }"
+              @click="openRail(t.id)"
+            >{{ t.label }}</button>
           </div>
 
-          <!-- 头像：user 首字母 / assistant 星标 -->
-          <div class="ai-avatar" :class="m.role">
-            <template v-if="m.role === 'user'">{{ userInitial }}</template>
-            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
-            </svg>
-          </div>
-
-          <!-- 气泡：assistant 按时序分段渲染（过程块可折叠 + 正文段），user 纯文本 -->
-          <div class="ai-bubble" :class="m.role">
-            <template v-if="m.role === 'assistant'">
-              <template v-for="(seg, si) in messageSegments(m)" :key="si">
-                <!-- 过程块（思考 + 工具调用，时间序）：默认折叠，流式尾消息展开 -->
-                <div v-if="seg.kind === 'process'" class="ai-process">
-                  <button class="ai-process-toggle" @click="toggleProcess(i, si)">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M9.1 12a3 3 0 1 0 5.8 1c.6-1.8-1-2.4-1-4A3 3 0 0 0 12 6"/>
-                      <circle cx="12" cy="3" r=".8" fill="currentColor"/><circle cx="5" cy="12" r=".8" fill="currentColor"/><circle cx="19" cy="12" r=".8" fill="currentColor"/>
-                    </svg>
-                    <span :class="{ dim: processRunning(i, si) }">
-                      {{ processTitle(seg, i, si) }}
-                    </span>
-                    <svg class="ai-process-chevron" :class="{ open: processOpen(i, si) }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
-                  </button>
-                  <div v-show="processOpen(i, si)" class="ai-process-body">
-                    <template v-for="(s, ki) in seg.steps" :key="ki">
-                      <div v-if="s.kind === 'reasoning'" class="ai-process-reasoning">{{ s.text }}</div>
-                      <ToolCallList v-else-if="s.call" :calls="[s.call]" @approve="approveToolCall" />
-                    </template>
+          <div class="ai-rail-content">
+            <!-- 历史会话 -->
+            <template v-if="railTab === 'sessions'">
+              <div class="ai-rail-tools">
+                <span>{{ sessions.length }} 个会话</span>
+                <button class="ai-icon-btn" title="刷新" @click="loadSessions">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
+                </button>
+              </div>
+              <div class="ai-sessions-list">
+                <div v-if="sessionsLoading && !sessions.length" class="ai-sessions-empty">加载中…</div>
+                <div v-else-if="!sessions.length" class="ai-sessions-empty">暂无历史会话</div>
+                <div
+                  v-for="s in sessions"
+                  :key="s.id"
+                  class="ai-session-item"
+                  :class="{ current: s.id === dbSessionId }"
+                  :title="s.title"
+                  @click="loadSession(s.id)"
+                >
+                  <div class="ai-session-title">{{ s.title || '新对话' }}</div>
+                  <div class="ai-session-meta">
+                    <span>{{ timeAgo(s.updatedAt) }}</span>
+                    <span v-if="s.id === dbSessionId" class="ai-session-current-tag">当前</span>
+                    <span v-if="streamingSessions.has(s.id)" class="ai-session-generating"><i></i>生成中</span>
+                    <button class="ai-session-del" title="删除会话" @click="removeSession(s.id, $event)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+                    </button>
                   </div>
                 </div>
-                <!-- 正文段（Agent 中间轮说明文本 / 最终回答） -->
-                <div v-else-if="seg.text" class="ai-md" v-html="renderTextMd(seg.text, m)"></div>
-              </template>
-              <span v-if="isStreamingTail(i)" class="ai-cursor">▍</span>
-              <!-- RAG 引用来源：只展示模型实际引用的片段（正文出现对应 [n]） -->
-              <RagCitations v-if="hasCitedRefs(m)" :hits="m.ragHits" />
-              <!-- token 消耗（Agent 多轮已聚合；上游不支持 usage 时缺省不显示） -->
-              <div v-if="usageText(m)" class="ai-usage">{{ usageText(m) }}</div>
+              </div>
             </template>
+
+            <!-- 文件索引状态（RAG 可视化：哪些文件已索引/失败） -->
+            <template v-else-if="railTab === 'index'">
+              <div class="ai-rail-tools">
+                <span>文件索引状态</span>
+                <button class="ai-icon-btn" title="刷新" @click="loadIndexStatus">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
+                </button>
+              </div>
+              <div class="ai-index-summary">
+                <template v-if="indexData">
+                  <span>{{ indexData.summary.files }} 个文件</span>
+                  <span>{{ indexData.summary.chunks }} 个文本块</span>
+                  <span :class="{ err: indexData.summary.errors > 0 }">{{ indexData.summary.errors }} 个失败</span>
+                </template>
+              </div>
+              <div class="ai-sessions-list">
+                <div v-if="indexLoading && !indexData" class="ai-sessions-empty">加载中…</div>
+                <div v-else-if="!indexData?.items?.length" class="ai-sessions-empty">
+                  暂无索引（上传文本文件或触发全量重建）
+                </div>
+                <div v-for="it in indexData?.items" :key="it.path" class="ai-index-item" :title="it.error ? it.path + '：' + it.error : it.path">
+                  <span class="ai-index-dot" :class="it.status"></span>
+                  <span class="ai-index-path">{{ it.path }}</span>
+                  <span class="ai-index-meta">{{ it.status === 'ok' ? it.chunkCount + ' 块' : '失败' }}</span>
+                </div>
+              </div>
+            </template>
+
+            <!-- 消息目录：摘要直接列出，滚动时高亮当前条目 -->
             <template v-else>
-              {{ m.content }}
-              <div v-if="m.files?.length" class="ai-msg-files">
-                <span v-for="f in m.files" :key="f" class="ai-msg-file" :title="f">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
-                    <path d="M3 1h6l5 5v9H3V1z"/><path d="M9 1v5h5"/>
-                  </svg>
-                  <span class="ai-msg-file-name">{{ f.split('/').pop() || f }}</span>
-                </span>
+              <div class="ai-rail-tools"><span>消息目录</span></div>
+              <div class="ai-toc-list">
+                <button
+                  v-for="(m, i) in visibleMessages"
+                  :key="'toc' + i"
+                  class="ai-toc-item"
+                  :class="{ active: i === activeToc }"
+                  @click="jumpTo(i)"
+                >
+                  <span class="ai-toc-role" :class="m.role">{{ m.role === 'user' ? '问' : '答' }}</span>
+                  <span class="ai-toc-summary">{{ tocSummary(m) }}</span>
+                </button>
+                <div v-if="!visibleMessages.length" class="ai-sessions-empty">暂无消息</div>
               </div>
             </template>
           </div>
-        </div>
-      </div>
 
-      <!-- 输入卡片：textarea 融入卡片；@ 触发文件引用；底部工具行（左提示 / 右圆形发送） -->
-      <div class="ai-input">
-        <!-- 待引用文件 chips（@ 选择后出现，可移除，发送时注入） -->
-        <div v-if="pendingCtxFiles.length" class="ai-ctx-list">
-          <span v-for="p in pendingCtxFiles" :key="p" class="ai-ctx-chip" :title="p">
-            <svg class="ai-ctx-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
-              <path d="M3 1h6l5 5v9H3V1z"/><path d="M9 1v5h5"/>
-            </svg>
-            <span class="ai-ctx-name">{{ p.split('/').pop() || p }}</span>
-            <button class="ai-ctx-remove" title="移除引用" @click="removeCtxFile(p)">&times;</button>
-          </span>
-        </div>
-        <textarea
-          v-model="input"
-          rows="2"
-          placeholder="发送消息，输入 @ 引用文件"
-          @keydown="onKeydown"
-        ></textarea>
-        <div class="ai-input-toolbar">
-          <div class="ai-toolbar-left">
-            <span class="ai-input-hint">@ 引用文件 · Enter 发送 · Shift+Enter 换行</span>
+          <div v-if="!isMobile" class="ai-rail-foot">
+            <button class="ai-rail-view" :class="{ active: theater }" @click="toggleTheater">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>
+              </svg>
+              {{ theater ? '退出剧场模式' : '剧场模式' }}
+            </button>
           </div>
-          <button v-if="streaming" class="ai-send stop" title="停止生成" @click="stopStreaming">
-            <svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+        </aside>
+
+        <!-- 右区：消息流 + 输入（grid 第二列），侧栏打开时始终可见 -->
+        <div ref="listEl" class="ai-list" @scroll.passive="onListScroll">
+          <button v-if="hiddenCount" class="ai-load-more" @click="showMore">
+            加载更早的 {{ hiddenCount }} 条消息
           </button>
-          <button v-else class="ai-send" :disabled="!input.trim()" title="发送" @click="send">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 19V5M5 12l7-7 7 7"/>
+
+          <div v-if="messages.length === 0" class="ai-empty">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
             </svg>
-          </button>
+            <div>有问题尽管问，Enter 发送</div>
+          </div>
+
+          <AiMessage v-for="(m, i) in visibleMessages" :key="i" :message="m" :index="i" />
+        </div>
+
+        <!-- 输入卡片：textarea 融入卡片；底部工具栏（引用入口 + 快捷键提示 / 发送） -->
+        <div class="ai-input">
+          <!-- 待引用文件 chips（@ 选择后出现，可移除，发送时注入） -->
+          <div v-if="pendingCtxFiles.length" class="ai-ctx-list">
+            <span v-for="p in pendingCtxFiles" :key="p" class="ai-ctx-chip" :title="p">
+              <svg class="ai-ctx-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+                <path d="M3 1h6l5 5v9H3V1z"/><path d="M9 1v5h5"/>
+              </svg>
+              <span class="ai-ctx-name">{{ p.split('/').pop() || p }}</span>
+              <button class="ai-ctx-remove" title="移除引用" @click="removeCtxFile(p)">&times;</button>
+            </span>
+          </div>
+          <textarea
+            v-model="input"
+            rows="2"
+            placeholder="发送消息，输入 @ 引用文件"
+            @keydown="onKeydown"
+          ></textarea>
+          <div class="ai-input-toolbar">
+            <div class="ai-toolbar-left">
+              <button class="ai-chip" title="引用文件（也可直接输入 @）" @click="showFilePicker = true">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+                  <path d="M3 1h6l5 5v9H3V1z"/><path d="M9 1v5h5"/>
+                </svg>
+                @ 引用文件
+              </button>
+              <span class="ai-input-hint">Enter 发送 · Shift+Enter 换行</span>
+            </div>
+            <button v-if="streaming" class="ai-send stop" title="停止生成" @click="stopStreaming">
+              <svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+            </button>
+            <button v-else class="ai-send" :disabled="!input.trim()" title="发送" @click="send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 19V5M5 12l7-7 7 7"/>
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -595,70 +495,135 @@ function onResizeStart(e: MouseEvent) {
 }
 .ai-panel.theater .ai-resizer { display: none; }
 
-/* ---- 消息目录刻度：固定在消息区左缘，hover 预览摘要（Teleport body），点击跳转 ---- */
-.ai-toc {
-  position: absolute;
-  left: 0;
-  top: 48px;
-  bottom: 106px;
-  width: 48px; /* 容纳最长活跃条（38px）不裁圆角 */
+/* ---- 侧栏：会话 / 索引状态 / 消息目录，与消息区并排 ---- */
+.ai-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  container-type: inline-size;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+.ai-rail {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  /* 固定 px 宽度：auto 轨道据此定宽，不随内容撑开；窄面板下改覆盖式 */
+  width: 216px;
+  max-width: 216px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center; /* 刻度组垂直居中 */
-  align-items: flex-start; /* 条左对齐：贴分隔线向右伸展 */
-  gap: 3px;
-  padding: 2px 5px;
-  overflow: hidden auto;
-  z-index: 2;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+}
+.ai-rail-tabs {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+.ai-rail-tab {
+  flex: 1;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  padding: 8px 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.ai-rail-tab:hover { color: var(--text); }
+.ai-rail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.ai-rail-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ai-rail-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 6px;
+  padding: 6px 8px 2px 10px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.ai-rail-foot {
+  flex-shrink: 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+}
+.ai-rail-view {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 5px 6px;
+  cursor: pointer;
+}
+.ai-rail-view:hover { background: var(--hover); color: var(--text); }
+.ai-rail-view.active { color: var(--accent); }
+.ai-rail-view svg { width: 13px; height: 13px; }
+
+/* 目录列表：摘要常显，滚动时高亮当前消息 */
+.ai-toc-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px 8px;
 }
 .ai-toc-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  padding: 5px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  text-align: left;
   cursor: pointer;
-  flex-shrink: 0;
 }
-.ai-toc-bar {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--border);
-  opacity: .9;
-  transition: background .15s, width .15s;
+.ai-toc-item:hover { background: var(--hover); color: var(--text); }
+.ai-toc-item.active { background: var(--active); color: var(--text); }
+.ai-toc-role {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  background: var(--code-bg);
+  color: var(--text-dim);
 }
-.ai-toc-item:hover .ai-toc-bar { background: var(--accent); opacity: 1; }
-.ai-toc-item.active .ai-toc-bar { background: var(--text); opacity: 1; }
-.ai-toc-bar.user { background: var(--accent); opacity: .5; }
-.ai-toc-item:hover .ai-toc-bar.user { opacity: 1; }
-.ai-toc-tip {
-  position: fixed;
-  transform: translateY(-50%); /* 垂直居中于选中条目 */
-  max-width: 300px;
-  background: #1c2127;
-  color: #e8eaed;
-  border-radius: 8px;
-  padding: 9px 12px;
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: normal;
-  word-break: break-all;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, .28);
-  z-index: 9999;
-  /* 出现时淡入；hover 切换条目时仅垂直平滑跟随（水平固定不跳动） */
-  animation: toc-tip-in .15s ease-out;
-  transition: left .12s ease-out, top .12s ease-out;
+.ai-toc-role.user { background: var(--accent); color: #fff; }
+.ai-toc-summary {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
-@keyframes toc-tip-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-.ai-toc-tip-title {
-  font-weight: 600;
-  font-size: 12px;
-  margin-bottom: 3px;
-  color: #fff;
-}
-.ai-toc-tip-body { color: #b8bfc7; }
 
-/* 左缘拖拽调宽：默认隐形细条，hover/拖拽时淡显居中线；z-index 高于 ai-toc(2)，否则刻度容器盖住左缘导致拖不动 */
+/* 左缘拖拽调宽：默认隐形细条，hover/拖拽时淡显居中线 */
 .ai-resizer {
   position: absolute;
   left: -3px;
@@ -725,17 +690,16 @@ function onResizeStart(e: MouseEvent) {
 .ai-icon-btn.active { color: var(--accent); }
 .ai-icon-btn svg { width: 15px; height: 15px; }
 
-/* 历史会话列表（覆盖消息区） */
-/* 文件索引状态抽屉（复用 ai-sessions 骨架） */
+/* 会话 / 索引状态列表（侧栏内容区，窄栏适配） */
 .ai-index-summary {
-  display: flex; gap: 14px; padding: 6px 12px;
-  font-size: 11px; color: var(--text-dim);
+  display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 6px 10px;
+  font-size: 10px; color: var(--text-dim);
   border-bottom: 1px solid var(--border);
 }
 .ai-index-summary .err { color: #c04040; }
 .ai-index-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 12px; font-size: 11px; cursor: default;
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; font-size: 10px; cursor: default;
 }
 .ai-index-dot {
   flex: none; width: 7px; height: 7px; border-radius: 50%;
@@ -748,31 +712,14 @@ function onResizeStart(e: MouseEvent) {
 }
 .ai-index-meta { flex: none; color: var(--text-dim); }
 
-.ai-sessions {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.ai-sessions-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 14px 4px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: .5px;
-}
 .ai-sessions-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 14px;
+  padding: 6px 8px 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 .ai-sessions-empty {
   text-align: center;
@@ -812,6 +759,26 @@ function onResizeStart(e: MouseEvent) {
   border-radius: 8px;
   padding: 0 5px;
 }
+.ai-session-generating {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0 5px;
+}
+.ai-session-generating i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ai-generating-pulse 1s ease-in-out infinite;
+}
+@keyframes ai-generating-pulse {
+  0%, 100% { opacity: .25; }
+  50% { opacity: 1; }
+}
 .ai-session-del {
   margin-left: auto;
   border: none;
@@ -825,12 +792,13 @@ function onResizeStart(e: MouseEvent) {
 .ai-session-del:hover { background: #fde8ea; color: #cf222e; }
 .ai-session-del svg { width: 11px; height: 11px; }
 
-/* 消息列表 */
+/* 消息列表（grid 第二列第一行） */
 .ai-list {
-  flex: 1;
+  grid-column: 2;
+  grid-row: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 14px 14px 52px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -847,25 +815,10 @@ function onResizeStart(e: MouseEvent) {
 }
 .ai-empty svg { width: 28px; height: 28px; opacity: .5; }
 
-/* 消息行：头像 + 气泡 */
-.ai-msg { display: flex; gap: 8px; align-items: flex-start; position: relative; }
-.ai-msg.user { flex-direction: row-reverse; }
-
-/* hover 工具条：浮在消息行右上角 */
-
-/* 气泡 */
-/* user 气泡内引用文件名 */
-/* 文件名单独一层才能生效 ellipsis（裸文本节点不参与 text-overflow） */
-.ai-msg-file-name {
-  min-width: 0;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ai-cursor-dim { color: var(--text-dim); }
-/* 输入区：卡片式（无边框 textarea 融入卡片，底部工具行） */
+/* 输入区：卡片式（无边框 textarea 融入卡片，底部工具行；grid 第二列第二行） */
 .ai-input {
+  grid-column: 2;
+  grid-row: 2;
   margin: 10px 12px 12px;
   padding: 10px 12px 8px;
   border: 1px solid var(--border);
@@ -958,12 +911,12 @@ function onResizeStart(e: MouseEvent) {
   white-space: nowrap;
 }
 
-/* 工具栏功能 chips（DeepSeek 风格：图标 + 文字，active 高亮） */
+/* 工具栏功能按钮：图标 + 文字的轻量 chip */
 .ai-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: 160px;
+  flex-shrink: 0;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: transparent;
@@ -971,22 +924,11 @@ function onResizeStart(e: MouseEvent) {
   font-size: 11px;
   padding: 2px 8px;
   cursor: pointer;
-  transition: all .15s;
+  transition: color .15s, border-color .15s;
   white-space: nowrap;
 }
 .ai-chip svg { width: 12px; height: 12px; flex-shrink: 0; }
-.ai-chip .ai-chip-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ai-chip:hover { color: var(--text); border-color: var(--text-dim); }
-.ai-chip.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--active, #e4e6f1);
-}
-.ai-chip:disabled { opacity: .6; cursor: default; }
+.ai-chip:hover { color: var(--accent); border-color: var(--accent); }
 
 .ai-send {
   border: none;
@@ -1006,6 +948,19 @@ function onResizeStart(e: MouseEvent) {
 .ai-send:disabled { opacity: .35; cursor: default; }
 .ai-send.stop { background: var(--text-dim); }
 
+/* 面板被拖到过窄时：侧栏退化为覆盖式抽屉，不与消息区争宽度 */
+@container (max-width: 460px) {
+  .ai-rail {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 4;
+    width: min(260px, 78%);
+    box-shadow: 6px 0 20px rgba(0, 0, 0, .16);
+  }
+}
+
 /* 移动端：面板近乎占满宽度（锚定 dock 条目右缘，dock 距视口右缘 12px），禁拖拽；
    fab 按钮隐藏（底部导航已有 AI 入口），面板经 dock 条目仍可锚定显示 */
 @media (max-width: 900px) {
@@ -1013,5 +968,14 @@ function onResizeStart(e: MouseEvent) {
   .ai-resizer { display: none; }
   .ai-fab { display: none; }
   .ai-dock-item { width: 0; height: 0; }
+  .ai-rail {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 4;
+    width: min(260px, 78%);
+    box-shadow: 6px 0 20px rgba(0, 0, 0, .16);
+  }
 }
 </style>

@@ -3,11 +3,13 @@ package server
 // 后台对话运行：镜像 writer 断连降级与事件快照的单测。
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/kataras/iris/v12"
@@ -80,5 +82,48 @@ func TestRunToolWithApproval_DisconnectedSkipsWriteTool(t *testing.T) {
 	res, ok := got.(map[string]any)
 	if !ok || res["error"] != "用户已断开连接，写操作已跳过" {
 		t.Fatalf("write tool should be skipped after disconnect, got %+v", got)
+	}
+}
+
+// 正文增量按 rune 切分：中文/emoji 不因字节长度错位，游标越界可重复请求
+func TestSplitRunResult(t *testing.T) {
+	cases := []struct {
+		result    string
+		offset    int
+		wantDelta string
+		wantNext  int
+	}{
+		{"你好🌍", 0, "你好🌍", 3},
+		{"你好🌍", 2, "🌍", 3},
+		{"你好🌍", 3, "", 3},
+		{"你好🌍", 99, "", 3},
+		{"你好🌍", -1, "你好🌍", 3},
+		{"", 0, "", 0},
+	}
+	for _, c := range cases {
+		delta, next := splitRunResult(c.result, c.offset)
+		if delta != c.wantDelta || next != c.wantNext {
+			t.Fatalf("splitRunResult(%q, %d) = (%q, %d), want (%q, %d)",
+				c.result, c.offset, delta, next, c.wantDelta, c.wantNext)
+		}
+	}
+}
+
+// 每个上游正文分片都回调一次，拼接结果与整轮累积一致
+func TestForwardAIStream_DeltaCallback(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"你好"}}]}`,
+		`data: {"choices":[{"delta":{"content":"，世界"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}, "\n") + "\n"
+	reader := bufio.NewReader(strings.NewReader(src))
+	var got strings.Builder
+	res, alive := forwardAIStream(&flushBuffer{}, reader, func(d string) { got.WriteString(d) })
+	if !alive {
+		t.Fatal("reported disconnected")
+	}
+	if res.Content != "你好，世界" || got.String() != "你好，世界" {
+		t.Fatalf("content=%q delta=%q, want both 你好，世界", res.Content, got.String())
 	}
 }

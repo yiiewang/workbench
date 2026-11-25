@@ -73,6 +73,9 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 		adminRoot:   adminRoot,
 		tokenSecret: tokenSecret,
 		logFile:     logFile,
+		// cron 在 New 内即 Start，编排模板可能早于 App() 装配路由触发；
+		// 提前建好 app，让工具执行所需的 ContextPool 始终可用。
+		app: iris.New(),
 	}
 
 	// MCP 外部工具：启动时拉取各服务 tools/list（配置错误 fail fast，服务不可达跳过）
@@ -112,6 +115,14 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 			return nil, fmt.Errorf("init ai jobs runner: %w", ajerr)
 		}
 		sched.AddJob(aiJobsRunner)
+		// 通用定时触发：schedule 只按 target_type 分发，pipeline 在此注册自己的执行入口
+		triggersJob, tjerr := schedule.NewTriggersJob(database, map[string]schedule.TriggerHandler{
+			"pipeline_template": srv.triggerPipelineTemplate,
+		}, loc)
+		if tjerr != nil {
+			return nil, fmt.Errorf("init cron triggers job: %w", tjerr)
+		}
+		sched.AddJob(triggersJob)
 		sched.Start(context.Background())
 		srv.scheduler = sched
 		slog.Info("scheduler started", "timezone", loc.String(), "jobs", sched.Jobs(),
@@ -139,8 +150,7 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 
 // App 构建 iris.Application 并注册所有路由
 func (s *Server) App() *iris.Application {
-	app := iris.New()
-	s.app = app
+	app := s.app // New 中已创建，cron 触发时不依赖 App() 的调用时机
 
 	// 全局中间件：响应压缩 + 访问日志 + 安全响应头
 	// （压缩在最外层：logging 的 Record 记录未压缩数据，响应给客户端的是压缩流，
@@ -220,6 +230,23 @@ func (s *Server) App() *iris.Application {
 	// 后台对话运行状态（客户端断开后仍可查询跑完的结果）
 	api.Get("/ai/runs", auth, s.handleAIRunsList)
 	api.Get("/ai/runs/{id}", auth, s.handleAIRunGet)
+	// 编排运行状态（每步结果，断连后仍可查询）
+	api.Get("/pipeline/runs", auth, s.handlePipelineRunsList)
+	api.Get("/pipeline/runs/{id}", auth, s.handlePipelineRunGet)
+	// 编排执行与模板（Definition 直调 / 固化复用 / 定时触发）
+	api.Post("/pipeline/run", auth, s.handlePipelineRun)
+	api.Get("/pipeline/templates", auth, s.handlePipelineTemplatesList)
+	api.Get("/pipeline/templates/{id}", auth, s.handlePipelineTemplateGet)
+	api.Post("/pipeline/templates", auth, s.handlePipelineTemplateCreate)
+	api.Put("/pipeline/templates/{id}", auth, s.handlePipelineTemplateUpdate)
+	api.Delete("/pipeline/templates/{id}", auth, s.handlePipelineTemplateDelete)
+	api.Post("/pipeline/templates/{id}/run", auth, s.handlePipelineTemplateRun)
+	// 通用定时触发规则（schedule 只按 target_type 分发，目标归属在装配层校验）
+	api.Get("/schedule/triggers", auth, s.handleScheduleTriggersList)
+	api.Get("/schedule/triggers/{id}", auth, s.handleScheduleTriggerGet)
+	api.Post("/schedule/triggers", auth, s.handleScheduleTriggerCreate)
+	api.Put("/schedule/triggers/{id}", auth, s.handleScheduleTriggerUpdate)
+	api.Delete("/schedule/triggers/{id}", auth, s.handleScheduleTriggerDelete)
 	// AI 定时任务 CRUD（用户自建"到点让 AI 执行 prompt"）
 	api.Get("/ai/jobs", auth, s.handleAIJobsList)
 	api.Post("/ai/jobs", auth, s.handleAIJobCreate)

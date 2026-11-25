@@ -1,10 +1,10 @@
 // AI 对话核心逻辑（组件无关）：状态 + 发送/流式/引用/会话持久化/消息操作。
 // 由 PC 浮动面板（AiChat.vue）与移动端全屏对话页（MAI.vue）共用，
 // 视图层各自实现（onScrollBottom 由组件注入，基于各自的消息列表 ref）。
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, reactive, shallowReactive, type InjectionKey } from 'vue'
 import { loggedIn, currentUser } from '../stores/auth'
 import {
-  getAIStatus, chatStream, approveAITool, getAIRun, listAIRuns,
+  getAIStatus, chatStream, approveAITool, getAIRun,
   listAISessions, getAISession, createAISession, updateAISession, deleteAISession,
   type ChatMessage, type AISessionSummary, type AiPayloadMessage,
   type MsgStep, type ToolCallView, type AIRun,
@@ -25,28 +25,104 @@ export interface MsgSegment {
   text?: string
 }
 
+// 一个会话的全部可变状态：消息、落库 ID、后台 run、流控与持久化防重入。
+// 多个会话可各自并行生成；切换会话只换 currentKey，进行中的流仍写自己会话的消息对象。
+interface ChatSession {
+  key: string
+  messages: ChatMessage[]
+  dbSessionId: number | null
+  sessionId: string
+  streaming: boolean
+  abortCtrl: AbortController | null
+  runId: string | null
+  resumeStopped: boolean
+  resumedRunId: string | null
+  persisting: boolean
+  persistQueued: boolean
+  lastPersistAt: number
+}
+
+interface PendingRun { id: string; key: string; sessionId: string; dbSessionId: number | null }
+
 export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   const aiEnabled = ref(false)
   const aiModel = ref('')
+  // shallowReactive 让会话增删也进响应式依赖，streamingSessions 才能随新会话更新
+  const chatSessions = shallowReactive(new Map<string, ChatSession>())
+  function newSession(msgs: ChatMessage[] = [], dbId: number | null = null): ChatSession {
+    const s = shallowReactive<ChatSession>({
+      key: 'n:' + newId(), messages: reactive<ChatMessage[]>(msgs), dbSessionId: dbId,
+      sessionId: newId(), streaming: false, abortCtrl: null, runId: null,
+      resumeStopped: false, resumedRunId: null,
+      persisting: false, persistQueued: false, lastPersistAt: 0,
+    })
+    chatSessions.set(s.key, s)
+    return s
+  }
+  // 会话落库后 key 不变，按 dbSessionId 反查内存态，避免同一会话出现两份状态
+  function findByDbId(id: number): ChatSession | undefined {
+    for (const s of chatSessions.values()) if (s.dbSessionId === id) return s
+    return undefined
+  }
+  const currentKey = ref('')
+  const current = computed(() => chatSessions.get(currentKey.value)!)
   const messages = ref<ChatMessage[]>([])
   const input = ref('')
-  const streaming = ref(false)
-  let abortCtrl: AbortController | null = null
-  let sessionId = newId()
+  // 视图只看当前展示会话：导出名/类型不变，PC 面板与移动端组件零改动
+  const streaming = computed(() => current.value.streaming)
+  const dbSessionId = computed(() => current.value.dbSessionId)
+  // 会话列表用：哪些已落库会话正在生成（切走后仍在后台跑的也算）
+  const streamingSessions = computed(() => {
+    const ids = new Set<number>()
+    for (const s of chatSessions.values()) {
+      if (s.streaming && s.dbSessionId != null) ids.add(s.dbSessionId)
+    }
+    return ids
+  })
+  const initialSession = newSession()
+  currentKey.value = initialSession.key
+  messages.value = initialSession.messages
 
-  // 后台运行恢复：runId 存 sessionStorage，静默断流/刷新后按 runId 轮询补齐回复
+  // 后台运行恢复：每个会话的 run 记录（runId + 归属）存 sessionStorage，
+  // 刷新后遍历记录、按会话重建内存态并各自轮询补齐回复
   const RUN_ID_KEY = 'workbench-ai-active-run'
-  const RESUME_POLL_MS = 2000
-  let activeRunId: string | null = null
-  let resumeStopped = false
-  let resumedRunId: string | null = null
-
-  function setRunId(id: string | null) {
-    activeRunId = id
+  const RESUME_POLL_MS = 300 // 与后端 300ms 落库节流对齐，增量持续可见
+  const resuming = new Set<string>() // 正在恢复的 runId，避免重复启动轮询
+  function readPendingRuns(): PendingRun[] {
     try {
-      if (id) sessionStorage.setItem(RUN_ID_KEY, id)
+      const parsed = JSON.parse(sessionStorage.getItem(RUN_ID_KEY) || '[]')
+      return Array.isArray(parsed) ? parsed : []
+    } catch { return [] }
+  }
+  function writePendingRuns(list: PendingRun[]) {
+    try {
+      if (list.length) sessionStorage.setItem(RUN_ID_KEY, JSON.stringify(list))
       else sessionStorage.removeItem(RUN_ID_KEY)
     } catch { /* 存储不可用时仅内存态 */ }
+  }
+  function setRunId(s: ChatSession, id: string | null) {
+    const prev = s.runId
+    s.runId = id
+    // 刷新后会话 key 会变，结束轮询时还要按 runId 删掉旧记录
+    const list = readPendingRuns().filter(r => r.key !== s.key && r.id !== prev)
+    if (id) list.push({ id, key: s.key, sessionId: s.sessionId, dbSessionId: s.dbSessionId })
+    writePendingRuns(list)
+  }
+  // 流可能先于 3s 节流保存就已开跑，会话首次落库后补上归属
+  function backfillPendingRuns(s: ChatSession) {
+    if (s.dbSessionId == null) return
+    const list = readPendingRuns()
+    let changed = false
+    for (const r of list) {
+      if (r.key === s.key && r.dbSessionId == null) {
+        r.dbSessionId = s.dbSessionId
+        changed = true
+      }
+    }
+    if (changed) writePendingRuns(list)
+  }
+  function forgetRun(id: string) {
+    writePendingRuns(readPendingRuns().filter(r => r.id !== id))
   }
 
   // payload 展开后总条数预算（后端上限 30，留余量）：Agent 对话一条
@@ -63,6 +139,14 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   const hiddenCount = computed(() => Math.max(0, messages.value.length - visibleCount.value))
   function showMore() {
     visibleCount.value += LOAD_MORE_STEP
+  }
+
+  // 切换当前展示的会话：只换引用，不打断其他会话正在进行的流
+  function activate(s: ChatSession) {
+    currentKey.value = s.key
+    messages.value = s.messages
+    visibleCount.value = INITIAL_VISIBLE
+    scrollBottom(true)
   }
 
   const pendingCtxFiles = ref<string[]>([])
@@ -125,55 +209,56 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   }
 
   const NEW_CHAT_FLAG = 'workbench-ai-new-chat'
-  const dbSessionId = ref<number | null>(null)
   const sessionsOpen = ref(false)
   const sessions = ref<AISessionSummary[]>([])
   const sessionsLoading = ref(false)
 
-  let persisting = false
-  let persistQueued = false
-  async function persistSession() {
+  // 持久化绑定会话：后台会话的流结束也只写自己的会话记录，不会串到当前展示的会话
+  async function persistSession(s: ChatSession) {
     // 防重入 + 排队补一轮：流末的最终保存（含 usage）可能与节流保存竞态，
     // 直接丢弃会让库停留在中途快照（usage 丢失、刷新后看不到 token 消耗）。
     // 被挡时置队列标记，当前保存完成后自动再存一轮拿到最新数据
-    if (persisting) {
-      persistQueued = true
+    if (s.persisting) {
+      s.persistQueued = true
       return
     }
-    persisting = true
+    s.persisting = true
     try {
       for (;;) {
-        persistQueued = false
-        const msgs = messages.value
+        s.persistQueued = false
+        const msgs = s.messages
         if (!msgs.length) return
         try {
-          if (dbSessionId.value == null) {
+          if (s.dbSessionId == null) {
             const firstUser = msgs.find(m => m.role === 'user')
             const data = await createAISession({
               title: (firstUser?.content || '新对话').slice(0, 30),
               messages: msgs,
             })
-            dbSessionId.value = data.id
+            s.dbSessionId = data.id
+            backfillPendingRuns(s)
           } else {
-            await updateAISession(dbSessionId.value, { messages: msgs })
+            await updateAISession(s.dbSessionId, { messages: msgs })
           }
           // 新内容已落库："点过新对话"的空白语义失效——不清除的话，
-          // 该 tab 内刷新页面将永远不自动恢复历史（标记只在明确空白时有效）
-          try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
+          // 该 tab 内刷新页面将永远不自动恢复历史（标记只在明确空白时有效）。
+          // 后台会话的保存不该抹掉用户刚点的新对话空白语义
+          if (s === current.value) {
+            try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
+          }
         } catch { /* 保存失败静默 */ return }
-        if (!persistQueued) return // 保存期间无新请求：完成
+        if (!s.persistQueued) return // 保存期间无新请求：完成
       }
     } finally {
-      persisting = false
+      s.persisting = false
     }
   }
 
-  let lastPersistAt = 0
-  function throttledPersist() {
+  function throttledPersist(s: ChatSession) {
     const now = Date.now()
-    if (now - lastPersistAt < 3000) return
-    lastPersistAt = now
-    persistSession()
+    if (now - s.lastPersistAt < 3000) return
+    s.lastPersistAt = now
+    persistSession(s)
   }
 
   async function loadSessions() {
@@ -193,17 +278,26 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     if (sessionsOpen.value) loadSessions()
   }
 
+  // 载入会话但不切换展示：批量恢复后台 run 时给每个会话重建内存态
+  async function ensureSession(id: number): Promise<ChatSession> {
+    const cached = findByDbId(id)
+    if (cached) return cached
+    const detail = await getAISession(id)
+    // 并发载入时可能已被别的路径建好，复用之，避免同一会话两份状态
+    return findByDbId(id) || newSession(
+      (detail?.messages || []).filter(m => m?.role && typeof m.content === 'string'),
+      detail.id,
+    )
+  }
+
   async function loadSession(id: number) {
-    if (streaming.value) return
+    // 已在内存的会话直接切过去（哪怕别的会话正在生成），保留其进行中的流
     try {
-      const detail = await getAISession(id)
-      messages.value = (detail?.messages || []).filter(m => m?.role && typeof m.content === 'string')
-      dbSessionId.value = detail.id
-      sessionId = newId()
-      visibleCount.value = INITIAL_VISIBLE
+      const s = await ensureSession(id)
+      activate(s)
       sessionsOpen.value = false
       try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
-      scrollBottom(true)
+      resumePendingRuns()
     } catch (e: any) {
       showToast('载入会话失败：' + (e?.message || ''))
     }
@@ -214,14 +308,23 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     try {
       await deleteAISession(id)
       sessions.value = sessions.value.filter(s => s.id !== id)
-      if (dbSessionId.value === id) dbSessionId.value = null
+      const s = findByDbId(id)
+      if (s) {
+        s.abortCtrl?.abort()
+        chatSessions.delete(s.key)
+        if (s === current.value) activate(newSession())
+      }
+      writePendingRuns(readPendingRuns().filter(r => r.dbSessionId !== id))
     } catch {
       showToast('删除失败')
     }
   }
 
   async function maybeRestoreLastSession() {
-    if (messages.value.length || dbSessionId.value != null) return
+    // 面板每次打开都扫一遍：后台 run 属于哪个会话就在哪个会话里恢复，
+    // 不依赖用户手动切过去；「新对话」标记下同样要恢复其它会话的 run
+    resumePendingRuns()
+    if (messages.value.length || current.value.dbSessionId != null) return
     try {
       if (sessionStorage.getItem(NEW_CHAT_FLAG)) return
     } catch { /* 存储不可用时继续尝试恢复 */ }
@@ -233,13 +336,11 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
       }
     } catch { /* 恢复失败：保持空白新会话 */ }
-    void resumePendingRun()
   }
 
-  // 把后台 run 快照重放到当前回复消息：正文取后端累积的 result，
-  // 工具卡片/引用/消耗按事件补齐（按 id 去重，可反复调用）
-  function applyRunSnapshot(run: AIRun, live: ChatMessage) {
-    if (run.result && run.result.length > live.content.length) live.content = run.result
+  // 把后台 run 的结构化事件补齐到所属会话的回复消息（按 id 去重，可反复调用）。
+  // 正文由 pollRun 按 delta 增量维护，这里不再用全量 result 覆盖。
+  function applyRunSnapshot(run: AIRun, live: ChatMessage, s: ChatSession) {
     const calls = live.toolCalls || (live.toolCalls = [])
     for (const e of run.events || []) {
       const d: any = e.data || {}
@@ -263,73 +364,90 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     }
     // 时序步骤交给渲染层从扁平字段归一化重建（避免半截 steps 与完整正文不一致）
     live.steps = undefined
-    scrollBottom()
-    throttledPersist()
+    if (s === current.value) scrollBottom()
+    throttledPersist(s)
   }
 
-  // 轮询直到 run 结束：期间保持 streaming，结束后落库并清 runId
-  async function pollRun(id: string, live: ChatMessage) {
-    if (resumedRunId === id) return
-    resumedRunId = id
-    streaming.value = true
+  // 按 offset 游标持续拉增量正文：首次以服务端累积正文为准（清掉本地半截或
+  // 「（已停止）」占位），之后只追加 delta，刷新后就是接着往外输出。
+  async function pollRun(id: string, live: ChatMessage, s: ChatSession) {
+    if (s.resumedRunId === id) return
+    s.resumedRunId = id
+    s.streaming = true
     const deadline = Date.now() + 15 * 60 * 1000
+    let cursor = 0
+    let first = true
     try {
       for (;;) {
-        if (resumeStopped) return
+        if (s.resumeStopped) return
         let run: AIRun
-        try { run = await getAIRun(id) } catch { return }
-        applyRunSnapshot(run, live)
+        try { run = await getAIRun(id, cursor) } catch { return }
+        const delta = run.delta ?? ''
+        if (first) {
+          live.content = delta
+          first = false
+        } else if (delta) {
+          live.content += delta
+        }
+        cursor = run.offset ?? cursor
+        applyRunSnapshot(run, live, s)
         if (run.status !== 'running' || Date.now() > deadline) {
-          setRunId(null)
+          setRunId(s, null)
           if (!live.content) live.content = run.error || '（后台运行已结束，但无回复内容）'
           return
         }
         await new Promise(r => setTimeout(r, RESUME_POLL_MS))
       }
     } finally {
-      resumedRunId = null
-      streaming.value = false
-      scrollBottom(true)
-      persistSession()
+      s.resumedRunId = null
+      s.streaming = false
+      if (s === current.value) scrollBottom(true)
+      persistSession(s)
     }
   }
 
-  // 打开面板/刷新后自动发现未消费的后台 run：优先本地 runId，
-  // 丢失时用服务端列表兜底找仍在跑的；太久以前的已完成记录不再补
-  async function resumePendingRun() {
-    if (streaming.value || resumedRunId) return
-    let id: string | null = null
-    try { id = sessionStorage.getItem(RUN_ID_KEY) } catch { /* 忽略 */ }
-    let run: AIRun | null = null
-    if (id) {
-      try { run = await getAIRun(id) } catch { /* 本地 runId 已失效 */ }
+  // 刷新后遍历所有 pending run：按 dbSessionId 重建对应会话，各自并行轮询补齐。
+  // 不再按 org+user 找任意 running：多会话并行时那会把别的会话的回复串进来。
+  async function resumeOne(p: PendingRun) {
+    const dbId = p.dbSessionId
+    // 尚无归属的记录可能刚开跑（3s 内未落库），等 backfill 补上，先跳过
+    if (resuming.has(p.id) || dbId == null) return
+    resuming.add(p.id)
+    try {
+      let run: AIRun
+      try { run = await getAIRun(p.id) } catch { return }
+      // 归属校验：run 的上游 sessionId 必须与发起该流的会话一致
+      if (run.sessionId !== p.sessionId) { forgetRun(p.id); return }
+      const updated = new Date(run.updatedAt).getTime()
+      if (run.status !== 'running' && (!Number.isFinite(updated) || Date.now() - updated > 30 * 60 * 1000)) {
+        forgetRun(p.id)
+        return
+      }
+      let s: ChatSession
+      try { s = await ensureSession(dbId) } catch { return }
+      // 该会话已有活跃流（本 tab 正在 SSE 生成）或已在轮询，无需恢复
+      if (s.streaming || s.resumedRunId) return
+      // 保留原记录（含刷新前的 sessionId）：重写会让二次恢复的归属校验失效
+      s.runId = run.id
+      let live = s.messages[s.messages.length - 1]
+      if (!live || live.role !== 'assistant') {
+        s.messages.push({ role: 'assistant', content: '', toolCalls: [], steps: [] })
+        live = s.messages[s.messages.length - 1]
+      }
+      s.resumeStopped = false
+      await pollRun(run.id, live, s)
+    } finally {
+      resuming.delete(p.id)
     }
-    if (!run) {
-      try {
-        const { runs } = await listAIRuns()
-        const pending = runs?.find(r => r.status === 'running')
-        if (pending) run = await getAIRun(pending.id)
-      } catch { /* 忽略 */ }
-    }
-    if (!run) return
-    const updated = new Date(run.updatedAt).getTime()
-    if (run.status !== 'running' && (!Number.isFinite(updated) || Date.now() - updated > 30 * 60 * 1000)) return
-    setRunId(run.id)
-    let live = messages.value[messages.value.length - 1]
-    if (!live || live.role !== 'assistant') {
-      messages.value.push({ role: 'assistant', content: '', toolCalls: [], steps: [] })
-      live = messages.value[messages.value.length - 1]
-    }
-    resumeStopped = false
-    await pollRun(run.id, live)
+  }
+
+  function resumePendingRuns() {
+    for (const p of readPendingRuns()) void resumeOne(p).catch(() => {})
   }
 
   function clearChat() {
-    if (streaming.value) stopStreaming()
-    messages.value = []
-    visibleCount.value = INITIAL_VISIBLE
-    sessionId = newId()
-    dbSessionId.value = null
+    // 新建会话而非清空数组：原会话若仍在生成，其流继续写自己的消息并落库
+    activate(newSession())
     try { sessionStorage.setItem(NEW_CHAT_FLAG, '1') } catch { /* 忽略 */ }
     sessionsOpen.value = false
   }
@@ -345,21 +463,23 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   }
 
   function stopStreaming() {
-    abortCtrl?.abort()
-    abortCtrl = null
-    resumeStopped = true // 恢复轮询也随"停止"一起停（服务端 run 仍会跑完）
+    const s = current.value
+    s.abortCtrl?.abort()
+    s.abortCtrl = null
+    s.resumeStopped = true // 恢复轮询也随"停止"一起停（服务端 run 仍会跑完）
   }
 
   async function send() {
     const text = input.value.trim()
-    if (!text || streaming.value) return
+    const s = current.value
+    if (!text || s.streaming) return
     input.value = ''
     const ctxFiles = [...pendingCtxFiles.value]
     const userMsg: ChatMessage = { role: 'user', content: text }
     if (ctxFiles.length) userMsg.files = ctxFiles
-    messages.value.push(userMsg)
+    s.messages.push(userMsg)
     pendingCtxFiles.value = []
-    await streamReply(userMsg)
+    await streamReply(userMsg, s)
   }
 
   // 展示态消息 → 上游 payload 消息：
@@ -417,13 +537,17 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     return toPayloadMessages(rounds.slice(start).flat())
   }
 
-  async function streamReply(userMsg: ChatMessage) {
+  // 一次流完全绑定发起它的会话：即使中途切到别的会话，增量仍写本会话的 live，
+  // 持久化/停止/恢复也只作用于本会话。流状态用局部变量，避免多流互相覆盖。
+  async function streamReply(userMsg: ChatMessage, s: ChatSession) {
     const reply: ChatMessage = { role: 'assistant', content: '', reasoning: '', toolCalls: [], steps: [] }
-    messages.value.push(reply)
+    s.messages.push(reply)
     // 关键：push 后取响应式代理再操作——直接改原始对象（raw）不会触发
     // 视图更新（审批按钮/工具卡片依赖此处的实时变更）
-    const live = messages.value[messages.value.length - 1]
-    streaming.value = true
+    const live = s.messages[s.messages.length - 1]
+    s.streaming = true
+    // 后台会话的增量不抢当前展示会话的滚动
+    const sc = () => { if (s === current.value) scrollBottom() }
     scrollBottom(true)
 
     // 时序步骤维护：reasoning/tool/text 按发生顺序追加进 steps（相邻同类增量合并
@@ -440,13 +564,15 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
       return step
     }
 
-    abortCtrl = new AbortController()
-    resumeStopped = false
+    const abortCtrl = new AbortController()
+    s.abortCtrl = abortCtrl
+    s.resumeStopped = false
     let completed = false
     let recoverable = true
+    let runId: string | null = null
     const qaId = newId()
     const ctxText = await buildCtxText(userMsg.files || [])
-    const history = messages.value.slice(0, -2)
+    const history = s.messages.slice(0, -2)
     const question = ctxText
       ? `【引用文件内容】\n${ctxText}\n【引用文件结束】\n\n我的问题：${userMsg.content}`
       : userMsg.content
@@ -458,14 +584,14 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
       await chatStream(payload, {
         signal: abortCtrl.signal,
         qaId,
-        sessionId,
-        onRunId: (id) => setRunId(id),
+        sessionId: s.sessionId,
+        onRunId: (id) => { runId = id; setRunId(s, id) },
         onDone: () => { completed = true },
         onReasoning: (delta) => {
           live.reasoning = (live.reasoning || '') + delta
           appendStep('reasoning', delta)
-          scrollBottom()
-          throttledPersist()
+          sc()
+          throttledPersist(s)
         },
         onRagHits: (hits) => {
           live.ragHits = hits
@@ -476,59 +602,67 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         onDelta: (delta) => {
           live.content += delta
           appendStep('text', delta)
-          scrollBottom()
-          throttledPersist()
+          sc()
+          throttledPersist(s)
         },
         onToolCall: (tc) => {
           live.toolCalls = live.toolCalls || []
           const call: ToolCallView = { id: tc.id, name: tc.name, arguments: tc.arguments }
           live.toolCalls.push(call)
           live.steps!.push({ kind: 'tool', call })
-          scrollBottom()
+          sc()
         },
         onToolResult: (tr) => {
           const tc = live.toolCalls?.find(t => t.id === tr.id)
           if (tc) tc.result = tr.result
-          scrollBottom()
-          throttledPersist()
+          sc()
+          throttledPersist(s)
         },
         onApprovalRequest: (ar) => {
           const tc = live.toolCalls?.find(t => t.id === ar.id)
           if (tc) tc.approval = 'pending'
-          scrollBottom()
+          sc()
         },
         onApprovalResolved: (ar) => {
           // 超时场景由后端通知收尾；用户自己点击的场景与本地状态一致（幂等）
           const tc = live.toolCalls?.find(t => t.id === ar.id)
           if (tc && tc.approval === 'pending') tc.approval = ar.outcome
-          scrollBottom()
+          sc()
         },
       })
     } catch (e: any) {
-      recoverable = false
-      if (e?.name === 'AbortError') {
-        if (!live.content) {
-          live.content = '（已停止）'
-          appendStep('text', '（已停止）')
+      // 只有「用户主动停止」和「服务端业务错误」不可恢复。刷新/网络中断时
+      // 后台 run 仍在跑（runCtx 与请求连接解耦），必须保留 pending 记录交给恢复
+      // 轮询，也不能把 reader 的原生错误写成「⚠」占位污染会话快照。
+      const canResume = runId != null && !s.resumeStopped && !e?.business
+      if (!canResume) {
+        recoverable = false
+        if (e?.name === 'AbortError') {
+          if (!live.content) {
+            live.content = '（已停止）'
+            appendStep('text', '（已停止）')
+          }
+          // 中断时未决的审批卡片定格为已取消（后端断开兜底会作废审批）
+          for (const tc of live.toolCalls || []) {
+            if (tc.approval === 'pending') tc.approval = 'declined'
+          }
+        } else {
+          const msg = '⚠ ' + (e?.message || '请求失败')
+          live.content = live.content || msg
+          if (!live.steps!.some(step => step.kind === 'text')) appendStep('text', msg)
+          showToast(e?.message || 'AI 请求失败')
         }
-        // 中断时未决的审批卡片定格为已取消（后端断开兜底会作废审批）
-        for (const tc of live.toolCalls || []) {
-          if (tc.approval === 'pending') tc.approval = 'declined'
-        }
-      } else {
-        const msg = '⚠ ' + (e?.message || '请求失败')
-        live.content = live.content || msg
-        if (!live.steps!.some(s => s.kind === 'text')) appendStep('text', msg)
-        showToast(e?.message || 'AI 请求失败')
       }
     } finally {
-      abortCtrl = null
-      // 静默断流：服务端后台 run 继续跑，保持流式态并轮询补齐，不补中断占位
-      if (recoverable && !completed && activeRunId) {
-        void pollRun(activeRunId, live)
+      s.abortCtrl = null
+      // 静默断流 / 刷新 / 网络中断：服务端后台 run 继续跑，保持流式态并轮询补齐
+      if (recoverable && !completed && runId) {
+        void pollRun(runId, live, s)
       } else {
-        streaming.value = false
-        if (completed) setRunId(null)
+        s.streaming = false
+        // 用户主动停止/业务错误也不留 pending，否则面板重开会被 resumeOne
+        // 当成待恢复任务、把已停止的生成又补回来
+        setRunId(s, null)
         // 兜底：中断后无正文（哪怕已有思考与工具调用）——补"（已中断）"
         // 文本：空 assistant 落库会让下次提问 400
         if (!live.content) {
@@ -538,8 +672,8 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
           else live.steps!.push({ kind: 'text', text: '（已中断）' })
         }
       }
-      scrollBottom(true)
-      persistSession()
+      if (s === current.value) scrollBottom(true)
+      persistSession(s)
     }
   }
 
@@ -547,7 +681,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   async function askWith(files: string[], question: string) {
     if (!loggedIn.value || !aiEnabled.value) return false
     sessionsOpen.value = false
-    if (streaming.value) return false
+    if (current.value.streaming) return false
     pendingCtxFiles.value = files
     if (question) input.value = question
     await send()
@@ -578,14 +712,15 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   }
 
   async function regenerate() {
-    if (streaming.value || !messages.value.length) return
-    const last = messages.value[messages.value.length - 1]
+    const s = current.value
+    if (s.streaming || !s.messages.length) return
+    const last = s.messages[s.messages.length - 1]
     if (last?.role !== 'assistant') return
-    messages.value.pop()
-    let userIdx = messages.value.length - 1
-    while (userIdx >= 0 && messages.value[userIdx].role !== 'user') userIdx--
+    s.messages.pop()
+    let userIdx = s.messages.length - 1
+    while (userIdx >= 0 && s.messages[userIdx].role !== 'user') userIdx--
     if (userIdx < 0) return
-    await streamReply(messages.value[userIdx])
+    await streamReply(s.messages[userIdx], s)
   }
 
   async function saveReplyAsFile(m: ChatMessage, idx: number) {
@@ -701,7 +836,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     aiEnabled, aiModel, messages, input, streaming,
     visibleMessages, hiddenCount, showMore,
     pendingCtxFiles, showFilePicker,
-    dbSessionId, sessions, sessionsOpen, sessionsLoading,
+    dbSessionId, streamingSessions, sessions, sessionsOpen, sessionsLoading,
     fetchStatus, maybeRestoreLastSession,
     send, stopStreaming, askWith,
     removeCtxFile, onPickFiles,
@@ -711,3 +846,8 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     onInputKeydown,
   }
 }
+
+// 消息视图上下文：父组件 provide 自己的实例，AiMessage 用 inject 复用同一份状态与操作函数，
+// 避免子组件再调一次 useAIChat 生成独立的会话状态（审批/复制/重新生成必须作用于当前会话）。
+export type AIChatContext = ReturnType<typeof useAIChat>
+export const aiChatKey: InjectionKey<AIChatContext> = Symbol('aiChat')

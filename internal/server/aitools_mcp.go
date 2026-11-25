@@ -27,23 +27,20 @@ func mcpToolName(server, tool string) string {
 	return "mcp_" + clean(server) + "_" + clean(tool)
 }
 
-// allTools 内置 + MCP 工具（顺序稳定，tools payload 顺序影响模型选择倾向）
+// allTools 内置 + 运行时合成的编排工具 + MCP 工具（顺序稳定）
 func (s *Server) allTools() []aiTool {
-	tools := make([]aiTool, 0, len(aiTools)+len(s.mcpTools))
+	tools := make([]aiTool, 0, len(aiTools)+1+len(s.mcpTools))
 	tools = append(tools, aiTools...)
+	tools = append(tools, pipelineTool())
 	return append(tools, s.mcpTools...)
 }
 
-// aiToolByName 按名称查找工具（内置优先，其次 MCP）
+// aiToolByName 按名称查找工具（内置优先，其次编排工具，最后 MCP）
 func (s *Server) aiToolByName(name string) *aiTool {
-	for i := range aiTools {
-		if aiTools[i].Name == name {
-			return &aiTools[i]
-		}
-	}
-	for i := range s.mcpTools {
-		if s.mcpTools[i].Name == name {
-			return &s.mcpTools[i]
+	tools := s.allTools()
+	for i := range tools {
+		if tools[i].Name == name {
+			return &tools[i]
 		}
 	}
 	return nil

@@ -20,8 +20,8 @@ function toggle(i: number) {
   open.value = s
 }
 
-// 待确认（pending）的卡片自动展开：确保批准/拒绝按钮直接可见，
-// 不依赖用户手动点开折叠卡片（漏看导致审批超时）
+// 待确认（pending）的卡片预先展开：批准后结果到达时直接可见，
+// 不必再手动点开折叠卡片（按钮由独立的 v-if 控制，与展开状态无关）
 watch(() => props.calls.map(c => c.approval || '').join(','), () => {
   let changed = false
   const s = new Set(open.value)
@@ -89,7 +89,7 @@ function approvalBadge(a?: ToolCallView['approval']): string {
         <button class="ai-tool-btn is-ok" @click="emit('approve', c.id, true)">批准</button>
         <button class="ai-tool-btn is-no" @click="emit('approve', c.id, false)">拒绝</button>
       </div>
-      <pre v-show="open.has(i)" class="ai-tool-result">{{ resultText(c.result) }}</pre>
+      <pre v-show="open.has(i) && c.result !== undefined" class="ai-tool-result">{{ resultText(c.result) }}</pre>
     </div>
   </div>
 </template>

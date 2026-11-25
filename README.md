@@ -4,29 +4,15 @@ Personal dev platform — file browser, markdown viewer, todo board, and API too
 
 ## Quick Start
 
+> 环境要求、完整构建命令、首次管理员初始化与公网部署步骤见 [`docs/01-getting-started.md`](docs/01-getting-started.md)；Makefile target、构建约束、质量门禁与发布流程见 [`docs/04-build-and-release.md`](docs/04-build-and-release.md)；配置与运维见 [`docs/05-operations.md`](docs/05-operations.md)。
+
 ```bash
-# 前置：Go 1.25+、Node 18+、pnpm（前端构建工具链）
-
-# Fresh clone 或改过前端：一键构建（前端编译 + Go build，embed frontend/dist）
-make all
-
-# 只改 Go 代码：直接 build（embed 已生成的 frontend/dist）
-make build
-
-# Run (with default config.yaml)
-make run
-
-# 前端开发服务器（Vite 热更新，不 embed）
-cd frontend && pnpm dev
-
-# Custom config
-make preview ARGS="--config /path/to/config.yaml"
-
-# Environment overrides
-PORT=3000 STATIC_DIR=/var/www make run
+make all        # 构建前端 + 编译 Go 二进制（UI 经 //go:embed 内嵌）
+make run        # 构建并启动（ALLOW_SYMLINK=true）
+cd frontend && pnpm dev   # 前端热更新（Vite 4000 端口，不 embed）
 ```
 
-Then open http://localhost:80 in your browser.
+服务端口由 `server.port` 决定：代码默认 `8080`，仓库 `config.yaml` 示例为 `8001`（`PORT` 环境变量可覆盖）。前端改动后必须重新编译二进制。
 
 ## First-time Setup (Admin Initialization)
 
@@ -299,73 +285,7 @@ workbench/
 
 ## Release Process
 
-### Prerequisites
-
-- Go 1.25+
-- Node 18+ with pnpm
-- Docker (for xgo cross-compilation)
-- GitHub CLI (`gh`) with authentication
-
-### Version Bump
-
-1. Update version in code if needed (optional, version is auto-detected from git tag)
-2. Move `[Unreleased]` entries in `CHANGELOG.md` to the new version section with date
-3. Commit all changes and ensure working tree is clean
-
-### Create Release
-
-```bash
-# 1. Create and push tag
-git tag -a v1.x.x -m "Release v1.x.x - brief description"
-git push origin v1.x.x
-
-# 2. Create GitHub release (or use web UI)
-gh release create v1.x.x --title "v1.x.x" --notes "Release notes..."
-```
-
-### Build & Upload Packages
-
-```bash
-# Full build: frontend + cross-platform binaries + packaging
-make build-all
-
-# This generates:
-#   build/workbench-v1.x.x-linux-x86_64.tar.gz
-#   build/workbench-v1.x.x-linux-arm64.tar.gz
-#   build/workbench-v1.x.x-darwin-x86_64.tar.gz
-#   build/workbench-v1.x.x-darwin-arm64.tar.gz
-#   build/workbench-v1.x.x-win-x86_64.exe.zip
-
-# Upload to GitHub release
-gh release upload v1.x.x build/workbench-v1.x.x-* --clobber
-```
-
-### Build Targets
-
-| Target | Description |
-|--------|-------------|
-| `make all` | Frontend build + Go build (for local dev) |
-| `make build` | Go build only (requires frontend/dist exists) |
-| `make frontend` | Vite build to frontend/dist |
-| `make build-all` | Full cross-platform build + package (uses xgo) |
-| `make package` | Create tar.gz/zip from existing binaries |
-
-### Package Contents
-
-Each release package contains:
-- `workbench` (or `workbench.exe`) — compiled binary with embedded frontend
-- `config.yaml` — configuration template
-- `README.md` — documentation
-
-### Quick Release Checklist
-
-- [ ] All changes committed and pushed
-- [ ] Tests pass: `make check`
-- [ ] Version tag created: `git tag -a v1.x.x`
-- [ ] Tag pushed: `git push origin v1.x.x`
-- [ ] GitHub release created
-- [ ] `make build-all` completes successfully
-- [ ] All 5 platform packages uploaded to release
+发布流程（版本 bump、tag、GitHub Release、跨平台打包与上传、发布检查清单）与全部构建说明统一维护在 [`docs/04-build-and-release.md`](docs/04-build-and-release.md#8-发布流程)。
 
 ## License
 

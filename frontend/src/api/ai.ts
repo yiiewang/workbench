@@ -111,11 +111,17 @@ export interface AIRun {
   error: string
   startedAt: string
   updatedAt: string
+  /** offset 游标之后的正文增量（详情接口按 offset 查询时返回） */
+  delta?: string
+  /** 下次请求应带的游标（rune 数，由服务端返回，前端无需换算） */
+  offset?: number
 }
 
-// 单条运行详情 — GET /api/ai/runs/{id}
-export async function getAIRun(id: string): Promise<AIRun> {
-  return apiCall(`/api/ai/runs/${id}`)
+// 单条运行详情 — GET /api/ai/runs/{id}[?offset=<rune 数>]
+// 传 offset：服务端只回增量 delta（result 为空）；不传：返回全量快照
+export async function getAIRun(id: string, offset?: number): Promise<AIRun> {
+  const q = offset === undefined ? '' : `?offset=${offset}`
+  return apiCall(`/api/ai/runs/${id}${q}`)
 }
 
 // 最近运行列表（不含 events）— GET /api/ai/runs
@@ -317,7 +323,9 @@ export async function chatStream(
           continue
         }
         if (ev === 'error') {
-          throw new Error(obj?.msg || 'AI 流式请求失败')
+          const err: any = new Error(obj?.msg || 'AI 流式请求失败')
+          err.business = true // 服务端明确报错：后台 run 已失败，不走断流恢复
+          throw err
         }
         // 默认事件：上游 OpenAI 兼容增量
         const delta = obj?.choices?.[0]?.delta

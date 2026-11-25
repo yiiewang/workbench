@@ -76,6 +76,14 @@ const router = createRouter({
           meta: { sidebarTitle: 'AI JOBS' },
         },
         {
+          path: 'pipelines',
+          components: {
+            default: () => import('../views/PipelineView.vue'),
+            sidebar: () => import('../components/sidebar/PipelineSidebar.vue'),
+          },
+          meta: { sidebarTitle: 'PIPELINES' },
+        },
+        {
           path: 'admin',
           components: {
             default: () => import('../views/AdminView.vue'),

@@ -37,7 +37,6 @@ func main() {
 	}
 	_ = os.MkdirAll(filepath.Join(staticDir, fmt.Sprint(orgID), "1"), 0o755)
 
-
 	cfg := config.DefaultConfig()
 	cfg.Server.StaticDir = staticDir
 	cfg.AI.Chat = config.ChatConfig{

@@ -1,11 +1,10 @@
 <script setup lang="ts">
 // 移动端 AI 对话页：全屏形态，核心逻辑复用 composables/useAIChat（与 PC 面板共用），
 // 消息区样式复用全局 styles/ai-chat.css（类名与 PC 一致）。
-import { ref, reactive, nextTick, onMounted } from 'vue'
-import { useAIChat } from '../../composables/useAIChat'
+import { ref, nextTick, onMounted, provide } from 'vue'
+import { useAIChat, aiChatKey } from '../../composables/useAIChat'
 import FilePickerModal from '../../components/modal/FilePickerModal.vue'
-import ToolCallList from '../../components/ai/ToolCallList.vue'
-import RagCitations from '../../components/ai/RagCitations.vue'
+import AiMessage from '../../components/ai/AiMessage.vue'
 import RagRefTooltip from '../../components/ai/RagRefTooltip.vue'
 
 const listEl = ref<HTMLElement | null>(null)
@@ -34,43 +33,19 @@ async function scrollToBottom(force = false) {
   el.scrollTop = el.scrollHeight
 }
 
+const chat = useAIChat(scrollToBottom)
+provide(aiChatKey, chat)
 const {
   aiEnabled, aiModel, messages, input, streaming,
   pendingCtxFiles, showFilePicker,
-  dbSessionId, sessions, sessionsOpen, sessionsLoading,
+  dbSessionId, streamingSessions, sessions, sessionsOpen, sessionsLoading,
   visibleMessages, hiddenCount, showMore,
   maybeRestoreLastSession,
   send, stopStreaming,
   removeCtxFile, onPickFiles,
   toggleSessions, loadSessions, loadSession, removeSession, clearChat, timeAgo,
-  copyMessage, regenerate, saveReplyAsFile, approveToolCall,
-  isStreamingTail, messageSegments, renderTextMd, usageText, hasCitedRefs, hasReplyContent, userInitial,
   onInputKeydown,
-} = useAIChat(scrollToBottom)
-
-// ---- 过程块折叠状态（key = 消息idx:段idx），与 PC 面板同逻辑 ----
-const processManual = reactive(new Map<string, boolean>())
-
-function processOpen(i: number, si: number): boolean {
-  const manual = processManual.get(`${i}:${si}`)
-  if (manual !== undefined) return manual
-  return isStreamingTail(i)
-}
-
-function toggleProcess(i: number, si: number) {
-  processManual.set(`${i}:${si}`, !processOpen(i, si))
-}
-
-function processRunning(i: number, si: number): boolean {
-  const segs = messageSegments(visibleMessages.value[i])
-  return isStreamingTail(i) && si === segs.length - 1 && segs[si]?.kind === 'process'
-}
-
-function processTitle(seg: { kind: string; steps: { kind: string }[] }, i: number, si: number): string {
-  if (processRunning(i, si)) return '思考与工具调用中…'
-  const tools = seg.steps.filter(s => s.kind === 'tool').length
-  return tools > 0 ? `思考与工具调用（${tools} 步）` : '思考过程'
-}
+} = chat
 
 // 进入页面即对话场景：自动接上最近会话
 onMounted(() => {
@@ -102,13 +77,19 @@ onMounted(() => {
       </div>
     </header>
 
-    <!-- 历史会话覆盖层 -->
-    <div v-if="sessionsOpen" class="mai-sessions">
+    <!-- 会话抽屉：左侧滑入 + 遮罩，消息区始终可见（与 PC 窄屏下的覆盖式 rail 一致） -->
+    <div v-if="sessionsOpen" class="mai-mask" @click="toggleSessions"></div>
+    <aside v-if="sessionsOpen" class="mai-drawer">
       <div class="mai-sessions-head">
         <span>历史会话</span>
-        <button class="mai-icon-btn" title="刷新" @click="loadSessions">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
-        </button>
+        <div class="mai-drawer-actions">
+          <button class="mai-icon-btn" title="刷新" @click="loadSessions">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
+          </button>
+          <button class="mai-icon-btn" title="关闭" @click="toggleSessions">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
       </div>
       <div class="mai-sessions-list">
         <div v-if="sessionsLoading && !sessions.length" class="mai-sessions-empty">加载中…</div>
@@ -125,16 +106,17 @@ onMounted(() => {
           <div class="mai-session-meta">
             <span>{{ timeAgo(s.updatedAt) }}</span>
             <span v-if="s.id === dbSessionId" class="mai-session-tag">当前</span>
+            <span v-if="streamingSessions.has(s.id)" class="mai-session-generating"><i></i>生成中</span>
             <button class="mai-session-del" title="删除会话" @click="removeSession(s.id, $event)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
             </button>
           </div>
         </div>
       </div>
-    </div>
+    </aside>
 
     <!-- 消息列表（消息区结构与样式复用全局 ai-chat.css 类） -->
-    <div v-show="!sessionsOpen" ref="listEl" class="mai-list" @scroll.passive="onStickScroll">
+    <div ref="listEl" class="mai-list" @scroll.passive="onStickScroll">
       <div v-if="messages.length === 0" class="mai-hello">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
@@ -145,73 +127,20 @@ onMounted(() => {
       <button v-if="hiddenCount" class="ai-load-more" @click="showMore">
         加载更早的 {{ hiddenCount }} 条消息
       </button>
-      <div v-for="(m, i) in visibleMessages" :key="i" class="ai-msg" :class="m.role">
-        <div class="ai-msg-actions">
-          <button
-            v-if="m.role === 'assistant' && !streaming && i === visibleMessages.length - 1 && hasReplyContent(m)"
-            class="ai-act" title="重新生成" @click="regenerate"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
-          </button>
-          <button
-            v-if="m.role === 'assistant' && !streaming && m.content"
-            class="ai-act" title="保存为文件" @click="saveReplyAsFile(m, i)"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
-          </button>
-          <button v-if="m.content" class="ai-act" title="复制" @click="copyMessage(m)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-
-        <div class="ai-avatar" :class="m.role">
-          <template v-if="m.role === 'user'">{{ userInitial }}</template>
-          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>
-          </svg>
-        </div>
-
-        <div class="ai-bubble" :class="m.role">
-          <template v-if="m.role === 'assistant'">
-            <template v-for="(seg, si) in messageSegments(m)" :key="si">
-              <!-- 过程块（思考 + 工具调用，时间序）：默认折叠，流式尾消息展开 -->
-              <div v-if="seg.kind === 'process'" class="ai-process">
-                <button class="ai-process-toggle" @click="toggleProcess(i, si)">
-                  <span :class="{ dim: processRunning(i, si) }">{{ processTitle(seg, i, si) }}</span>
-                  <svg class="ai-process-chevron" :class="{ open: processOpen(i, si) }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
-                </button>
-                <div v-show="processOpen(i, si)" class="ai-process-body">
-                  <template v-for="(s, ki) in seg.steps" :key="ki">
-                    <div v-if="s.kind === 'reasoning'" class="ai-process-reasoning">{{ s.text }}</div>
-                    <ToolCallList v-else-if="s.call" :calls="[s.call]" @approve="approveToolCall" />
-                  </template>
-                </div>
-              </div>
-              <!-- 正文段（Agent 中间轮说明文本 / 最终回答） -->
-              <div v-else-if="seg.text" class="ai-md" v-html="renderTextMd(seg.text, m)"></div>
-            </template>
-            <span v-if="isStreamingTail(i)" class="ai-cursor">▍</span>
-            <!-- RAG 引用来源：只展示模型实际引用的片段（正文出现对应 [n]） -->
-            <RagCitations v-if="hasCitedRefs(m)" :hits="m.ragHits" />
-            <!-- token 消耗（Agent 多轮已聚合；上游不支持 usage 时缺省不显示） -->
-            <div v-if="usageText(m)" class="ai-usage">{{ usageText(m) }}</div>
-          </template>
-          <template v-else>
-            {{ m.content }}
-            <div v-if="m.files?.length" class="ai-msg-files">
-              <span v-for="f in m.files" :key="f" class="ai-msg-file" :title="f">
-                {{ f.split('/').pop() || f }}
-              </span>
-            </div>
-          </template>
-        </div>
-      </div>
+      <AiMessage v-for="(m, i) in visibleMessages" :key="i" :message="m" :index="i" />
     </div>
 
     <!-- 输入区 -->
-    <div v-show="!sessionsOpen" class="mai-input-wrap">
+    <div class="mai-input-wrap">
       <div class="mai-input">
-        <div v-if="pendingCtxFiles.length" class="mai-ctx-list">
+        <!-- 输入区工具栏：引用文件入口 + 已选文件 chips（与 PC 面板同一入口语义） -->
+        <div class="mai-input-tools">
+          <button class="mai-chip" title="引用文件（也可直接输入 @）" @click="showFilePicker = true">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+              <path d="M3 1h6l5 5v9H3V1z"/><path d="M9 1v5h5"/>
+            </svg>
+            @ 引用文件
+          </button>
           <span v-for="p in pendingCtxFiles" :key="p" class="mai-ctx-chip" :title="p">
             <span class="mai-ctx-name">{{ p.split('/').pop() || p }}</span>
             <button class="mai-ctx-remove" @click="removeCtxFile(p)">&times;</button>
@@ -251,6 +180,7 @@ onMounted(() => {
 </template>
 <style scoped>
 .m-ai {
+  position: relative;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -309,8 +239,32 @@ onMounted(() => {
 .mai-icon-btn:hover, .mai-icon-btn.active { background: var(--hover); color: var(--accent); }
 .mai-icon-btn svg { width: 18px; height: 18px; }
 
-/* 会话历史覆盖层 */
-.mai-sessions { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* 会话抽屉：左侧滑入 + 遮罩，不替换消息区 */
+.mai-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  background: rgba(0, 0, 0, .32);
+}
+.mai-drawer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 9;
+  width: min(280px, 82%);
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  box-shadow: 6px 0 24px rgba(0, 0, 0, .18);
+  animation: mai-drawer-in .18s ease-out;
+}
+@keyframes mai-drawer-in {
+  from { transform: translateX(-100%); }
+  to { transform: none; }
+}
+.mai-drawer-actions { display: flex; gap: 2px; }
 .mai-sessions-head {
   display: flex;
   align-items: center;
@@ -355,6 +309,26 @@ onMounted(() => {
   color: var(--text-muted);
 }
 .mai-session-tag { color: var(--accent); border: 1px solid var(--accent); border-radius: 8px; padding: 0 5px; }
+.mai-session-generating {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0 5px;
+}
+.mai-session-generating i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: mai-generating-pulse 1s ease-in-out infinite;
+}
+@keyframes mai-generating-pulse {
+  0%, 100% { opacity: .25; }
+  50% { opacity: 1; }
+}
 .mai-session-del {
   margin-left: auto;
   border: none;
@@ -405,7 +379,17 @@ onMounted(() => {
   transition: border-color .15s;
 }
 .mai-input:focus-within { border-color: var(--accent); }
-.mai-ctx-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.mai-input-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.mai-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: transparent; color: var(--text-dim);
+  font-size: 11px; padding: 3px 9px; cursor: pointer;
+  white-space: nowrap;
+}
+.mai-chip svg { width: 12px; height: 12px; flex-shrink: 0; }
+.mai-chip:hover, .mai-chip:active { color: var(--accent); border-color: var(--accent); }
 .mai-ctx-chip {
   display: inline-flex;
   align-items: center;

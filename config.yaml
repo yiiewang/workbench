@@ -29,6 +29,7 @@ auth:
 #   "Display Name" -> display name alias in directory listing
 routes:
   "/jobs": "__spa__"
+  "/pipelines": "__spa__"
   "/todo": "__spa__"
   # 移动端 SPA 入口（与 frontend/src/router 中 /m 子路由一一对应；新增移动页面需同步加键）
   "/m": "__spa__"

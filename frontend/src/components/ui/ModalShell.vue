@@ -1,13 +1,9 @@
-<script lang="ts">
-// 模块级 ESC 层叠栈：所有 ModalShell 实例共享，保证 ESC 只关最上层弹窗
-const escStack: symbol[] = []
-</script>
-
 <script setup lang="ts">
 // 统一弹窗外壳：遮罩 + 内容卡片 + ESC/遮罩点击关闭 + 层级管理。
 // 弹窗组件只负责内容（title/body/actions 插槽），不再各写遮罩样式与关闭逻辑。
-// 多个弹窗叠加时 ESC 只关最上层（escStack 栈保证）。
+// 多个弹窗叠加时 ESC 只关最上层（共享 escStack 栈保证）。
 import { onMounted, onUnmounted } from 'vue'
+import { escStack } from '../../lib/modalEsc'
 
 const props = withDefaults(defineProps<{
   /** 头部标题（不传且无 header 插槽则不渲染 header） */

@@ -23,7 +23,7 @@ func feedStream(t *testing.T, lines []string) (aiRoundResult, string) {
 	src := strings.Join(lines, "\n") + "\n"
 	reader := bufio.NewReader(strings.NewReader(src))
 	var out flushBuffer
-	res, alive := forwardAIStream(&out, reader)
+	res, alive := forwardAIStream(&out, reader, nil)
 	if !alive {
 		t.Fatal("forwardAIStream reported client disconnected")
 	}
@@ -88,7 +88,7 @@ func TestForwardAIStream_ToolCallFragments(t *testing.T) {
 func TestForwardAIStream_ClientDisconnect(t *testing.T) {
 	// 写入立即失败 → alive=false，立即停止
 	reader := bufio.NewReader(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n"))
-	_, alive := forwardAIStream(errWriter{}, reader)
+	_, alive := forwardAIStream(errWriter{}, reader, nil)
 	if alive {
 		t.Fatal("expected alive=false on write error")
 	}

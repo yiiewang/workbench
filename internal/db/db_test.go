@@ -31,7 +31,7 @@ func TestOpen_CreatesTables(t *testing.T) {
 	t.Parallel()
 	d := newTestDB(t)
 
-	tables := []string{"orgs", "users", "tasks", "shares", "app_secrets"}
+	tables := []string{"orgs", "users", "tasks", "shares", "app_secrets", "schedule_triggers"}
 	for _, tbl := range tables {
 		var name string
 		err := d.conn.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&name)

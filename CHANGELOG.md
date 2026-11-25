@@ -7,18 +7,139 @@
 
 ### Fixed
 
+- **工具审批卡片下方多出一条空白条**：`ToolCallList.vue` 的结果区 `<pre class="ai-tool-result">` 在卡片处于「待确认」时被 watch 预先展开，但此时工具尚未执行、`c.result === undefined`，`resultText()` 返回空串，于是渲染出只有 padding 与上边框的空白区域；改为 `v-show="open.has(i) && c.result !== undefined"`，结果到达后才显示。同时修正 watch 注释——原写「自动展开是为让批准/拒绝按钮可见」，实际按钮由独立的 `v-if="c.approval === 'pending'"` 控制，预先展开是为了批准后结果直接可见
+- **编排流程图画布未铺满、圆角双层缝隙**：`PipelineGraph` 的 `.pg-scroll` 自带 `border` + `border-radius` 且高度只随内容，父级 `.pipe-board` 同样是圆角容器，导致左上角出现双重描边缝隙、点阵网格只占顶部一条、下方大片空白。改为 `.pg-wrap` / `.pg-scroll` 在 board 内 `flex:1` 撑满剩余高度，去掉内部边框与圆角（由父级 `overflow:hidden` 统一裁切），画布用 `flex + margin:auto` 在可用空间居中（超宽时仍可横向滚动且不裁左侧）
+- **刷新后 AI 回复变成 `⚠ Error in input stream` 且不再续输出**：上一轮把 `streamReply` finally 里的 `setRunId(s, null)` 改为无条件执行，而 catch 又把任何异常（含浏览器刷新导致的 `ReadableStream` 中断）一律设为 `recoverable=false` —— pending run 记录被清、reader 的原生错误被当作业务错误写成 `⚠` 占位并落进会话快照，刷新后 `resumePendingRuns()` 无记录可恢复。实测服务端 `ai_runs` 里对应 run 已 `status=done` 且有完整回复，纯前端误判：
+  - `api/ai.ts`：SSE `event: error` 抛出的错误打 `business=true`，与客户端流中断区分（`chatStream` 的重抛逻辑保留该标记）
+  - `useAIChat.ts`：catch 里只有「用户主动停止（`s.resumeStopped`，不依赖 `AbortError` 名称）」或「服务端业务错误（`e.business`）」才判为不可恢复；刷新/网络中断且已拿到 runId 时保持 `recoverable`，不写 `⚠` 占位、不弹 toast、保留 pending 记录，由本 tab 的 `pollRun` 或刷新后的 `resumeOne` 按游标补齐
+  - 局限：修复前已落库的 `⚠` 占位消息不会被自动纠正（当时 pending 记录已被清、消息本身也未存 runId），需点「重新生成」或删掉该条；之后的刷新均走恢复链路
 - **邮件列表项里的 `**粗体**` 失效**：`mdToHTML` 原用 `strings.TrimLeft(t, "-*·• ")` 剥离列表符号，会一并吃掉内容前导的 `*`（`- **重点**` → `重点**`，粗体标记残缺）；改为按 `- ` / `* ` / `· ` / `• ` 具体前缀 `TrimPrefix`，只剥离列表符号本身
 - **AI 对话面板左缘拖拽调宽失效**：消息目录刻度容器 `.ai-toc`（z-index:2，left:0 宽 48px）盖住了拖拽条 `.ai-resizer`（z-index:1，宽 8px），面板中部拖拽条不可点击、仅头尾狭窄区域可触发；将 `.ai-resizer` 提到 z-index:3 恢复整条可拖拽
 
 ### Changed
 
+- **编排流程图组件归位到 `components/pipeline/`**：`PipelineGraph.vue` 原本放在 `components/ai/`，但它只服务编排模板详情（`PipelineView.vue` 的 DAG 画布），与 AI 对话无关；本轮 `ai/` 收敛成清一色的对话组件后，这个错位更明显：
+  - `frontend/src/components/ai/PipelineGraph.vue` → `frontend/src/components/pipeline/PipelineGraph.vue`（新建 `components/pipeline/`），文件内容零改动：组件内部只 import `../../api/pipelines`，新旧目录同为 `components/<子目录>/`，相对层级不变
+  - `PipelineView.vue` 的 import 路径同步更新；全仓仅此一处代码引用（`[Unreleased] Added` 的历史条目记录的是组件创建时路径，按事实保留不改）
+  - 校验：`pnpm exec vue-tsc --noEmit` 通过，`PipelineView.vue` / `PipelineGraph.vue` lint 无告警
+- **移动端历史会话改为左侧抽屉，不再整页替换消息区**：此前 `MAI.vue` 打开会话列表时用 `v-if` 渲染一个占满内容区的 `mai-sessions` 视图，同时用 `v-show="!sessionsOpen"` 把消息列表和输入区一起隐藏——翻会话时整个对话从眼前消失，且没有明确的「关闭」出口（只能再点头部图标或选一条会话）：
+  - 改为 `.mai-mask` 遮罩 + `.mai-drawer` 左侧滑入抽屉（宽 `min(280px, 82%)`、`--sidebar-bg` 底色、0.18s 滑入动画），消息区与输入区始终可见；`.m-ai` 加 `position: relative` 提供定位上下文
+  - 关闭路径补齐：点遮罩、抽屉标题栏新增 X 按钮、选中会话（`loadSession` 内部会置 `sessionsOpen=false`）、点新对话，均自动收起；刷新按钮保留，与 X 一起收进 `.mai-drawer-actions`
+  - 与 PC 面板在 <=900px 视口下把 `.ai-rail` 退化为 absolute 覆盖抽屉的行为对齐：窄屏不做并排左栏（375px 屏宽下剩不下可读的消息区）
+  - 校验：`pnpm exec vue-tsc --noEmit` 通过，`MAI.vue` lint 无告警
+- **AI 对话输入区补上显式「@ 引用文件」入口**：此前引用文件只能靠键盘输入 `@` 触发 `FilePickerModal`，提示文字写着「@ 引用文件」却没有任何可点击入口，移动端触屏切符号键盘尤其不便：
+  - PC `AiChat.vue`：底部工具行新增 `.ai-chip` 按钮（图标 + 文字），点击置 `showFilePicker = true`；提示文字缩为「Enter 发送 · Shift+Enter 换行」，不再与按钮和 placeholder 重复；顺带删掉 `.ai-chip` 里从未使用的 `.ai-chip-name` / `.active` / `:disabled` 规则
+  - 移动端 `MAI.vue`：输入卡片顶部新增 `.mai-input-tools` 一行，引用按钮与已选文件 chips 合并显示（原 `mai-ctx-list` 带 `v-if`，只在有引用文件时才出现），触屏无需手动敲 `@`
+  - 键盘 `@` 路径保留（`onInputKeydown` 仍打开选择器），两种入口并存；两端入口语义一致，外观各沿用原有卡片形态
+  - 校验：`pnpm exec vue-tsc --noEmit` 通过，改动文件 lint 无告警
+- **pipeline 与 schedule 解耦（pipeline 成为可被 schedule 执行的一个对象）**：此前 `internal/schedule` 里有 pipeline 专属 Job、`PipelineTemplateRunner` 签名直接带 `db.PipelineTemplateWithOwner`，模板表还混着调度列——依赖方向反了。现在 schedule 只认通用规则行 + handler，pipeline 在装配层注册自己：
+  - 依赖方向：`server.go` 用 `schedule.NewTriggersJob(database, {"pipeline_template": srv.triggerPipelineTemplate}, loc)` 取代 `NewPipelineTemplatesJob`；`triggerPipelineTemplate(ctx, db.CronTriggerWithOwner)` 按 `target_id` 读模板 Definition → `runPipeline`，schedule 不需要知道 pipeline 是什么；`internal/schedule/pipelinetemplates.go` 及 `PipelineTemplateRunner` 删除
+  - 迁移 000020 用 SQLite「建新表 → 复制 → 删旧表 → 改名」重建 `pipeline_templates`，去掉 `cron_expr/enabled/last_run_at/last_status`；`PipelineTemplate` 只剩 id/name/definition/时间戳，模板 CRUD 签名瘦身，删掉 `PipelineTemplateWithOwner` / `ListEnabledPipelineTemplates` / `MarkPipelineTemplateRun`；`000020.down` 加回 4 列并从 `schedule_triggers` 反向回填（多规则取最近一条），回滚不丢配置
+  - 手动触发 `POST /api/pipeline/templates/{id}/run` 不再写模板的调度状态，过程与结果统一由 `pipeline_runs` 记录；模板提交不再校验 cron
+  - 前端：`pipelines.ts` 去掉模板调度字段；`PipelineView.vue` 表单只留名称、顶部状态改由运行记录提供、模板启停按钮移除，cron/启用/最近执行全部交给独立组件 `PipelineTriggerCard` 通过通用 API 管理；`PipelineSidebar.vue` 不再显示启用圆点 / cron，改显示创建日期
+  - 取代关系：`[Unreleased] Added` 中「编排能力第 2 步」条目关于迁移 000018 的调度列、`pipeline_templates_runner`、模板页 cron 预设 / 启停的描述，均以本条为准；`internal/pipeline` 引擎、`run_pipeline` 工具、`pipeline_runs`、DAG 流程图、`POST /api/pipeline/run`、手动触发端点路径不变
+  - 单测覆盖：通用触发 CRUD / 过滤 / 隔离、000019 回填语义、000020 回滚反向回填、Job 按类型分发 / 防重 / 未知类型 / 错误回写、cron 校验与目标归属；`make test` + `pnpm build` 全绿
+- **AI 对话消息区去气泡化 + 抽出 PC/移动端共用消息组件**：此前 `AiChat.vue` 与 `MAI.vue` 各维护一份近 70 行的消息模板和一套过程块折叠逻辑，样式又散在 `AiChat.vue` scoped 与全局 `ai-chat.css`，改一处要顾三处：
+  - 新增 `components/ai/AiMessage.vue`：单条消息渲染（头像 / 时序分段 / 过程块折叠 / 工具调用 / RAG 引用 / token / 操作按钮），PC 面板与移动端模板各缩成一行 `<AiMessage :message :index />`；两侧重复的 `processManual` / `processOpen` / `processTitle` 等逻辑一并下沉，折叠 key 从「消息 idx:段 idx」简化为组件内段 idx
+  - 上下文注入：`useAIChat.ts` 导出 `aiChatKey` / `AIChatContext`，两个父组件各自 `provide` 自己的 composable 实例，`AiMessage` 用 `inject` 复用；子组件若自行调用 `useAIChat` 会生成独立会话状态，导致审批 / 复制 / 重新生成 / 保存作用在错误实例上
+  - assistant 回复去掉 `.ai-bubble.assistant` 灰底卡片，改为 `.ai-msg-col` 正文流（user 保留蓝色气泡）；过程块改为左侧细线的轻量折叠行（展开区去掉卡片边框），代码块 / 行内代码背景由 `--bg` 改 `--code-bg`，否则与页面背景融为一体
+  - 新增统一「元信息行」`.ai-meta`：复制 / 保存 / 重新生成 + RAG 引用来源 + token 消耗收成一条 10px 轻量行，操作按钮 hover 显示（触屏常显）、token 右对齐；`RagCitations` 不改模板，靠 `.ai-meta .rag-cites { display: contents }` 让 toggle 成为行内项、展开列表 `flex: 1 1 100%` 独占一行
+  - 顺带统一两端差异（保存按钮 title、user 引用文件 chip 图标、`data-idx` 供目录跳转），把 `.ai-msg-file-name` 从面板 scoped 迁入全局，删除未被引用的 `.ai-reasoning*` 死样式与旧 `.ai-usage` 定义
+  - 校验：`pnpm exec vue-tsc --noEmit` 通过，改动文件 lint 无告警
+- **AI 对话面板 UI 骨架分层（PC 浮动面板）**：功能叠加后头部挤了 5 个无文字图标、历史会话与文件索引状态各占一个覆盖消息区的互斥抽屉、消息目录刻度条常驻左缘（消息区被迫留 52px 左内边距）。本轮只重排骨架，消息内部与移动端不动：
+  - `AiChat.vue` 新增可收起左栏 `.ai-rail`，用单一 `railOpen` + `railTab`（`sessions` / `index` / `toc`）把会话列表、索引状态、消息目录合成三个 tab；同一 tab 再点或 Esc 收起。头部只留侧栏开关 + 标题 + 模型 + 新建 + 收起，剧场模式入口下放到左栏底部
+  - 消息区不再被抽屉覆盖：`.ai-body` 改用 `grid-template-columns: auto 1fr` + 消息/输入两行，左栏固定 216px（固定 px 避免百分比宽度与 `auto` 轨道互相依赖），侧栏收起时 auto 轨道塌缩为 0、消息区自动占满；`.ai-list` 去掉 `padding-left: 52px`
+  - 消息目录由「左缘律动刻度条 + Teleport 悬浮摘要卡」改为左栏内的摘要列表：角色徽标 + 两行截断摘要、滚动高亮当前消息、点击跳转；相应删除 `tocHover` / `tocVisible` / `tocTipStyle` / `onTocEnter` / `onTocLeave` / `tocBarStyle` 及刻度条、悬浮卡样式与 Teleport
+  - 抽屉状态不再依赖 composable 的 `sessionsOpen` / `toggleSessions`（`loadSession` 等内部仍会写该 ref，但 PC 面板不再读取），`watch(sessionsOpen)` 互斥逻辑删除；切到索引 tab 时按需拉取索引状态
+  - 响应式：面板被拖到 <460px（`@container`）或 <=900px 视口时，左栏退化为 absolute 覆盖式抽屉（默认收起），不与消息区争宽度；剧场模式保持并排
+  - 校验：`pnpm exec vue-tsc --noEmit` 通过，CSS lint 无告警
+- **AI 对话消息区重设计（PC / 移动端共用 `AiMessage.vue`）**：此前 `AiChat.vue` 与 `MAI.vue` 各维护一整段消息模板（过程块、正文 markdown、RAG 引用、token、hover 操作），两端细节已分叉（灯泡图标、文件引用 chip 图标、保存按钮文案）：
+  - 新增 `components/ai/AiMessage.vue`：单条消息统一渲染，包含时序分段（过程块折叠 + 正文段）、流式光标、头像、user 气泡与文件 chips、统一元信息行；两个父组件的消息循环各缩为一行 `<AiMessage :message="m" :index="i" />`
+  - 状态注入：`useAIChat.ts` 导出 `aiChatKey`（`InjectionKey<ReturnType<typeof useAIChat>>`），父组件 `provide` 自己的实例；消息组件 `inject` 后直接调用 `copyMessage` / `regenerate` / `saveReplyAsFile` / `approveToolCall` / `isStreamingTail` 等，避免子组件再调 `useAIChat` 生成独立会话状态（审批、重新生成会作用到错误实例）。过程块折叠状态随组件实例保存，key 由 `消息idx:段idx` 简化为段 idx，父组件里的重复逻辑删除
+  - 视觉：assistant 去掉 `--code-bg` 气泡底色与内边距，正文直接铺在 `.ai-msg-col`；user 保留右对齐蓝色气泡。复制 / 保存 / 重新生成、RAG 引用来源、token 消耗收进 `.ai-meta` 轻量行（hover 显示操作、触屏常显），`RagCitations` 以 `display: contents` 融入该行且展开列表独占一行；过程块改为左侧 2px 竖线的折叠行，展开区去掉边框底色
+  - 配套：`.ai-md code/pre` 背景由 `--bg` 改为 `--code-bg`（正文无底色后仍需区分代码块）；`styles/ai-chat.css` 清理未使用的 `.ai-reasoning*` 规则，`.ai-msg-file-name` 的 ellipsis 规则从 `AiChat.vue` scoped 移到公共样式表
+  - 校验：`pnpm exec vue-tsc --noEmit` 通过，相关文件 lint 无告警
 - **邮件通知器装配简化**：原 `NewEmailNotifier` 在 `notify.email.enabled=false` 时仍构造一个未订阅任何事件的 `EmailNotifier` 并返回，调用方 `server.go` 用 `_` 丢弃实例（全仓仅此一处调用）——该对象无人持有、永不触发；且原顺序是先构造再校验 `host/user`，校验失败时构造白做。改为 `SubscribeEmailNotifier(...)` 只返回 `error`：`enabled=false` 直接返回，随后前置校验 `host/user` 再构造实例并订阅三类事件（事件总线持有方法值，无需返回实例）；`server.go` 直接判 error
 - **邮件模板可读性与样式**：`mdToHTML` 输出由 `<br>` 连续拼接改为每项独立 `<div>`——列表项加 `padding:5px 0 5px 14px;text-indent:-14px` 悬挂缩进（长句折行与首行文字对齐）+ 项间留白，解决多个长 bullet 挤成一片文字墙；分节标题（`##` / 中文序号）加左侧 3px 蓝色色条与上间距，正文行距 1.9 → 1.8、段落自带下间距；新增行内代码（反引号）渲染为浅灰底小字，AI 日报里的 `done` / `CERTS_DELETE` 等内部标识不再露出反引号。行内标记统一由 `inlineRe` 正则（链接/粗体/代码）处理，用户内容仍经 `escHTML` 转义；`docs/email-template-preview.html` 同步更新
 - **`ai` 配置结构嵌套化（破坏性变更）**：聊天配置收进 `ai.chat` 子段（`ai.base_url/api_key/model/tools` → `ai.chat.*`），与 `ai.embedding` 子段对称——两者常指向不同服务。旧平铺写法不再识别，存量 config.yaml 需手动迁移；环境变量（`AI_BASE_URL`/`AI_API_KEY`/`AI_MODEL`/`AI_TOOLS`）不受影响
 
 ### Added
 
+- **通用定时触发规则（调度领域自己的持久化对象）**：`schedule_triggers` 表 + `GET/POST /api/schedule/triggers`、`GET/PUT/DELETE /{id}`，让任何领域对象都能成为「可被 schedule 执行的目标」：
+  - 迁移 000019 建表（org/user、`target_type`、`target_id`、`cron_expr`、`enabled`、`last_run_at/last_status` + owner/enabled/target 三个索引），并从 000018 的 `pipeline_templates` **回填**已有 cron 配置（含停用状态与最近执行状态；纯手动模板不产生规则）；`internal/db/cron_triggers.go` 提供 CRUD、按类型/目标可选过滤、启用规则全库扫描、分钟键状态回写、按目标批量删除
+  - `internal/schedule/triggers.go`：`TriggerHandler func(ctx, db.CronTriggerWithOwner) error` + handlers 注册表；`cron_triggers_runner` 每分钟只扫通用规则、按 `target_type` 分发、`YYYY-MM-DD HH:mm` 分钟键防重，非法 cron / 未注册类型各记状态互不阻塞，15min 超时 + 独立 ctx 回写；复用现有 `Job`/`Scheduler`，调度内核不动，**schedule 生产代码零 pipeline 标识符**
+  - `internal/server/schedule_triggers.go`：CRUD handler；`schedule.ParseCron` 校验 cron，`supportedTriggerTargets` 白名单 + `validateTriggerTarget` 在装配层校验目标归属（跨用户 / 跨组织 / 不存在一律拒绝）；更新只允许改 cron/启用，目标绑定创建后不可变
+  - 前端 `frontend/src/api/scheduleTriggers.ts` + 独立组件 `PipelineTriggerCard.vue`：模板页新增「定时触发」区块自管理新建 / 编辑 / 启停 / 删除，显示 cron 与最近执行状态；未保存的新模板禁用配置；第一版一个模板在界面上管理一条规则（后端支持多条）
+  - 删除模板时 `DeleteCronTriggersForTarget` 级联清理指向它的规则，避免通用调度器每分钟报「目标不存在」
+  - 边界：`ai_jobs` 仍是 schedule 的原生任务类型，未迁入通用表（避免把已有数据的迁移混进来）
+- **AI 对话刷新恢复改为按游标增量续着输出**：此前 `pollRun` 每 2s 拉一次全量 `result` 并整段覆盖 `live.content`，断流期间看不到打字过程，刷新后要等下一次轮询才整块出现：
+  - `api/ai.ts`：`AIRun` 增加 `delta`/`offset`，`getAIRun(id, offset=0)` 请求 `?offset=<rune 数>`；`useAIChat.ts` 的 `RESUME_POLL_MS` 2000 → 300（与后端 300ms 落库节流对齐）
+  - `pollRun` 维护游标：首次以服务端累积正文覆盖 `live.content`（清掉本地半截或「（已停止）」占位），之后只 `live.content += run.delta`，并用服务端返回的 `run.offset` 前进；`applyRunSnapshot` 不再用 `run.result` 覆盖正文，只按 id 去重补工具卡片 / RAG 引用 / usage，正文与结构化事件两条通道互不干扰
+  - 主动停止 / 业务错误时统一 `setRunId(s, null)` 清 pending 记录：否则 `resumeOne` 会把「用户已停止」的 run 当成待恢复任务、重置 `resumeStopped` 后又把内容补回来
+  - 局限：仍是轮询而非真正附着到后台 run 的 SSE 重连，粒度受 300ms 落库节流约束；静默断流时服务端快照最多落后 300ms，首次覆盖可能让末尾几个字短暂回退、下一次轮询即补齐；reasoning 增量仍不落库
+- **AI 后台 run 正文增量落库 + offset 游标查询（刷新续读的服务端基础）**：此前 `ai_runs.result` 只在每个工具轮结束与 run 收尾时写一次，纯文本流中途库里一直是空的，刷新恢复只能等跑完拿整段快照：
+  - `parseAIDataLine` 返回每行正文增量，`forwardAIStream` 新增可选 `onDelta` 回调（3 处既有单测调用点传 `nil`）；`handleAIChat` 用回调把分片即时并入 `run.content` 并 `maybeFlush` 按 300ms 节流写 `running` 快照，删掉原先整轮结束后的 `WriteString(res.Content)`（`res.Content` 仍保留供 Agent 工具轮组消息用）
+  - `GET /api/ai/runs/{id}` 支持 `offset=<rune 数>`：响应由 `db.AIRun` 扩为 `aiRunDetail`，多出 `delta`（游标之后的增量正文）与 `offset`（下次请求应带的游标）；`splitRunResult` 按 rune 而非字节切分（中文/emoji 口径一致），游标越界钳到两端、重复请求同一游标返回空增量，游标由服务端返回免去前端换算
+  - 按是否带 `offset` 分流：不带游标返回原有 `db.AIRun` 全量快照（只查状态/归属的调用），带游标时 `result` 置空、只回 `delta`/`offset`/`events`/元信息，长回复每 300ms 轮询不再重复传输全量正文；前端 `getAIRun(id, offset?)` 不传游标时不带 query
+  - 无迁移：`ai_runs` 表结构不变；不带游标的响应仍是全量文本，旧调用读 `result` 行为不变；文件头过时的「断连即取消上游」注释同步修正
+  - 单测 `internal/server/ai_runs_test.go`：`TestSplitRunResult`（中文/emoji、空/负数/越界游标）、`TestForwardAIStream_DeltaCallback`（分片回调拼出的文本与整轮累积一致）；`make test`（`-tags sqlite_fts5`）全绿
+  - 局限：仍是轮询而非 SSE 重连，增量可见性受 300ms 落库节流约束；reasoning 增量不落库（与原 `result` 语义一致）；前端已改为按 `delta` 增量追加，见上一条
+- **AI 对话支持多个会话同时生成、生成中自由切换会话**：此前 `useAIChat` 只有一组 `messages`/`dbSessionId`/`streaming`，`send`/`askWith`/`regenerate`/`loadSession` 四处被单一 `streaming` 守卫拦截，生成中切会话被静默忽略：
+  - 状态按会话隔离：`ChatSession`（`shallowReactive`）持有自己的消息数组（`reactive<ChatMessage[]>`）、`dbSessionId`、上游 `sessionId`、`streaming`、`abortCtrl`、runId/恢复标记与持久化防重入标记；`Map` + `currentKey` 决定当前展示会话，`streaming`/`dbSessionId` 改为依赖它的 `computed`。导出名与类型不变，`AiChat.vue` / `MAI.vue` 零改动
+  - 流与会话绑定：`streamReply(userMsg, s)` 的 `live` 取自 `s.messages`（切到别的会话后增量仍写原会话的响应式代理），`AbortController`/runId/`completed`/`recoverable` 改为局部变量；`persistSession(s)`、`throttledPersist(s)`、`pollRun(..., s)`、`stopStreaming()` 都只作用于自己的会话，后台会话不抢当前会话的滚动、也不会把消息 `PUT` 到别的会话记录
+  - 切换无阻：`loadSession` 去掉 `if (streaming) return`，命中内存态直接 `activate`；`clearChat` 改为新建空白会话而非清空数组，原会话的流继续跑完并落库；`removeSession` 只 abort 被删会话的流并清理它的 pending run
+  - 恢复不串台：`sessionStorage` 的 `workbench-ai-active-run` 由单个 runId 改为 `PendingRun[]`（`{id, key, sessionId, dbSessionId}`），会话首次落库后 `backfillPendingRuns` 补归属；每条记录用 `GET /api/ai/runs/{id}` 的 `sessionId` 二次校验归属，删掉「按 org+user 找第一条 running」的兜底（多会话/多 tab 时那正是串台来源）；结束轮询按 runId 删记录，兼容刷新后会话 key 变化
+  - 刷新后自动恢复所有会话：从「只恢复当前展示会话的第一条 run」升级为 `resumePendingRuns()` 遍历全部 pending run，每条交给独立异步任务 `resumeOne`（30min 过期保护 → `ensureSession(dbId)` 按 `dbSessionId` 重建会话内存态但不切换展示 → 尾部挂 live → `pollRun`），多个会话的轮询并行且不阻塞 UI，`resuming` 按 runId 防重复；`ensureSession` 并发载入时二次查 `findByDbId` 复用，避免同一会话两份状态，`loadSession` 也改用它；`maybeRestoreLastSession` 把扫描放到最前，面板每次打开都扫一遍，`workbench-ai-new-chat` 标记存在时也不再跳过其它会话的恢复；归属不符或过期的记录由 `forgetRun` 清理，`dbSessionId` 为空的先跳过等回填（不误删刚开跑的流）
+  - 会话列表「生成中」标记：`chatSessions` 改为 `shallowReactive(Map)`（会话增删也进响应式依赖），新增导出 `streamingSessions`（聚合 `streaming && dbSessionId != null` 的会话 ID）；PC 面板与移动端会话列表项用它显示带脉冲圆点的「生成中」标签，切到别的会话也能看到哪些会话仍在后台跑
+  - 局限：会话在首条消息落库前就刷新（run 尚无 dbSessionId）无法恢复；同一会话内仍串行（一轮未回完不能发下一轮）；跨 tab 写同一会话仍是 `PUT` 全量覆盖，未做版本/CAS；会话列表只在打开时拉取，新落库的会话需重新打开列表才会出现；恢复为按游标 300ms 增量追加，仍是轮询而非 SSE 重连
+- **全量重建自动清理孤儿索引**：`POST /api/ai/reindex` / Agent 工具 `reindex_files` 触发的 `rag.ReindexTree` 在收集完待索引文件后新增一步清理，解决「文件已删但索引仍在、AI 仍检索并引用旧内容」：
+  - 新增 `db.ListIndexedPaths(ctx, orgID, userID)`：只查 `file_index_state.path`、无 limit、按 org+user 隔离（现有 `ListFileIndexState` 有 500 条截断，不适合作全量比对）
+  - `rag.orphanPaths` 把库中路径拼回用户根并 `os.Stat`，**仅 `os.IsNotExist` 判为孤儿**；刻意不用「本次遍历 `entries` 差集」——`collect` 遇 `os.ReadDir` 失败只记 warn 并跳过子树，差集会把整棵仍存在文件的索引误删
+  - 复用 `DeleteFileIndex` 在事务内清 `file_chunk_vec` / `file_chunk_fts` / `file_chunks` / `file_index_state` 四表；清理失败只记 warn，不中断重建
+  - 可观测：`ReindexStats` 与 `ReindexProgress` 新增 `pruned`，写入 `GET /api/ai/reindex/status` 快照（工具 `reindex_status` 同步可见）与 `rag: reindex done` 日志
+  - 边界：只清「文件已不存在」；文件仍在但变成不可索引类型、隐藏/依赖目录里的旧索引、未跟随的 symlink、以及 `status='error'` 且文件仍存在的状态行都不清（分别由写钩子、`ragclean` 默认模式 / `--reset` 负责）
+  - 单测 `internal/rag/service_test.go`：`TestOrphanPaths`（存在/嵌套/已删）、`TestPruneOrphans`（按 owner 隔离、他人索引不误删、error 状态行同判定）、`TestReindexTreePrunesOrphans`（空目录端到端验证清理接入与进度快照）；`make test` 全绿
+  - 文档同步：`docs/05-operations.md` §5.3–§5.5/§9、`docs/02-functional-guide.md` §8.4/§14、`docs/03-design.md` §5.5/§10、`docs/README.md` 版本与更新记录
+- **重建 `docs/` 文档体系（编号化 + 补齐构建/运维 + 基线追平）**：主文档改为两位序号命名并按阅读顺序组织——`00 README.md`（文档中心）、`01-getting-started.md`、`02-functional-guide.md`、`03-design.md`、`04-build-and-release.md`、`05-operations.md`，两份 2026-08-21 历史设计稿与邮件模板预览归拢 `archive/`（A1–A3），所有跨文档相对链接、归档文件头链接与根 `README.md` 引用同步改写；新增 `01`（环境/构建启动/首次超管初始化/SPA 路由注册/公网部署）、`04`（构建链路、Makefile target 全表及 `build: frontend` 每次重建前端的副作用、`CGO_ENABLED=1` / `sqlite_fts5` / embed / vec 头文件约束、质量门禁、xgo 五平台打包与 `package.sh`、发布流程、9 类构建故障）、`05`（配置非零值合并语义、启用矩阵、**RAG 索引运维**、备份、17 个迁移、日志、故障排查），并把根 `README.md` 的 Quick Start 与 Release Process 迁入这两份文档后改为链接，消除重复并顺带修正 D05（默认端口 `80` → `8080`）与 D06（`make build` 只编译 Go 的错误描述）；`02` / `03` 全量重写，追平 `000016_ai_runs` 后台运行（`runCtx` 15min + `aiRunWriter`）、1b 按 runId 2s 轮询恢复（15min 上限 / 30min 过期保护）、16 个内置工具（含 `reindex_files` / `reindex_status` / `run_pipeline`）、声明式编排（`internal/pipeline` 的 `Definition`/`Runner`/`RunContext.Interpolate`、`allowWrite` 预授权、三类 `uses`、`pipeline_runs`）、17 个迁移 / 21 项表 / 8 类 SSE 事件 / 4 条新路由；`05` §5 明确记录「删除文件会在事务内同步清 `file_chunk_vec` / `file_chunk_fts` / `file_chunks` / `file_index_state`，而 `ReindexTree` 只遍历现存文件、不做差集清理，孤儿索引需 `make ragclean ARGS=--reset` + 重启 + 全量 reindex」；`00` 建立编号规则、版本说明（`docs v2.0`，基线 `v1.3.0-25-g517f88c` + 工作树未提交的 000017 编排引擎）、更新记录、单一事实源 / 变更触发规则 / 提交前检查清单 / 一致性核对方法 / 归档规则，偏差清单复核到 17 项（D05/D06/D14/D15 标记为已处理）
 - **补充三套项目文档（`docs/`）**：`docs/functional-guide.md`（功能说明，16 章：功能地图、快速开始与首次超管初始化、通用约定、各功能模块统一的「场景→操作流程→输入/输出→参数→限制」模板、PC/移动能力矩阵、配置默认值 vs `config.yaml` 示例值与环境变量表、限制条件汇总、FAQ、术语表）；`docs/design.md`（软件设计，12 章：分层架构与 3 个全局中间件链、后端 8 个包与前端目录的职责/依赖、`main.run` → `server.New` 装配顺序与失败语义、8 条关键流程时序、15 个迁移版本 + 19 项表的数据模型、全量路由与 7 类 SSE 自定义事件、安全模型、10 类扩展点、17 项设计取舍与已知约束）；`docs/README.md`（文档中心：目录结构与状态标记、文档版本规则、更新记录、单一事实源 + 变更触发规则 + 提交前检查清单 + 一致性核对方法、15 项已知文档偏差清单）。两份 2026-08-21 历史设计稿（`rbac-design.md` / `migration-strategy.md`）原位保留，文件头加归档提示与主要漂移说明（modernc/`CGO_ENABLED=0` → mattn + cgo + sqlite-vec、`org_features` → `user_org_feature` 等）；根 `README.md` 的过时描述按约定**仅登记不修改**。事实依据为 `Server.App()` 路由注册、`config.DefaultConfig` / `mergeConfig` / `ApplyEnv`、15 个迁移脚本、`aitools.go` 的 15 个工具注册表、`ai.go` 的 SSE 事件、`schedule.KnownTopics` 的逐项核对；文档内容基线锁定 `v1.3.0-23-g8f70235` + 迁移 000015；撰写期间 HEAD 前进到 `5d28238`（`000016_ai_runs` / `/api/ai/runs` / `run_id` 等），未纳入正文，登记在 `docs/README.md` §3.3「基线差距与待同步内容」
+- **AI 对话面板 ESC 最小化**：`AiChat.vue` 原有 `onEsc` 只处理剧场模式退出，普通面板收起只能点右上角「收起」。扩展为分层优先级：有 `ModalShell` 弹窗（如引用文件选择器）时让路不响应 → 退出剧场模式 → 关闭历史会话 / 索引状态抽屉 → `panelOpen=false` 最小化回悬浮按钮；流式对话与 1a 的后台 run 不受影响。为让面板知道弹窗是否占用按键，把 `ModalShell.vue` 的模块级 `escStack` 抽到 `frontend/src/lib/modalEsc.ts` 并导出 `escStack` / `hasOpenModal()`，弹窗自身行为不变；移动端 `MAI.vue` 全屏页无悬浮按钮，不处理
+- **编排模板页 UI 重设计（流程图即模板详情）**：上一版把 `.form-row` / `.form-input` 当成全局样式用（实际定义在 `AiJobsView.vue` 的 scoped CSS），输入框被压到约 150px、label 与输入挤成一行；流程图又藏在 Tab 后、只出现在执行记录里。重做后：
+  - 信息架构：模板详情主体**默认就是流程图画布**；名称 / cron / 启用收成顶部紧凑设置栏；右侧节点 Inspector（uses / needs / when / retry / with / 该步运行输出）；JSON 降级为「查看 / 编辑 JSON」次级入口
+  - 运行记录移到底部紧凑列表，点某次运行把 ok/failed/skipped + 耗时**叠加到同一张模板流程图**，不再在记录里另画一张图；「清除运行状态」可还原
+  - 组件拆分：`PipelineGraph` 只管布局与渲染，选中节点 `emit('select', {step, result})` 交给父级 Inspector；共享类型 `PipelineGraphStep` 提到 `api/pipelines.ts`
+  - 视觉：节点 208×76 卡片（tool 蓝 / api 紫 / llm 绿 类别色条、圆形状态徽标、id 与 uses 两行不截断、when/retry/耗时 chip）、点阵网格画布、细贝塞尔连线、hover 抬升；表单样式在本组件内完整定义（输入 100% 宽、label 块级、预设按钮 6px 间距）
+  - Inspector 第一版只读，内容编辑仍走 JSON，避免双向同步复杂度
+- **编排模板页渲染 DAG 流程图**：纯 JSON 文本框与长文本执行记录不直观，改为可视化：
+  - 新组件 `frontend/src/components/ai/PipelineGraph.vue`：SVG 贝塞尔连线 + HTML 节点，不引入 mermaid/dagre（避免继续放大 bundle）；分层规则复刻 `internal/pipeline` 的 needs 语义（缺省=依赖前一步、`[]`=同层并行、id 列表=菱形 DAG），Kahn 分层并对未知依赖 / 自依赖 / 环给出可读错误
+  - 节点显示 id / uses / when / retry / 耗时；`steps` 结果按 ok / failed / skipped 上色；点击节点展开该步 with 参数与输出/错误；画布可横向滚动，SVG marker id 按实例随机避免多图冲突
+  - 模板编辑页 Definition 区加「定义 / 流程图」Tab，切到流程图时实时解析当前 JSON（解析失败给提示、不影响编辑）；名称 / cron / 启用表单始终可见
+  - 运行记录展开时上部叠加状态流程图，逐步原始输出收进 `<details>` 默认折叠；`PipelineRun.definition` 类型改为 `unknown`，兼容后端 `json.RawMessage` 返回的对象
+- **编排 DAG 依赖与同层并行（第 3 步前半）**：`Step` 新增 `needs`，引擎从顺序循环改为拓扑分层 + 层内并行：
+  - 语义：`needs` 缺省 = 依赖数组前一步（保持原有顺序语义，旧模板零改动）；显式 `needs: []` = 无依赖可并行；`needs: ["a","b"]` = 等两者完成（菱形 DAG）。json tag 不带 `omitempty`，避免空数组在工具参数的 marshal→unmarshal 往返中被吞掉退化成 nil
+  - `Definition.Validate` 增加未知依赖 / 自依赖 / 环检测；`Layers()` 用 Kahn 算法分层并对层内索引排序，保证结果顺序稳定
+  - `Runner.Run` 按层启动 goroutine（并发上限 4，避免一次打满 LLM/embedding 上游），`sync.WaitGroup` 收齐一层后才写 `RunContext.Outputs` 并落一次全量快照；变量插值在启动前完成，层内并发不共享写。任一步失败即停，未执行步骤保持 skipped
+  - 结果数组按 Definition 顺序输出（不再是完成顺序），`onStep` 改为每层一次
+  - 工具描述与模板页提示同步 needs 语法；补菱形 DAG、环检测、并行 barrier 与跨步骤插值单测
+  - 条件与重试（第 3 步后半）：`Step.When`（on_success 默认 / on_failure / always）——主流程失败即停，显式声明的补偿步骤仍执行，无失败时 on_failure 步骤自动 skipped；`Step.Retry`（0–5）按 200ms×次数固定退避重试，耗时计入单步 `durationMs`；`Validate` 校验取值与上限。失败后仍遍历剩余层做 when 判定，每层各落一次快照
+  - 工具描述与模板页提示同步 needs / when / retry；补菱形 DAG、环检测、并行 barrier、跨步骤插值、失败补偿、重试次数、成功时跳过 on_failure 等单测
+  - 局限：无表达式型条件（rules.if）与动态分支；Definition 仍用 JSON 文本框编辑（无可视化编排器）
+- **编排能力第 2 步（后端）：HTTP 入口 / cron 触发 / 模板固化**：第 1 步的执行核心变成多入口共用能力，模板只是把 Definition 存库复用：
+  - 共享核心：`execRunPipeline` 拆出 `runPipeline(ctx, orgID, userID, runID, def)`，与 `iris.Context` 完全解耦；AI 工具仍走 `aiToolRunCtx`（1a 后台上下文），HTTP / cron / 模板各自用 `context.Background()` + 15min 超时派生
+  - `POST /api/pipeline/run`：直接提交一份 Definition，后台异步执行并立即返回 runId，逐步结果仍由 `GET /api/pipeline/runs/{id}` 查询
+  - 模板：迁移 000018 `pipeline_templates`（definition JSON、cron_expr、enabled、last_run_at/last_status、org+user 隔离）；`GET/POST /api/pipeline/templates`、`PUT/DELETE /{id}`、`POST /{id}/run` 手动触发；提交时校验 Definition 与 cron 表达式
+  - cron：`internal/schedule` 新增 `pipeline_templates_runner`，每分钟扫描启用模板、`YYYY-MM-DD HH:mm` 分钟键防重（同分钟重复 tick / 重启不重跑）、独立 goroutine + 15min 超时，状态回写用独立 ctx（沿用 `aijobs.go` 的异步 ctx 约定）；执行函数由 server 注入，schedule 不反向依赖 server
+  - app 初始化时机：`New()` 内提前 `iris.New()` 并复用给 `App()`，避免 cron 早于路由装配触发时 `ContextPool` 为空导致工具步骤 panic
+  - 前端：`frontend/src/api/pipelines.ts`（模板 CRUD / 手动触发 / Definition 直调 / 运行记录）、`PipelineView.vue`（Definition JSON 编辑、cron 预设、启停、立即执行、最近执行按 runId 展开逐步输出）、`PipelineSidebar.vue`（列表 + 新建）；补 `GET /api/pipeline/templates/{id}` 供编辑表单读取 Definition；路由 `/pipelines` + Activity Bar / PC 首页 / 移动端首页三处入口，移动端复用 DefaultLayout 的 ≤900px 适配
+  - 局限：仍顺序执行；Definition 用 JSON 文本框编辑（无可视化编排器）；条件 / 并行 / 重试 / DAG 待第 3 步
+- **声明式编排引擎（第 1 步：编排能力本身，模板后置）**：一次编排 = 一份纯数据 Definition 交给统一 Runner 按序执行；对话里 AI 自己构造步骤数组调 `run_pipeline` 即实现「自主规划多步」，无需改造 Agent 循环：
+  - 新包 `internal/pipeline`（不依赖 HTTP/iris/db）：`Definition{name,allowWrite,steps}` + `Step{id,uses,with}`；`RunContext` 递归插值 `{{ steps.<id>.output }}`（字符串直嵌、其余 JSON 序列化，未产出引用原样保留）；`Runner` 每步独立超时（5min）、失败即停并把剩余步骤记 skipped，`onStep` 交出累积快照便于逐步落库；`Executor` 由调用方注入
+  - 三类能力（`internal/server/pipeline.go`）：`tool/<name>` 复用现有 AI 工具、`api/<path>` 仅站内 `/api/*`（`GenerateToken` 自签短期 token + `X-Org-Id` 带当前用户身份，经 `app.ServeHTTP` 内部调用）、`llm` 走 `aiChatOnce` 非流式生成
+  - 后台执行上下文：`withToolContext` 从 `app.ContextPool` 合成 `iris.Context` 预置 userID/orgID，`Request().Context()` 直接绑后台 run ctx，工具层零改动，与 1a 的 `aiToolRunCtx` 天然衔接
+  - 审批：`run_pipeline` 一次界面确认覆盖整条流程；写类工具与非 GET 的 api 步骤必须在 `allowWrite` 显式列出，否则该步失败（工具层与 HTTP 写操作统一预授权）
+  - 状态：迁移 000017 `pipeline_runs`（definition/status/steps/err_msg/时间戳，org+user 隔离），每步落库；`GET /api/pipeline/runs` 与 `/{id}` 查询；工具只回传步骤摘要，完整输出走查询接口
+  - 初始化循环规避：`aiTools` 直接引用 `execRunPipeline` 会形成「aiTools → execRunPipeline → execAITool → aiToolByName → aiTools」包级变量初始化环；改为 `pipelineTool()` 由 `allTools()` 运行时合成，`aiToolByName` 统一查合并表
+  - 形态取舍：保留 GitLab CI 的「声明式纯数据、逐步状态」，砍掉 stages/并行 job/artifacts/runner（单进程平台无构建集群）；步骤采用 GitHub Actions 式 `uses` + `with` + 插值，比 shell script 更贴合「每步是一种能力」
+  - 局限：第一版仅顺序执行，无模板存库 / HTTP 直调入口 / cron 触发 / 条件与重试（第 2、3 步）；Definition 目前来自工具参数（JSON）
 - **AI 对话后台运行结果前端恢复（1b）**：断连/刷新后自动按 runId 补齐后台跑完的回复，让 1a 落库的结果真正可见：
   - `chatStream` 新增 `onRunId` / `onDone` 回调并分发 `run_id` 事件；`onDone` 只在收到 `data: [DONE]` 时触发，用于区分「完整结束」与「静默断流」（后者 `reader.read()` 正常结束、不抛错）
   - `useAIChat` 把 runId 存入 `sessionStorage`；静默断流时保持 `streaming` 并启动 `pollRun`（2s 轮询 `/api/ai/runs/{id}`，上限 15min），不再补「（已中断）」占位；用户主动停止与业务错误仍走原有收尾

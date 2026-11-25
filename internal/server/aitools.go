@@ -311,6 +311,56 @@ var aiTools = []aiTool{
 	},
 }
 
+// pipelineTool 运行时合成的编排工具。不能直接放进 aiTools 包级注册表：
+// aiTools → execRunPipeline → execAITool → aiToolByName → aiTools
+// 会构成 Go 包级变量初始化循环，因此由 allTools 在读取时合成。
+func pipelineTool() aiTool {
+	return aiTool{
+		Name: "run_pipeline",
+		Desc: "按依赖编排执行一组能力：每步可以是现有 AI 工具、站内 API 或 LLM 生成。字符串参数支持 {{ steps.<id>.output }} 引用上一步输出；steps[].needs 声明依赖（缺省=依赖前一步即顺序执行，显式 []=无依赖可并行，填 id 列表组成 DAG），主流程失败即停；steps[].when 控制条件（on_success 默认 / on_failure / always，可写失败补偿步骤），steps[].retry 指定失败重试次数（0-5）。整条流程只需一次界面确认；写类工具与非 GET 的 api 步骤必须在 allowWrite 里显式授权。执行状态写入 pipeline_runs，可用 GET /api/pipeline/runs/{id} 查每步完整输出",
+		Params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string", "description": "流程名称"},
+				"allowWrite": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "显式授权：写类工具名（如 reindex_files），或非 GET 的 api 步骤（如 api/tasks）",
+				},
+				"steps": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"id": map[string]any{"type": "string", "description": "步骤唯一 id（字母/数字/_/-），供后续步骤引用"},
+							"needs": map[string]any{
+								"type":        "array",
+								"items":       map[string]any{"type": "string"},
+								"description": "依赖的步骤 id；不填=依赖前一步（顺序），填 []=无依赖可与同层并行，填多个 id 组成 DAG",
+							},
+							"when": map[string]any{
+								"type":        "string",
+								"enum":        []string{"on_success", "on_failure", "always"},
+								"description": "执行条件：默认 on_success（无失败才跑），on_failure 用于失败补偿，always 总是执行",
+							},
+							"retry": map[string]any{
+								"type":        "integer",
+								"description": "失败重试次数 0-5，按 200ms×次数退避",
+							},
+							"uses": map[string]any{"type": "string", "description": "tool/<工具名> | api/<站内 api 路径，如 ai/reindex/status> | llm"},
+							"with": map[string]any{"type": "object", "description": "步骤参数；llm 用 prompt，api 可用 method/body，字符串值支持 {{ steps.<id>.output }}"},
+						},
+						"required": []string{"id", "uses"},
+					},
+				},
+			},
+			"required": []string{"steps"},
+		},
+		NeedApproval: true,
+		Exec:         execRunPipeline,
+	}
+}
+
 // aiToolsPayload 组装 OpenAI /chat/completions 的 tools 参数
 func aiToolsPayload(tools []aiTool) []map[string]any {
 	payloads := make([]map[string]any, 0, len(tools))

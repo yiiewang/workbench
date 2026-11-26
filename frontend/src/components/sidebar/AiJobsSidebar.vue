@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// AI 定时任务侧栏：任务列表（名称 + cron + 启用状态点），点击在主区域打开。
+// 定时任务侧栏：任务列表（名称 + cron + 启用状态点），点击在主区域打开。
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listAIJobs, type AIJob } from '../../api/aiJobs'
@@ -19,7 +19,7 @@ function syncFromRoute() {
 }
 
 function open(id: number | 'new') {
-  router.push({ query: { id: String(id) } })
+  router.push({ query: { id: id === 'new' ? 'new' : String(id) } })
 }
 
 async function load() {
@@ -41,6 +41,7 @@ onUnmounted(() => window.removeEventListener('aijobs:changed', onChanged))
 
 <template>
   <div class="aijobs-sidebar">
+    <div class="aijobs-sidebar-head">定时任务</div>
     <button class="aijobs-new" @click="open('new')">＋ 新建任务</button>
     <div v-if="loading && !jobs.length" class="aijobs-s-empty">加载中…</div>
     <div v-else-if="!jobs.length" class="aijobs-s-empty">暂无任务</div>
@@ -65,6 +66,11 @@ onUnmounted(() => window.removeEventListener('aijobs:changed', onChanged))
 
 <style scoped>
 .aijobs-sidebar { padding: 12px; display: flex; flex-direction: column; gap: 4px; }
+.aijobs-sidebar-head {
+  padding: 2px 0 10px; font-size: 11px; font-weight: 600; letter-spacing: .8px;
+  color: var(--text-dim); text-transform: uppercase; border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
 .aijobs-new {
   border: 1px dashed var(--border); background: none; color: var(--accent);
   border-radius: 8px; padding: 8px; font-size: 12px; cursor: pointer; margin-bottom: 6px;

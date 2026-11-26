@@ -1,10 +1,15 @@
 <script setup lang="ts">
 // AI 定时任务主区域：选中任务（route query id）的详情编辑 + 执行历史。
 // 任务列表在侧栏（AiJobsSidebar），选中经 route query ?id= 同步。
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listAIJobs, listAIJobRuns, createAIJob, updateAIJob, deleteAIJob, type AIJob, type AIJobRun } from '../api/aiJobs'
+import {
+  runPipeline, getPipelineRun, streamPipelineRun,
+  type PipelineStepResult, type PipelineGraphStep,
+} from '../api/pipelines'
 import { showToast } from '../lib/common'
+import PipelineGraph from '../components/pipeline/PipelineGraph.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -28,12 +33,130 @@ const form = ref({
   path: '',
   query: '',
   body: '',
-  templateId: '',
   definition: '',
   allowWrite: '',
   retry: 0,
 })
 const runsOpen = ref(new Set<number>())
+
+const DEFAULT_DEF = JSON.stringify({
+  name: '索引巡检',
+  allowWrite: [],
+  steps: [
+    { id: 'check', uses: 'tool/reindex_status' },
+    { id: 'summary', uses: 'llm', with: { prompt: '根据 {{ steps.check.output }} 用一句话总结索引状态' } },
+  ],
+}, null, 2)
+
+// 编排可视化：JSON / 流程图切换、节点 Inspector、运行状态叠加
+const showJson = ref(false)
+const inspected = ref<{ step: PipelineGraphStep; result?: PipelineStepResult } | null>(null)
+const activeRunId = ref<string | null>(null)
+const runSteps = ref<PipelineStepResult[] | undefined>(undefined)
+const running = ref(false)
+// 立即执行后的实时订阅：SSE 连接的 AbortController 与「运行中」指示
+const runStreamAbort = ref<AbortController | null>(null)
+const streaming = ref(false)
+
+/** 停掉进行中的实时订阅（切换叠加目标 / 清除状态 / 离开页面） */
+function stopRunStream() {
+  runStreamAbort.value?.abort()
+  runStreamAbort.value = null
+  streaming.value = false
+}
+
+onBeforeUnmount(stopRunStream)
+
+function pretty(v: unknown): string {
+  if (v === undefined || v === null) return '—'
+  if (typeof v === 'string') return v
+  return JSON.stringify(v, null, 2)
+}
+const inspectedOutput = computed(() => {
+  const r = inspected.value?.result
+  if (!r) return '（未叠加运行状态）'
+  if (r.error) return r.error
+  return pretty(r.output ?? '（无输出）')
+})
+const needsText = computed(() => {
+  const n = inspected.value?.step.needs
+  if (n === undefined) return '默认：依赖前一步'
+  if (!n.length) return '[]（无依赖，可并行）'
+  return n.join('、')
+})
+
+async function overlayRun(runId: string) {
+  if (activeRunId.value === runId) {
+    activeRunId.value = null
+    runSteps.value = undefined
+    stopRunStream()
+    return
+  }
+  stopRunStream()
+  try {
+    const detail = await getPipelineRun(runId)
+    activeRunId.value = runId
+    runSteps.value = detail.steps
+  } catch {
+    showToast('加载编排运行详情失败')
+  }
+}
+
+async function runNow() {
+  let def: unknown
+  try {
+    def = JSON.parse(form.value.definition || DEFAULT_DEF)
+  } catch {
+    showToast('Definition 不是合法 JSON')
+    return
+  }
+  running.value = true
+  try {
+    const data = await runPipeline(def)
+    showToast('已在后台启动，runId：' + data.runId)
+    if (typeof selected.value === 'number') await loadRuns(selected.value)
+    // 叠加本次运行并建立 SSE 实时订阅：连接建立即推首份快照，
+    // 之后每个 DAG 层落库都会推新快照，流程图节点状态实时刷新
+    stopRunStream()
+    activeRunId.value = data.runId
+    runSteps.value = []
+    const ac = new AbortController()
+    runStreamAbort.value = ac
+    streaming.value = true
+    streamPipelineRun(data.runId, {
+      signal: ac.signal,
+      onProgress: (r) => {
+        if (activeRunId.value !== data.runId) return // 已切换/清除叠加目标
+        runSteps.value = r.steps
+      },
+    })
+      .catch(async (e: any) => {
+        // 断流兜底：拉一次最终详情补齐（非 end 结束 = 连接异常中断）
+        if (activeRunId.value !== data.runId) return
+        try {
+          const detail = await getPipelineRun(data.runId)
+          runSteps.value = detail.steps
+          if (detail.status !== 'running') showToast('实时连接中断，已拉取最终结果')
+        } catch {
+          showToast('实时连接中断：' + (e?.message || ''))
+        }
+      })
+      .finally(() => {
+        if (runStreamAbort.value === ac) {
+          runStreamAbort.value = null
+          streaming.value = false
+        }
+        // 终态后刷新执行记录（断流兜底分支同样会走到这里）
+        if (activeRunId.value === data.runId && typeof selected.value === 'number') {
+          loadRuns(selected.value)
+        }
+      })
+  } catch (e: any) {
+    showToast('触发失败：' + (e?.msg || e?.message || ''))
+  } finally {
+    running.value = false
+  }
+}
 
 function validateForm(): string {
   if (!form.value.name.trim()) return '任务名称必填'
@@ -49,7 +172,7 @@ function validateForm(): string {
       if (!form.value.path.trim()) return '接口路径必填'
       break
     case 'pipeline':
-      if (!form.value.templateId.trim() && !form.value.definition.trim()) return '编排模板 ID 或 Definition 必填'
+      if (!form.value.definition.trim()) return '编排 Definition 必填'
       break
   }
   return ''
@@ -86,13 +209,8 @@ function buildBody(): any {
           body: parseJSONField(form.value.body, 'body'),
         },
       }
-    case 'pipeline': {
-      const templateId = Number(form.value.templateId)
-      if (Number.isFinite(templateId) && templateId > 0) {
-        return { ...common, target: { type: 'pipeline', templateId } }
-      }
+    case 'pipeline':
       return { ...common, target: { type: 'pipeline', definition: parseJSONField(form.value.definition, 'Definition') } }
-    }
   }
 }
 
@@ -110,8 +228,7 @@ function fillForm(j: AIJob) {
     path: t?.path || '',
     query: t?.query ? JSON.stringify(t.query, null, 2) : '',
     body: t?.body ? JSON.stringify(t.body, null, 2) : '',
-    templateId: t?.templateId ? String(t.templateId) : '',
-    definition: t?.definition ? JSON.stringify(t.definition, null, 2) : '',
+    definition: t?.definition ? JSON.stringify(t.definition, null, 2) : DEFAULT_DEF,
     allowWrite: (j.allowWrite || []).join(', '),
     retry: j.retry || 0,
   }
@@ -157,11 +274,15 @@ async function loadRuns(id: number) {
 // 选中变化：new → 空表单；数字 → 填表单 + 拉执行历史
 watch(selected, async (sel) => {
   runs.value = []
+  showJson.value = false
+  activeRunId.value = null
+  runSteps.value = undefined
+  inspected.value = null
   if (sel === 'new') {
     form.value = {
       name: '', cronExpr: '0 18 * * *', prompt: '', enabled: true,
       targetType: 'ai', tool: '', toolParams: '', method: 'GET', path: '',
-      query: '', body: '', templateId: '', definition: '', allowWrite: '', retry: 0,
+      query: '', body: '', definition: DEFAULT_DEF, allowWrite: '', retry: 0,
     }
     return
   }
@@ -269,6 +390,9 @@ function statusText(j: AIJob): string {
         <p v-if="selectedJob" class="aijobs-status">{{ statusText(selectedJob) }}</p>
       </div>
       <div class="aijobs-head-actions">
+        <button v-if="form.targetType === 'pipeline'" class="btn" :disabled="running" @click="runNow">
+          {{ running ? '启动中…' : '立即执行' }}
+        </button>
         <button
           v-if="selected !== 'new' && !selectedJob?.isGlobal"
           class="btn" :class="form.enabled ? '' : 'btn-primary'"
@@ -279,8 +403,8 @@ function statusText(j: AIJob): string {
       </div>
     </div>
 
-    <div class="aijobs-grid">
-      <!-- 左：任务详情卡片 -->
+    <div class="aijobs-scroll">
+      <!-- 任务详情卡片 -->
       <section class="aijobs-card">
         <div class="aijobs-card-head">
           <span class="aijobs-card-title">任务详情</span>
@@ -353,13 +477,8 @@ function statusText(j: AIJob): string {
 
           <template v-else>
             <div class="form-row">
-              <label>编排模板 ID（优先；留空则用下方 Definition）</label>
-              <input v-model="form.templateId" class="form-input mono" placeholder="如：3" />
-            </div>
-            <div class="form-row">
-              <label>Definition（JSON，可选）</label>
-              <textarea v-model="form.definition" class="form-input mono" rows="8"
-                placeholder='{"name":"收盘总结","steps":[{"id":"run","uses":"llm"}]}'></textarea>
+              <label>Definition（编排流程，由 AI 生成或手动编辑）</label>
+              <p class="form-hint">流程内联在本任务里；下方流程图可查看节点依赖与运行状态，也可切换回 JSON 编辑。</p>
             </div>
           </template>
 
@@ -381,7 +500,66 @@ function statusText(j: AIJob): string {
         </div>
       </section>
 
-      <!-- 右：执行记录卡片 -->
+      <!-- 编排流程图 + 节点 Inspector -->
+      <div v-if="form.targetType === 'pipeline'" class="pipe-main">
+        <section class="pipe-board">
+          <div class="pipe-board-head">
+            <span class="aijobs-card-title">流程图</span>
+            <div class="pipe-board-tools">
+              <span v-if="streaming" class="pipe-live">运行中…</span>
+              <button v-if="activeRunId" class="pipe-tool pipe-tool-on" @click="overlayRun(activeRunId)">清除运行状态</button>
+              <button class="pipe-tool" :class="{ 'pipe-tool-on': showJson }" @click="showJson = !showJson">
+                {{ showJson ? '返回流程图' : '查看 / 编辑 JSON' }}
+              </button>
+            </div>
+          </div>
+          <div v-if="showJson" class="pipe-json">
+            <textarea v-model="form.definition" class="form-input mono" rows="16" spellcheck="false"></textarea>
+            <p class="form-hint">
+              uses 支持 tool/&lt;工具名&gt;、api/&lt;站内路径&gt;、llm；needs 不填 = 依赖前一步，
+              填 [] = 同层并行，填 id 列表 = DAG；when 可选 on_success / on_failure / always，retry 为 0–5；
+              写类工具与非 GET 的 api 步骤须列入静态预授权。
+            </p>
+          </div>
+          <PipelineGraph v-else :definition="form.definition" :steps="runSteps" @select="inspected = $event" />
+        </section>
+
+        <aside class="pipe-inspector">
+          <div class="aijobs-card-title">节点详情</div>
+          <template v-if="inspected">
+            <div class="pi-head">
+              <code>{{ inspected.step.id }}</code>
+              <button class="pi-close" @click="inspected = null">×</button>
+            </div>
+            <div class="pi-row"><label>能力</label><code>{{ inspected.step.uses }}</code></div>
+            <div class="pi-row"><label>依赖 needs</label><span>{{ needsText }}</span></div>
+            <div class="pi-row"><label>条件 when</label><span>{{ inspected.step.when || 'on_success' }}</span></div>
+            <div class="pi-row"><label>重试 retry</label><span>{{ inspected.step.retry || 0 }}</span></div>
+            <div class="pi-row" v-if="inspected.result">
+              <label>运行状态</label>
+              <span class="pi-state" :class="inspected.result.status">{{ inspected.result.status }}</span>
+            </div>
+            <div class="pi-block">
+              <label>参数 with</label>
+              <pre>{{ pretty(inspected.step.with) }}</pre>
+            </div>
+            <div class="pi-block">
+              <label>输出 / 错误</label>
+              <pre>{{ inspectedOutput }}</pre>
+            </div>
+          </template>
+          <div v-else class="pi-empty">
+            点击流程图中的节点查看定义与运行结果。
+            <div class="pi-legend">
+              <span><i class="lg tool"></i>AI 工具</span>
+              <span><i class="lg api"></i>站内 API</span>
+              <span><i class="lg llm"></i>LLM 生成</span>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <!-- 执行记录卡片 -->
       <section v-if="typeof selected === 'number'" class="aijobs-card">
         <div class="aijobs-card-head">
           <span class="aijobs-card-title">执行记录</span>
@@ -400,7 +578,9 @@ function statusText(j: AIJob): string {
             </button>
             <div v-show="runsOpen.has(i)" class="aijob-run-detail">
               <pre class="aijob-run-output">{{ r.output || '（无输出）' }}</pre>
-              <a v-if="r.pipelineRunId" class="aijob-run-link" :href="`/pipelines?run=${r.pipelineRunId}`" target="_blank" rel="noopener">查看编排运行详情</a>
+              <button v-if="r.pipelineRunId" class="aijob-run-link" @click="overlayRun(r.pipelineRunId!)">
+                {{ activeRunId === r.pipelineRunId ? '已叠加 · 点击取消' : '叠加到流程图' }}
+              </button>
             </div>
           </div>
         </div>
@@ -411,23 +591,14 @@ function statusText(j: AIJob): string {
 </template>
 
 <style scoped>
-/* 铺满可用宽度：不设 max-width，两栏按 1.1:1 自动分配（宽屏左右不留白） */
+/* 主区域：标题行固定，内容整体纵向滚动，避免嵌套 flex 高度塌陷 */
 .aijobs-page { padding: 24px 28px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; min-height: 0; }
-/* 左右两栏：左详情卡片，右执行记录卡片（窄屏回落单列）；
-   grid 占满剩余高度，两卡片等高拉伸 */
-.aijobs-grid {
-  display: grid;
-  grid-template-columns: minmax(340px, 1.1fr) minmax(320px, 1fr);
-  gap: 20px;
-  align-items: stretch;
-  flex: 1;
-  min-height: 0;
-}
-@media (max-width: 1000px) {
-  .aijobs-grid { grid-template-columns: 1fr; }
-}
+/* 子项禁止收缩：flex 列默认 shrink=1 会把卡片压扁并裁掉内容，
+   超出高度应由外层滚动，而不是压缩单个区块 */
+.aijobs-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-bottom: 24px; }
+.aijobs-scroll > * { flex-shrink: 0; }
 
-/* 卡片容器：两栏统一视觉基座 */
+/* 卡片容器 */
 .aijobs-card {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -484,8 +655,8 @@ textarea.form-input { resize: vertical; line-height: 1.6; }
 .form-hint { font-size: 11px; color: var(--text-muted); margin: 6px 0 0; line-height: 1.5; }
 .form-row-inline .switch-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
 
-/* 右栏执行记录：占满卡片剩余高度（由 grid 拉伸决定） */
-.aijobs-card-body { padding: 12px; overflow-y: auto; flex: 1; min-height: 0; }
+/* 执行记录 */
+.aijobs-card-body { padding: 12px; }
 .aijob-runs-empty {
   font-size: 12px; color: var(--text-dim); padding: 40px 0; text-align: center; line-height: 1.8;
 }
@@ -518,6 +689,65 @@ textarea.form-input { resize: vertical; line-height: 1.6; }
 }
 .aijob-run-detail { border-top: 1px solid var(--border); }
 .aijob-run-detail .aijob-run-output { border-top: none; }
-.aijob-run-link { display: inline-block; padding: 6px 12px 10px; font-size: 11px; color: var(--accent); text-decoration: none; }
+.aijob-run-link {
+  display: inline-block; padding: 6px 12px 10px; font-size: 11px; color: var(--accent);
+  text-decoration: none; border: none; background: none; cursor: pointer;
+}
 .aijob-run-link:hover { text-decoration: underline; }
+
+/* 流程图 + Inspector：默认上下堆叠，只有足够宽的主区域才并排。
+   侧栏 + activity bar 会吃掉 ~290px，视口宽度不能代表这里可用宽度。 */
+.pipe-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+@media (min-width: 1700px) { .pipe-main { grid-template-columns: minmax(0, 1fr) 280px; } }
+.pipe-board {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg);
+  display: flex; flex-direction: column; min-width: 0; height: 320px; overflow: hidden;
+}
+.pipe-board-head {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  border-bottom: 1px solid var(--border); background: var(--code-bg);
+}
+.pipe-board-tools { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.pipe-live {
+  color: var(--text-dim); font-size: 11px; white-space: nowrap;
+}
+.pipe-live::before {
+  content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); margin-right: 5px; vertical-align: 1px;
+  animation: pipe-live-blink 1.2s ease-in-out infinite;
+}
+@keyframes pipe-live-blink { 50% { opacity: 0.25; } }
+.pipe-tool {
+  border: 1px solid var(--border); background: var(--bg); color: var(--text-dim);
+  border-radius: 8px; padding: 3px 10px; font-size: 11px; cursor: pointer; white-space: nowrap;
+}
+.pipe-tool:hover, .pipe-tool-on { color: var(--accent); border-color: var(--accent); }
+.pipe-json { padding: 14px; overflow: auto; }
+
+.pipe-inspector {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg);
+  padding: 12px 14px; overflow: auto; max-height: 340px;
+}
+.pi-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 12px; }
+.pi-head code { font-size: 14px; font-weight: 650; color: var(--text); }
+.pi-close { margin-left: auto; border: none; background: none; color: var(--text-dim); font-size: 18px; cursor: pointer; line-height: 1; }
+.pi-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; font-size: 12px; }
+.pi-row label, .pi-block label { color: var(--text-dim); font-size: 10px; min-width: 66px; }
+.pi-row code, .pi-row span { color: var(--text); word-break: break-all; }
+.pi-state { font-size: 10px; padding: 1px 7px; border-radius: 8px; border: 1px solid var(--border); }
+.pi-state.ok { color: #2e7d32; }
+.pi-state.failed { color: #cf222e; }
+.pi-block { margin-top: 10px; }
+.pi-block label { display: block; margin-bottom: 4px; }
+.pi-block pre {
+  margin: 0; padding: 8px; border-radius: 8px; background: var(--code-bg);
+  font-size: 10px; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: auto;
+}
+.pi-empty { font-size: 12px; color: var(--text-dim); line-height: 1.8; margin-top: 16px; }
+.pi-legend { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; font-size: 11px; }
+.pi-legend span { display: flex; align-items: center; gap: 6px; }
+.lg { width: 4px; height: 12px; border-radius: 2px; display: inline-block; }
+.lg.tool { background: #3b82f6; }
+.lg.api { background: #8b5cf6; }
+.lg.llm { background: #10a37f; }
 </style>

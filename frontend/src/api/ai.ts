@@ -184,7 +184,7 @@ export async function getAIStatus(): Promise<AIStatus> {
 }
 
 // 401 全局处理：token 过期清登录态并跳登录页（与 apiCall 行为一致）
-function handleUnauthorized() {
+export function handleUnauthorized() {
   clearAuthState()
   const current = window.location.pathname + window.location.search
   if (!current.startsWith('/login')) {

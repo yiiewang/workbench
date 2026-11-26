@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // PC 端 AI 对话浮动面板：核心对话逻辑在 composables/useAIChat（与移动端 MAI 共用），
 // 本组件只保留面板形态特有部分：fab/开关、宽度拖拽、外部事件监听。
-import { ref, computed, nextTick, onMounted, onUnmounted, provide } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted, provide } from 'vue'
 import { loggedIn } from '../../stores/auth'
 import { showToast } from '../../lib/common'
 import { hasOpenModal } from '../../lib/modalEsc'
@@ -64,6 +64,11 @@ const railTabs: { id: RailTab; label: string }[] = [
   { id: 'toc', label: '目录' },
 ]
 
+function loadRailData(tab: RailTab) {
+  if (tab === 'sessions') loadSessions()
+  if (tab === 'index') loadIndexStatus()
+}
+
 function openRail(tab: RailTab) {
   if (railOpen.value && railTab.value === tab) {
     railOpen.value = false
@@ -71,9 +76,20 @@ function openRail(tab: RailTab) {
   }
   railTab.value = tab
   railOpen.value = true
-  if (tab === 'sessions') loadSessions()
-  if (tab === 'index') loadIndexStatus()
+  loadRailData(tab)
 }
+
+// 标题栏图标是第二个打开侧栏的入口，之前只切 railOpen 不拉数据，
+// 于是默认「会话」tab 显示 0 个会话，必须手动点刷新。
+function toggleRail() {
+  railOpen.value = !railOpen.value
+  if (railOpen.value) loadRailData(railTab.value)
+}
+
+// 会话首次落库后列表仍是空的（侧栏打开时不会重拉），补一次刷新
+watch(dbSessionId, (id) => {
+  if (id != null && railOpen.value && railTab.value === 'sessions') loadSessions()
+})
 
 // 索引状态数据（RAG 可视化：哪些文件已索引/失败）
 const indexLoading = ref(false)
@@ -273,7 +289,7 @@ function onResizeStart(e: MouseEvent) {
 
       <div class="ai-header">
         <div class="ai-title-wrap">
-          <button class="ai-icon-btn" :class="{ active: railOpen }" :title="railOpen ? '收起侧栏 (Esc)' : '展开侧栏'" @click="railOpen = !railOpen">
+          <button class="ai-icon-btn" :class="{ active: railOpen }" :title="railOpen ? '收起侧栏 (Esc)' : '展开侧栏'" @click="toggleRail">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>
             </svg>
@@ -523,14 +539,14 @@ function onResizeStart(e: MouseEvent) {
   overflow: hidden;
 }
 
-/* 剧场模式：脱离 fab 锚定，视口居中放大（不遮挡整个屏幕，背景仍可见） */
+/* 剧场模式：脱离 fab 锚定，视口居中放大（不遮挡整个屏幕，背景仍可见）。
+   不用 transform 居中：position:fixed + transform 会新建合成层，面板内流式
+   动态插入内容时 Chrome 的命中区域不会跟着更新，表现为按钮点不动、resize
+   重排后才可点。改用 inset:0 + margin:auto，居中同样成立且无合成层副作用。 */
 .ai-panel.theater {
   position: fixed;
-  left: 50%;
-  top: 50%;
-  right: auto;
-  bottom: auto;
-  transform: translate(-50%, -50%);
+  inset: 0;
+  margin: auto;
   width: min(1100px, calc(100vw - 80px));
   height: min(820px, calc(100vh - 60px));
   z-index: 1500;

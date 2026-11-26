@@ -1,5 +1,5 @@
 // 通用定时触发规则 API（/api/schedule/triggers）
-// 规则属于调度领域：指向「某类目标对象 + cron」，模板本身只存 Definition。
+// 规则属于调度领域：指向「某类目标对象 + cron」，执行定义由目标对象自己持有。
 import { apiCall } from '../lib/common'
 
 export interface CronTrigger {

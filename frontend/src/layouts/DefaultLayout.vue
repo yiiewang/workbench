@@ -45,7 +45,6 @@ const isExplorerActive = computed(() =>
 const isSharesActive = computed(() => route.path === '/shares')
 const isTodoActive = computed(() => route.path === '/todo')
 const isJobsActive = computed(() => route.path === '/jobs')
-const isPipelinesActive = computed(() => route.path === '/pipelines')
 const isAdminActive = computed(() => route.path === '/admin')
 
 // 首页（/）无侧栏：隐藏 sidebar/resizer/toggle，主区域占满
@@ -105,7 +104,6 @@ function handleExplorerClick() { router.push('/file'); ensureMobileDrawer() }
 function handleShareClick() { router.push('/shares'); ensureMobileDrawer() }
 function handleTodoClick() { router.push('/todo'); ensureMobileDrawer() }
 function handleJobsClick() { router.push('/jobs'); ensureMobileDrawer() }
-function handlePipelinesClick() { router.push('/pipelines'); ensureMobileDrawer() }
 function handleAdminClick() { router.push('/admin'); ensureMobileDrawer() }
 
 // 用户信息弹窗显隐
@@ -162,10 +160,6 @@ async function onSwitchOrg(orgId: number) {
   <div v-if="loggedIn" class="activity-item" :class="{ active: isJobsActive }" title="定时任务" @click="handleJobsClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
     <span class="activity-label">定时</span>
-  </div>
-  <div v-if="loggedIn" class="activity-item" :class="{ active: isPipelinesActive }" title="编排模板" @click="handlePipelinesClick">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6h6M14 6h6M4 12h6M14 12h6M4 18h6M14 18h6"/><circle cx="12" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="18" r="2"/></svg>
-    <span class="activity-label">编排</span>
   </div>
   <div v-if="canManageUsers" class="activity-item" :class="{ active: isAdminActive }" title="用户管理" @click="handleAdminClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>

@@ -129,3 +129,21 @@ func TestReindexTreePrunesOrphans(t *testing.T) {
 		t.Fatalf("progress.Pruned = %d, want 2", p.Pruned)
 	}
 }
+
+// MarkReindexStarted 预写 running 快照：startReindex 返回后立即查 ProgressOf
+// 必须拿到 running=true（否则紧随其后的 reindex_status 误报「尚未触发过」，
+// 流水线 reindex → status 背靠背步骤命中该窗口）。
+func TestMarkReindexStarted(t *testing.T) {
+	s := &Service{}
+	s.MarkReindexStarted(1, 10)
+	p := s.ProgressOf(1, 10)
+	if p == nil {
+		t.Fatal("ProgressOf returned nil right after MarkReindexStarted")
+	}
+	if !p.Running || p.Owner != "1:10" || p.Total != 0 || p.StartedAt == "" {
+		t.Fatalf("unexpected initial snapshot: %+v", p)
+	}
+	if q := s.ProgressOf(2, 20); q != nil {
+		t.Fatalf("progress leaked to other owner: %+v", q)
+	}
+}

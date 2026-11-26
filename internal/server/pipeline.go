@@ -51,6 +51,15 @@ func (s *Server) withToolContext(ctx context.Context, orgID, userID int64, fn fu
 	defer s.app.ContextPool.Release(ictx)
 	ictx.Values().Set("userID", userID)
 	ictx.Values().Set("orgID", orgID)
+	// 真实请求的 userName/orgName 由 auth 中间件写入，工具层依赖它们拼
+	// 用户目录（userRoot）；定时任务没有中间件，这里按 id 反查补齐，
+	// 否则 userRoot 返回空串（表现为 reindex_files 扫空目录"成功"结束）
+	if s.db != nil {
+		if orgName, userName, err := s.db.GetUserNames(ctx, orgID, userID); err == nil {
+			ictx.Values().Set("userName", userName)
+			ictx.Values().Set("orgName", orgName)
+		}
+	}
 	return fn(ictx)
 }
 
@@ -144,7 +153,7 @@ func (s *Server) execPipelineAPI(ctx context.Context, name string, args map[stri
 }
 
 // runPipeline 编排执行核心：与 HTTP 上下文解耦，AI 工具 / HTTP 直调 /
-// cron / 模板触发共用。逐步落库，返回步骤结果与最终错误。
+// 定时任务触发共用。逐步落库，返回步骤结果与最终错误。
 func (s *Server) runPipeline(ctx context.Context, orgID, userID int64, runID string, def pipeline.Definition) ([]pipeline.StepResult, error) {
 	defJSON, _ := json.Marshal(def)
 	if err := s.db.CreatePipelineRun(ctx, orgID, userID, runID, def.Name, string(defJSON)); err != nil {

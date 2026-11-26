@@ -62,13 +62,6 @@ const cards = computed<FeatureCard[]>(() => {
       path: '/jobs',
       icon: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>',
     })
-    list.push({
-      key: 'pipelines',
-      title: '编排模板',
-      desc: '把多步能力固化成可复用、可定时的流程',
-      path: '/pipelines',
-      icon: '<path d="M4 6h6M14 6h6M4 12h6M14 12h6M4 18h6M14 18h6"/><circle cx="12" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="18" r="2"/>',
-    })
   }
   if (canManageUsers.value) {
     list.push({

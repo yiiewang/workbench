@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 编排流程图：模板详情的主体视图。SVG 连线 + 卡片节点，无第三方图库。
+// 编排流程图：定时任务内联 Definition 的主体视图。SVG 连线 + 卡片节点，无第三方图库。
 // 分层规则复刻 internal/pipeline 的 needs 语义：
 //   缺省 = 依赖数组前一步（顺序）、[] = 无依赖可并行、id 列表 = 菱形 DAG。
 // steps 传入时叠加运行状态；点击节点 emit select，详情由父级 Inspector 展示。
@@ -187,7 +187,7 @@ function toggle(n: LayoutNode) {
   emit('select', selectedId.value ? { step: n.step, result: n.result } : null)
 }
 
-// 模板 JSON 或叠加的运行状态变化时，同步刷新 Inspector（或清空选中）
+// Definition JSON 或叠加的运行状态变化时，同步刷新 Inspector（或清空选中）
 watch([() => props.definition, () => props.steps], () => {
   const n = layout.value.nodes.find(x => x.step.id === selectedId.value)
   if (!n) {

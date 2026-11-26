@@ -6,7 +6,7 @@ package server
 //   ai        → 单 llm 步（prelude 渲染 prompt + 任务数据 + RAG）
 //   tool      → 单 tool/<name> 步
 //   interface → 单 api/<path> 步（站内 /api/*）
-//   pipeline  → 原样 Definition（内联或模板引用）
+//   pipeline  → 原样 Definition（内联）
 //
 // 校验先走编排既有 Definition.Validate，再补调度专用规则：
 //   - 递归/自修改黑名单（禁止再起对话、改任务配置、触发编排）
@@ -35,7 +35,6 @@ type aiJobTarget struct {
 	Path       string               `json:"path,omitempty"`
 	Query      map[string]any       `json:"query,omitempty"`
 	Body       any                  `json:"body,omitempty"`
-	TemplateID int64                `json:"templateId,omitempty"`
 	Definition *pipeline.Definition `json:"definition,omitempty"`
 	Params     map[string]any       `json:"params,omitempty"`
 }
@@ -97,8 +96,8 @@ func (t aiJobTarget) validate() error {
 			return fmt.Errorf("interface target requires path")
 		}
 	case aiJobTypePipeline:
-		if t.Definition == nil && t.TemplateID <= 0 {
-			return fmt.Errorf("pipeline target requires definition or templateId")
+		if t.Definition == nil {
+			return fmt.Errorf("pipeline target requires definition")
 		}
 	default:
 		return fmt.Errorf("unknown target type %q", t.Type)
@@ -164,21 +163,7 @@ func (s *Server) buildAIJobDefinition(ctx context.Context, job db.AIJobWithOwner
 			Steps: []pipeline.Step{{ID: "run", Uses: "api/" + strings.TrimPrefix(t.Path, "/"), With: with}},
 		}
 	case aiJobTypePipeline:
-		if t.Definition != nil {
-			def = *t.Definition
-		} else {
-			tpl, ok, err := s.db.GetPipelineTemplate(ctx, job.OrgID, job.UserID, t.TemplateID)
-			if err != nil {
-				return pipeline.Definition{}, err
-			}
-			if !ok {
-				return pipeline.Definition{}, fmt.Errorf("pipeline template %d not found", t.TemplateID)
-			}
-			def, err = parsePipelineDefinition(tpl.Definition)
-			if err != nil {
-				return pipeline.Definition{}, err
-			}
-		}
+		def = *t.Definition
 		if def.Name == "" {
 			def.Name = job.Name
 		}
@@ -186,7 +171,7 @@ func (s *Server) buildAIJobDefinition(ctx context.Context, job db.AIJobWithOwner
 			def = expandJobParams(def, t.Params)
 		}
 	}
-	// 定时执行的授权以任务创建时的静态清单为准；模板自带的 allowWrite 不参与。
+	// 定时执行的授权以任务创建时的静态清单为准；Definition 自带的 allowWrite 不参与。
 	def.AllowWrite = job.AllowWrite
 	return def, nil
 }

@@ -53,15 +53,24 @@ func TestValidateScheduleTriggerCron(t *testing.T) {
 	}
 }
 
-// 目标归属由 server 装配层校验：schedule 包不认识 pipeline，
-// 但 API 必须拒绝指向别人模板 / 未注册类型 / 非法 id 的规则。
+// 目标归属由 server 装配层校验：schedule 包不认识业务对象，
+// 但 API 必须拒绝指向别人任务 / 未注册类型 / 非法 id 的规则。
 func TestValidateTriggerTarget(t *testing.T) {
 	d, err := db.Open(filepath.Join(t.TempDir(), "triggers.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	id, err := d.CreatePipelineTemplate(context.Background(), 1, 2, "日报", `{"steps":[]}`)
+	ctx := context.Background()
+	orgID, err := d.EnsureOrg(ctx, "triggers-org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userID, err := d.UpsertUser(ctx, orgID, "alice", "hash", db.RoleIDUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := d.CreateAIJob(ctx, orgID, userID, "日报", "0 9 * * *", "总结今天", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,12 +94,13 @@ func TestValidateTriggerTarget(t *testing.T) {
 		targetID   int64
 		ok         bool
 	}{
-		{"owned template", 1, 2, "pipeline_template", id, true},
-		{"other user", 1, 9, "pipeline_template", id, false},
-		{"other org", 9, 2, "pipeline_template", id, false},
-		{"unknown target type", 1, 2, "mystery", id, false},
-		{"invalid id", 1, 2, "pipeline_template", 0, false},
-		{"missing template", 1, 2, "pipeline_template", id + 999, false},
+		{"owned job", orgID, userID, "job", id, true},
+		{"removed template type", orgID, userID, "pipeline_template", id, false},
+		{"other user", orgID, userID + 999, "job", id, false},
+		{"other org", orgID + 999, userID, "job", id, false},
+		{"unknown target type", orgID, userID, "mystery", id, false},
+		{"invalid id", orgID, userID, "job", 0, false},
+		{"missing job", orgID, userID, "job", id + 999, false},
 	}
 	for _, c := range cases {
 		ictx := makeCtx(c.orgID, c.userID)
@@ -104,7 +114,7 @@ func TestValidateTriggerTarget(t *testing.T) {
 			t.Errorf("%s: ok=%v want %v", c.name, ok, c.ok)
 		}
 	}
-	if !supportedTriggerTargets["pipeline_template"] {
-		t.Fatal("pipeline_template must be registered as a trigger target")
+	if !supportedTriggerTargets["job"] {
+		t.Fatal("job must be registered as a trigger target")
 	}
 }

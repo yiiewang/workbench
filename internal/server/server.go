@@ -73,7 +73,7 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 		adminRoot:   adminRoot,
 		tokenSecret: tokenSecret,
 		logFile:     logFile,
-		// cron 在 New 内即 Start，编排模板可能早于 App() 装配路由触发；
+		// cron 在 New 内即 Start，定时任务可能早于 App() 装配路由触发；
 		// 提前建好 app，让工具执行所需的 ContextPool 始终可用。
 		app: iris.New(),
 	}
@@ -108,10 +108,9 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 			return nil, fmt.Errorf("init time reminder job: %w", terr)
 		}
 		sched.AddJob(timeJob)
-		// 通用定时触发：schedule 只按 target_type 分发，pipeline / 定时任务各自注册执行入口
+		// 通用定时触发：schedule 只按 target_type 分发，装配层注册执行入口
 		triggersJob, tjerr := schedule.NewTriggersJob(database, map[string]schedule.TriggerHandler{
-			"pipeline_template": srv.triggerPipelineTemplate,
-			"job":               srv.triggerJob,
+			"job": srv.triggerJob,
 		}, loc)
 		if tjerr != nil {
 			return nil, fmt.Errorf("init cron triggers job: %w", tjerr)
@@ -227,16 +226,9 @@ func (s *Server) App() *iris.Application {
 	// 编排运行状态（每步结果，断连后仍可查询）
 	api.Get("/pipeline/runs", auth, s.handlePipelineRunsList)
 	api.Get("/pipeline/runs/{id}", auth, s.handlePipelineRunGet)
-	// 编排执行与模板（Definition 直调 / 固化复用 / 定时触发）
+	api.Get("/pipeline/runs/{id}/stream", auth, s.handlePipelineRunStream)
+	// 编排执行（Definition 直调；定时任务的编排由 job 触发器驱动）
 	api.Post("/pipeline/run", auth, s.handlePipelineRun)
-	api.Get("/pipeline/templates", auth, s.handlePipelineTemplatesList)
-	api.Get("/pipeline/templates/{id}", auth, s.handlePipelineTemplateGet)
-	api.Post("/pipeline/templates", auth, s.handlePipelineTemplateCreate)
-	api.Put("/pipeline/templates/{id}", auth, s.handlePipelineTemplateUpdate)
-	api.Delete("/pipeline/templates/{id}", auth, s.handlePipelineTemplateDelete)
-	api.Post("/pipeline/templates/{id}/run", auth, s.handlePipelineTemplateRun)
-	api.Get("/pipeline/templates/{id}/versions", auth, s.handlePipelineTemplateVersions)
-	api.Post("/pipeline/templates/{id}/versions/{version}/restore", auth, s.handlePipelineTemplateRestore)
 	// 通用定时触发规则（schedule 只按 target_type 分发，目标归属在装配层校验）
 	api.Get("/schedule/triggers", auth, s.handleScheduleTriggersList)
 	api.Get("/schedule/triggers/{id}", auth, s.handleScheduleTriggerGet)

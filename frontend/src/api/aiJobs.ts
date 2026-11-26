@@ -13,7 +13,6 @@ export interface AIJobTarget {
   path?: string
   query?: Record<string, unknown>
   body?: unknown
-  templateId?: number
   definition?: Record<string, unknown>
 }
 

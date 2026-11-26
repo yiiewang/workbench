@@ -192,8 +192,10 @@
 .ai-tool-approval.is-approved { color: #2e7d32; background: rgba(60, 160, 70, 0.14); }
 .ai-tool-approval.is-declined, .ai-tool-approval.is-timeout { color: #a04040; background: rgba(220, 80, 80, 0.14); }
 
-/* 待确认操作条 */
+/* 待确认操作条：独立层叠上下文，避免被相邻消息的悬浮元素盖住命中区域 */
 .ai-tool-confirm {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 8px;

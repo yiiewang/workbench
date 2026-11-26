@@ -16,8 +16,7 @@ import (
 // supportedTriggerTargets 装配层已注册 handler 的目标类型白名单。
 // 新增领域对象时，只需在 server.go 注册 handler 并在这里加一行。
 var supportedTriggerTargets = map[string]bool{
-	"pipeline_template": true,
-	"job":               true,
+	"job": true,
 }
 
 type scheduleTriggerBody struct {
@@ -54,9 +53,6 @@ func (s *Server) validateTriggerTarget(ctx iris.Context, targetType string, targ
 		return false, nil
 	}
 	switch targetType {
-	case "pipeline_template":
-		_, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), targetID)
-		return ok, err
 	case "job":
 		job, err := s.db.GetAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), targetID)
 		return job != nil, err

@@ -449,6 +449,9 @@ func (s *Server) startReindex(ctx iris.Context) reindexStartStatus {
 		return reindexAlreadyRunning
 	}
 	root := s.userRoot(ctx)
+	// 同步预写 running 快照：堵住「返回 started 与后台写入进度之间」的窗口，
+	// 否则紧随其后的 reindex_status（流水线背靠背步骤）误报「尚未触发过」
+	s.rag.MarkReindexStarted(orgID, userID)
 	go func() {
 		defer ragReindexing.Delete(key)
 		stats, err := s.rag.ReindexTree(context.Background(), orgID, userID, root, s.cfg.Server.AllowSymlink)

@@ -101,24 +101,6 @@ func TestExecRunPipelineValidatesDefinition(t *testing.T) {
 	}
 }
 
-func TestValidatePipelineTemplateBody(t *testing.T) {
-	def := `{"name":"索引巡检","steps":[{"id":"a","uses":"tool/reindex_status"}]}`
-	cases := []struct {
-		name string
-		body pipelineTemplateBody
-		ok   bool
-	}{
-		{"empty name", pipelineTemplateBody{Definition: def}, false},
-		{"bad definition", pipelineTemplateBody{Name: "x", Definition: `{"steps":[]}`}, false},
-		{"valid", pipelineTemplateBody{Name: "索引巡检", Definition: def}, true},
-	}
-	for _, c := range cases {
-		if err := validatePipelineTemplateBody(c.body); (err == nil) != c.ok {
-			t.Errorf("%s: err=%v want ok=%v", c.name, err, c.ok)
-		}
-	}
-}
-
 func TestExecPipelineAPIQuery(t *testing.T) {
 	secret := []byte("pipeline-test-secret")
 	app := iris.New()

@@ -401,6 +401,22 @@ func (s *Service) ReindexTree(ctx context.Context, orgID, userID int64, root str
 // 重建进度快照（互斥保护；GET /api/ai/reindex/status 读取）
 // ============================================================
 
+// MarkReindexStarted 预写该 owner 的 running 初始进度快照（Total 未知为 0）。
+// startReindex 在起后台 goroutine 前同步调用：返回 started=true 之后、
+// goroutine 执行到 ReindexTree 写快照之前存在调度窗口，窗口内 ProgressOf
+// 返回 nil，紧随其后的 reindex_status 会误报「尚未触发过全量重建」
+// （流水线 reindex → status 背靠背步骤即命中）。ReindexTree 完成收集后
+// 以带 Total 的快照覆盖本预写。
+func (s *Service) MarkReindexStarted(orgID, userID int64) {
+	now := time.Now().Format(time.RFC3339)
+	s.setProgress(&ReindexProgress{
+		Owner:     ownerKeyOf(orgID, userID),
+		Running:   true,
+		StartedAt: now, UpdatedAt: now,
+		CurrentPath: "（收集待索引文件…）",
+	})
+}
+
 // setProgress 记录该 owner 的进度快照（覆盖旧值）
 func (s *Service) setProgress(p *ReindexProgress) {
 	s.mu.Lock()

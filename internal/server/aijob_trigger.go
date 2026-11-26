@@ -108,8 +108,8 @@ func (s *Server) renderAIJobNotify(job db.AIJobWithOwner, res aiJobRunResult, ru
 			body = "```\n" + body + "\n```"
 		}
 	case aiJobTypePipeline:
-		if res.PipelineRunID != "" && strings.TrimSpace(s.cfg.SiteURL) != "" {
-			body += "\n\n详细结果：" + strings.TrimRight(s.cfg.SiteURL, "/") + "/pipelines?run=" + res.PipelineRunID
+		if strings.TrimSpace(s.cfg.SiteURL) != "" {
+			body += "\n\n详细结果：" + strings.TrimRight(s.cfg.SiteURL, "/") + "/jobs?id=" + fmt.Sprint(job.ID)
 		}
 	}
 	return subject, body

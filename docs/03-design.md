@@ -81,7 +81,7 @@
 | 包 | 职责 | 关键文件与符号 | 主要依赖 |
 |---|---|---|---|
 | `config` | YAML 结构、默认值、非零值合并、环境变量覆盖、`~/` 展开 | `config.go`：`Config`、`DefaultConfig`、`Load`、`mergeConfig`、`ApplyEnv`、`ResolvePath` | yaml.v3 |
-| `db` | SQLite 连接/迁移、RBAC、任务、分享、会话、AI job、后台 run、编排运行/模板/触发规则、RAG 表读写、密钥与限流 | `db.go`（`Open`/`TaskItem`）、`migrate.go`（`detectBaseVersion`）、`users.go`、`tasks.go`、`shares.go`、`ai_sessions.go`、`ai_runs.go`、`pipeline_runs.go`、`pipeline_templates.go`、`cron_triggers.go`、`time_reminders.go`、`rag.go`（`EnsureVecIndex`/`EnsureFTS`）、`secrets.go` | mattn/go-sqlite3、golang-migrate、sqlitevec |
+| `db` | SQLite 连接/迁移、RBAC、任务、分享、会话、AI job、后台 run、编排运行/触发规则、RAG 表读写、密钥与限流 | `db.go`（`Open`/`TaskItem`）、`migrate.go`（`detectBaseVersion`）、`users.go`、`tasks.go`、`shares.go`、`ai_sessions.go`、`ai_runs.go`、`pipeline_runs.go`、`cron_triggers.go`、`time_reminders.go`、`rag.go`（`EnsureVecIndex`/`EnsureFTS`）、`secrets.go` | mattn/go-sqlite3、golang-migrate、sqlitevec |
 | `server` | iris 路由与全部 handler、鉴权、沙箱、AI 代理/Agent/审批、后台 run、编排与通用触发的装配层 | `server.go`（`Server`/`New`/`App`/`safeJoin`）、`auth.go`、`ai.go`（`handleAIChat`/`aiRunWriter`/`handleAIRuns*`）、`aitools.go`、`aitools_mcp.go`、`aiapproval.go`、`pipeline.go`（`runPipeline`）、`pipeline_http.go`、`aijob_target.go`（`ResolveTarget`/`ValidateJobTarget`）、`aijob_exec.go`、`aijob_trigger.go`、`schedule_triggers.go`（`supportedTriggerTargets`/`validateTriggerTarget`）、`fsops.go`、`upload.go`、`media.go`、`share.go`、`admin.go`、`org.go`、`codes.go`、`response.go` | iris、db、rag、schedule、notify、mcpclient、pipeline、UIFS |
 | `rag` | 文件索引与混合检索、LLM 相关性预判与摘要卡 | `service.go`（`Service`/`IndexFile`/`ReindexTree`/`Search`）、`chunk.go`、`embedding.go`、`judge.go`、`extract.go` | db、OpenAI 兼容 HTTP |
 | `schedule` | 手写 cron 引擎、进程内事件总线、通用定时触发分发 | `scheduler.go`（`ParseCron`/`Scheduler`）、`bus.go`（`EventBus`）、`jobs.go`（`KnownTopics`）、`triggers.go`（`NewTriggersJob`/`TriggerHandler`/`runCronTriggers`/`ClaimCronTrigger`） | db、标准库；包内无业务对象类型 |
@@ -162,7 +162,7 @@ cmd/workbench/main.go
 ### 4.3 生命周期约束
 
 - 仓库源码无 `signal.Notify` / 自定义 `Shutdown`；`Scheduler.Stop()` 存在但无调用点，job 均为短扫描。不要把「SIGTERM 优雅关闭」当作既有能力。
-- `EventBus.Publish` 为每个 handler 起独立 goroutine，事件 ctx 不能绑定发布方请求生命周期：AI 定时任务刻意用 `context.Background()` 发布。
+- `EventBus.Publish` 为每个 handler 起独立 goroutine，事件 ctx 不能绑定发布方请求生命周期：AI 定时任务与 `notify_user` 工具都刻意用 `context.Background()` 发布（`send` 自带 30s 独立超时）。
 - **后台 run 的状态不跨进程重启恢复**：循环绑定当前进程，重启后 `ai_runs` 中残留的 `running` 记录不会续跑（前端靠 30 分钟过期保护与列表兜底处理）。
 - 升级 `mattn/go-sqlite3` 后必须 `make sync-vec-headers` 保持 vendor 头文件与实际链接版本一致。
 
@@ -292,7 +292,6 @@ Scheduler（整分钟 ticker，Vixie cron bitset 匹配）
        → handlers[target_type]（15min 独立 runCtx，状态回写用独立 ctx）
             job               → triggerJob：读 ai_jobs → ResolveTarget/Validate
                                 → runPipeline → MarkAIJobRunDetail → user.notify
-            pipeline_template → triggerPipelineTemplate：读模板 Definition → runPipeline
        → MarkCronTriggerRun(ok / "error: ...", nowKey)（同时清租约）
 
 EventBus.Publish → 每 handler 独立 goroutine（panic recover）
@@ -302,19 +301,22 @@ EventBus.Publish → 每 handler 独立 goroutine（panic recover）
 
 `KnownTopics`：`task.due`、`task.reminder`、`user.notify`（仅 `user.notify` 允许 AI 发布）。全局公共任务（`user_id IS NULL`）的 job 规则用 `org_id=0 / user_id=0` 标记，`triggerJob` 内按 `ListUsersWithEmail` 展开为每用户独立执行与投递；规则行的 `last_run_at` 记录本次触发。`cron_triggers_runner` 不走事件总线：只按 `target_type` 调装配层 `TriggerHandler`，未注册类型或非法 cron 记 `error: ...` 状态并跳过，不影响其他规则。
 
-### 5.9 声明式编排、模板与通用触发
+### 5.9 声明式编排与定时触发
 
-四条执行入口共用 `runPipeline(ctx, org, user, runID, def)`（`server/pipeline.go`）：
+三条执行入口共用 `runPipeline(ctx, org, user, runID, def)`（`server/pipeline.go`）：
 
 ```
-run_pipeline 工具（一次界面确认） / POST /api/pipeline/run（直调 Definition）
-POST /api/pipeline/templates/{id}/run（读模板）/ triggerPipelineTemplate（定时触发）
-triggerJob（定时任务：ResolveTarget 归一化后进入同一核心）
+run_pipeline 工具（一次界面确认） / POST /api/pipeline/run（直调 Definition，
+                                    供 /jobs 任务详情页「立即执行」使用）
+triggerJob（定时任务：读 ai_jobs.target_json 里的内联 Definition，
+           ResolveTarget 归一化后进入同一核心）
   → db.CreatePipelineRun(status=running)
   → Definition.Validate：步骤非空、≤50、id 唯一合法、uses/when/retry 合法、
     needs 引用存在且无环
   → Definition.Layers() 拓扑分层，同层并行（maxParallelSteps=4）
-       withToolContext 从 app.ContextPool 合成 iris.Context 预置 userID/orgID，
+       withToolContext 从 app.ContextPool 合成 iris.Context 预置 userID/orgID
+       （并经 db.GetUserNames 反查补齐 userName/orgName——真实请求由 auth
+       中间件写入这两个 name，userRoot 拼用户目录依赖它们），
        Request().Context() 绑后台 run ctx（工具层零改动）
        RunContext.Interpolate 在启动 goroutine 前替换 {{ steps.<id>.output }}
        when 判定：缺省 on_success；on_failure / always 作补偿步骤
@@ -325,16 +327,19 @@ triggerJob（定时任务：ResolveTarget 归一化后进入同一核心）
          llm         → aiChatOnce 非流式
        execWithRetry：retry ≤5、固定退避 200ms×次数、每步 5min 超时
   → 每层结束 onStep 落一次 pipeline_runs 全量快照；主流程失败即停
-  → 工具只回步骤摘要；直调/手动触发返回 runId；完整输出 GET /api/pipeline/runs/{id}
+  → 工具只回步骤摘要；直调返回 runId；完整输出 GET /api/pipeline/runs/{id}
+  → GET /api/pipeline/runs/{id}/stream（SSE）：1s 轮询 pipeline_runs 比对
+    status/steps/err_msg 变化推 progress（整份快照），终态推 end 后关闭；
+    15s 心跳注释行防代理掐断，连接寿命上限 = 执行总超时 + 1min
 ```
 
-**领域解耦**：`pipeline_templates` 只存 `id / org_id / user_id / name / definition / created_at / updated_at`（000020 删掉 cron_expr / enabled / last_run_at / last_status），调度配置归 `schedule_triggers`；`ai_jobs` 同样只存执行定义（`target_type` / `target_json` / `allow_write` / context / notify，000023 删掉 4 个调度列），cron / 启停 / 最近状态由 `target_type='job'` 的规则提供。`db` 层不解析 Definition、列表不取 definition。`schedule.NewTriggersJob` 只按 `target_type` 分发，目标是否存在与归谁所有由 `server/schedule_triggers.go` 的 `validateTriggerTarget` 在装配层校验（创建后目标绑定不可变）；删除模板 / 任务经 `DeleteCronTriggersForTarget` 清理孤儿规则。四张表都按 `org_id + user_id` 隔离，跨身份读模板或任务返回 `40401`。
+**领域解耦**：编排 Definition 内联在 `ai_jobs.target_json` 里（`000027` 删除独立模板表与版本表）；`ai_jobs` 只存执行定义（`target_type` / `target_json` / `allow_write` / context / notify，000023 删掉 4 个调度列），cron / 启停 / 最近状态由 `target_type='job'` 的 `schedule_triggers` 规则提供。`db` 层不解析 Definition。`schedule.NewTriggersJob` 只按 `target_type` 分发，`supportedTriggerTargets` 白名单只登记 `job`，目标是否存在与归谁所有由 `server/schedule_triggers.go` 的 `validateTriggerTarget` 在装配层校验（创建后目标绑定不可变）；删除任务经 `DeleteCronTriggersForTarget` 清理孤儿规则。`ai_jobs` / `pipeline_runs` / `schedule_triggers` 都按 `org_id + user_id` 隔离，跨身份读任务返回 `40401`。
 
 安全模型：`allowWrite` 必须显式列出写类工具与非 GET 的 api 步骤，否则该步失败；`api/<path>` 限定站内 `/api/*`，不能外访。定时执行无人审批，创建 / 更新时即做 Definition 级预检，并拒绝 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*`。`internal/pipeline` 不依赖 HTTP/iris/db，`Executor` 由 server 注入，可独立单测。
 
 ### 5.10 SPA 路由与深链兜底
 
-前端用 `createWebHistory()`，深链由后端兜底：`handleStaticWithAuth` → `handleRouteRedirect`，`routes` 为 `__spa__` 时返回 embed 的 `index.html`，`__listdir__` 时列目录。**新增前端路由必须同步在 `config.yaml` 的 `routes` 注册**，否则刷新该 URL 得到 401。`/pipelines` 是本批新增的 `__spa__` 键，与 `/jobs` 一样不进 `PC_TO_MOBILE` 映射，窄视口走响应式 PC 布局。
+前端用 `createWebHistory()`，深链由后端兜底：`handleStaticWithAuth` → `handleRouteRedirect`，`routes` 为 `__spa__` 时返回 embed 的 `index.html`，`__listdir__` 时列目录。**新增前端路由必须同步在 `config.yaml` 的 `routes` 注册**，否则刷新该 URL 得到 401。定时任务页 `/jobs` 不进 `PC_TO_MOBILE` 映射，窄视口走响应式 PC 布局；编排流程已并入该页，无独立 `/pipelines` 路由。
 
 ## 6. 数据模型
 
@@ -359,11 +364,11 @@ triggerJob（定时任务：ResolveTarget 归一化后进入同一核心）
 | 000021 | AI 会话消息表（`ai_session_messages`，行级消息） | 000022 | `ai_jobs` 执行对象：target 五列 + `prompt` 回填 |
 | 000023 | 调度收敛：`ai_jobs` 去 4 个调度列 + `schedule_triggers.lease_until` + job 规则回填 | 000024 | `ai_job_runs` 详情列（run id / steps / 耗时） |
 | 000025 | `ai_jobs.retry`（job 级失败重试，0-3，仅无写步骤生效） | | |
-| 000026 | `pipeline_template_versions`（模板版本历史） | | |
+| 000026 | `pipeline_template_versions`（模板版本历史，历史迁移保留） | 000027 | 删除模板两张表 + 清理 `pipeline_template` 孤儿触发规则；编排 Definition 改为内联在 `ai_jobs.target_json` |
 
-000020 是 SQLite 无 `DROP COLUMN` 时的标准重建写法；其 `.down.sql` 建回 `pipeline_templates_legacy`，按 `target_type='pipeline_template'` 从 `schedule_triggers` 取最近一条反向回填调度列。
+000020 是 SQLite 无 `DROP COLUMN` 时的标准重建写法；其 `.down.sql` 建回 `pipeline_templates_legacy`，按 `target_type='pipeline_template'` 从 `schedule_triggers` 取最近一条反向回填调度列。`000018`–`000026` 的历史脚本保留不动以维持新建库迁移链，`000027` 在运行时删表；其 `.down.sql` 只重建空表，模板数据不可恢复。
 
-### 6.2 现行表清单（24 项，含虚拟表与框架表）
+### 6.2 现行表清单（22 项，含虚拟表与框架表）
 
 | 组 | 表 | 关键列 / 约束 |
 |---|---|---|
@@ -371,25 +376,21 @@ triggerJob（定时任务：ResolveTarget 归一化后进入同一核心）
 | 业务 | `tasks`、`shares`、`notify_log` | `tasks.PK(id,user_id,org_id)` + `files`/`scheduled_time`/`due_time`；`notify_log` 唯一 `(topic,dedup_key,notify_date)` |
 | AI 会话调度 | `ai_sessions`、`ai_jobs`、`ai_job_runs` | `ai_sessions.messages` 为前端快照 JSON；`ai_jobs` 只存执行定义（`target_type`/`target_json`/`allow_write`/context/notify/`retry`，无调度列）；`ai_job_runs` 含 `target_type`/`pipeline_run_id`/`steps_summary`/`err_msg`/`duration_ms`/`finished_at` |
 | **后台运行** | `ai_runs` | `id TEXT PK`、org/user、`qa_id`/`session_id`、`status running/done/failed`、`events JSON`、`result`、`err_msg`、时间戳；索引 `(org_id,user_id,started_at DESC)` |
-| **编排运行** | `pipeline_runs` | `id TEXT PK`、org/user、`name`、`definition JSON`、`status`、`steps JSON`、`err_msg`、时间戳；同款 owner 索引 |
-| **编排模板** | `pipeline_templates` | `id INTEGER PK AUTOINCREMENT`、org/user、`name`、`definition JSON`（纯 Definition，不含调度字段）、时间戳；索引 `(org_id,user_id,id DESC)` |
-| **模板版本** | `pipeline_template_versions` | `template_id`、org/user、`version`、`name`、`definition JSON`、`created_at`；唯一 `(template_id,version)`，owner 索引；删除模板级联清理 |
-| **通用触发规则** | `schedule_triggers` | `id`、org/user、`target_type`（`pipeline_template` / `job`）、`target_id`、`cron_expr`、`enabled`、`last_run_at`/`last_status`、`lease_until`、时间戳；索引含 owner、enabled 与 `(target_type,target_id)` |
+| **编排运行** | `pipeline_runs` | `id TEXT PK`、org/user、`name`、`definition JSON`、`status`、`steps JSON`、`err_msg`、时间戳；同款 owner 索引；Definition 由任务 `target_json` 内联提供 |
+| **通用触发规则** | `schedule_triggers` | `id`、org/user、`target_type`（当前仅 `job`）、`target_id`、`cron_expr`、`enabled`、`last_run_at`/`last_status`、`lease_until`、时间戳；索引含 owner、enabled 与 `(target_type,target_id)` |
 | RAG | `file_index_state`、`file_chunks`、`rag_meta`、`file_chunk_fts`、`file_chunk_vec` | `file_chunks.chunk_index=-1` 为摘要卡；FTS5 `tokenize=trigram`，`rowid = file_chunks.id`；vec0 的 `owner = "orgID:userID"` 为分区键，**运行时由 `EnsureVecIndex` 创建，不在迁移脚本中** |
 | 框架 | `schema_migrations` | golang-migrate 维护 |
 
-已删除的历史表：`visit_logs`（000012）、`org_features`（000004 被 `user_org_feature` 取代）。
+已删除的历史表：`visit_logs`（000012）、`org_features`（000004 被 `user_org_feature` 取代）、`pipeline_templates` 与 `pipeline_template_versions`（000027，编排模板概念移除）。
 
 ### 6.3 关系与约束要点
 
 ```
 orgs ─< user_orgs >─ users ─< tasks / ai_sessions / ai_jobs / shares
-                        └─< ai_runs / pipeline_runs / pipeline_templates
+                        └─< ai_runs / pipeline_runs
                              / schedule_triggers（org_id+user_id 隔离）
 user_orgs ─< user_org_feature
 ai_jobs ─< ai_job_runs
-pipeline_templates ─< schedule_triggers（target_type='pipeline_template'
-                                         + target_id；逻辑关联，无外键）
 ai_jobs ─< schedule_triggers（target_type='job' + target_id；逻辑关联，无外键）
 RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 ```
@@ -398,7 +399,7 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 - 存储层整数 id / 磁盘路径 `orgName/userName` 双轨，改名需同步迁移目录。
 - `users.revision` 是所有任务写入的单调版本号；`tasks.files` 为 JSON 数组，空关联归一 `nil` + `omitempty`。
 - `notify_log` 去重在 **Publish 之前**用 `INSERT OR IGNORE` + `RowsAffected` 原子判定，SMTP 失败不重投；`user.notify` 不去重。
-- `ai_runs` / `pipeline_runs` / `pipeline_templates` / `schedule_triggers` 均按 org+user 隔离；列表不含大字段（events / steps / definition 由详情接口返回）；模板详情跨身份访问返回 `40401`。
+- `ai_runs` / `pipeline_runs` / `ai_jobs` / `schedule_triggers` 均按 org+user 隔离；列表不含大字段（events / steps / definition 由详情接口返回）；任务详情跨身份访问返回 `40401`。
 
 ## 7. 接口设计
 
@@ -440,18 +441,14 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | GET · POST | `/api/ai/sessions` | 会话列表 / 创建 |
 | GET · PUT · DELETE | `/api/ai/sessions/{id}` | 会话详情 / 更新 / 删除 |
 
-**编排与通用触发**（14 条，全部带 `auth` 且按 org+user 隔离）：
+**编排与通用触发**（8 条，全部带 `auth` 且按 org+user 隔离）：
 
 | Method | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/pipeline/runs` · `/api/pipeline/runs/{id}` | 运行列表（不含 steps）/ 详情（含逐步结果） |
-| POST | `/api/pipeline/run` | 直调 Definition，后台异步执行，返回 `runId` |
-| GET · POST | `/api/pipeline/templates` | 模板列表（不含 definition）/ 创建 |
-| GET · PUT · DELETE | `/api/pipeline/templates/{id}` | 详情（含 definition）/ 覆盖更新 / 删除（级联清触发规则） |
-| POST | `/api/pipeline/templates/{id}/run` | 手动触发，返回 `runId` |
-| GET | `/api/pipeline/templates/{id}/versions` | 版本列表（version / name / createdAt） |
-| POST | `/api/pipeline/templates/{id}/versions/{version}/restore` | 回滚到指定版本（写新版本，返回新版本号） |
-| GET · POST | `/api/schedule/triggers` | 规则列表（可按 `targetType`/`targetId` 过滤）/ 创建 |
+| GET | `/api/pipeline/runs/{id}/stream` | SSE 实时进度：`progress`（整份运行快照，按 DAG 层推进）→ 终态 `end` 关闭；推送源为 pipeline_runs 表 1s 轮询，非进程内 pub/sub |
+| POST | `/api/pipeline/run` | 直调 Definition，后台异步执行，返回 `runId`；任务的编排定义走 `ai_jobs.target_json`，无模板 CRUD 接口 |
+| GET · POST | `/api/schedule/triggers` | 规则列表（可按 `targetType`/`targetId` 过滤）/ 创建；`targetType` 仅 `job` |
 | GET · PUT · DELETE | `/api/schedule/triggers/{id}` | 规则详情 / 更新 / 删除 |
 
 **管理**（`auth` + `RequireUserManager`）：`GET|POST /api/admin/users`、`PATCH|DELETE /api/admin/users/{id}`、`GET /api/admin/roles`、`GET /api/admin/users/{id}/dashboard`、`GET /api/admin/users/{id}/features`、`PATCH /api/admin/users/{id}/features/{code}`。handler 内另有细粒度约束（组织管理员仅本组织、不能授予 `admin`、禁止删自己或最后一个 admin）。
@@ -485,10 +482,10 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 授权 | 每请求校验 `X-Org-Id` 归属；`RequireUserManager` + handler 内细粒度约束；功能开关控制入口 |
 | 首用户 | `ADMIN_SETUP_TOKEN` 常量时间比较，仅用户表为空时校验 |
 | 路径 | `safeJoin` + `resolveUserPathSafe`（`EvalSymlinks` 双校验）+ `sanitizeUploadName`；软链接条目只操作链接 |
-| 后台 run / 编排数据 | `ai_runs` / `pipeline_runs` / `pipeline_templates` / `ai_jobs` / `schedule_triggers` 按 org+user 隔离；断连后写工具跳过；审批绑定用户且一次性 |
+| 后台 run / 编排数据 | `ai_runs` / `pipeline_runs` / `ai_jobs` / `schedule_triggers` 按 org+user 隔离；断连后写工具跳过；审批绑定用户且一次性 |
 | 编排 | `run_pipeline` 一次确认覆盖整条流程；`allowWrite` 显式预授权；`api/<path>` 限站内 `/api/*`，自签短期 token 带当前身份 |
 | 定时任务 | 创建 / 更新时按 Definition 预检 `allowWrite`；执行不进审批分支；拒绝 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*`；外部 MCP 仅白名单 |
-| 通用触发 | 创建规则时校验 `target_type` 白名单与目标归属，创建后目标绑定不可变；模板 / 规则详情跨身份返回 `40401`，不泄露存在性 |
+| 通用触发 | 创建规则时校验 `target_type` 白名单（当前仅 `job`）与目标归属，创建后目标绑定不可变；任务 / 规则详情跨身份返回 `40401`，不泄露存在性 |
 | 凭据 | AI keys / SMTP 授权码 / MCP header token 走环境变量（`${ENV_VAR}` 展开），不落仓库 |
 | 渲染 | Markdown 经 DOMPurify；HTML 预览用无 `allow-same-origin` 沙箱 iframe + null-origin CORS |
 | 邮件 | 用户内容 HTML 转义；`safeHref` 只允许 http(s) 且与 `site_url` 同 host |
@@ -509,7 +506,7 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 事件 topic | `schedule/jobs.go` 的 `KnownTopics` + 载荷 + 发布方 | 订阅者在 `Server.New` 注册；异步 handler 不依赖发布方 ctx |
 | 通知渠道 | 实现 `schedule.Handler` 并在 `Server.New` 订阅 | `Publish` 不等待、panic 隔离；渠道自管去重与失败 |
 | 定时 job | `schedule/` 新增 `New*Job` 并在 `Server.New` 中 `AddJob` | cron 非法 fail fast；DB 扫描要短；通用触发复用 `NewTriggersJob`，无需新增 job |
-| 前端页面 | `router/index.ts` + `views/` + `api/` + `components/` | **同步 `config.yaml` 的 `routes`**；移动版需加 `/m/*` 与分流映射；`/pipelines` 未进映射，走响应式 PC 布局 |
+| 前端页面 | `router/index.ts` + `views/` + `api/` + `components/` | **同步 `config.yaml` 的 `routes`**；移动版需加 `/m/*` 与分流映射；`/jobs` 未进映射，走响应式 PC 布局 |
 | 预览类型 | `FileViewer.vue` 分派 + `mimeTypeByExt` | 二进制走下载/blob；媒体需 ticket + Range |
 | 配置项 | `config.go` 结构体 + `DefaultConfig` + `mergeConfig` + 可选 `ApplyEnv` | 注意非零值合并语义；同步 `config.yaml`、`05-operations.md` 与两份文档 |
 
@@ -532,7 +529,7 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | **断连恢复** | `run_id` + 300ms 游标轮询 `/api/ai/runs/{id}?offset=` | 无需 WebSocket/推送，改动集中在一个 composable，多个会话可并行恢复 | 轮询上限 15min、本地 runId 30min 过期保护；静默断流需与 `[DONE]` 区分；刷新中断判为可恢复，SSE `error` 带 `business` 才是业务错误 |
 | **编排 vs 改造 Agent** | 声明式纯数据 `Definition` + 独立 Runner | 模型自主规划多步，Agent 循环零改动；借鉴 GitLab CI 逐步状态、GitHub Actions `uses`/`with`/插值 | Definition 由模型生成需校验；写步骤须 `allowWrite` 预授权 |
 | **DAG 分层并行** | `needs` 缺省依赖前一步（默认顺序），显式 `needs` 拓扑分层 + 同层并发 4 | 保留旧定义的顺序语义，同时支持并行；`when`/`retry` 补条件与补偿 | 插值在启动 goroutine 前完成，层内不共享写；每层落一次全量快照 |
-| **模板与调度解耦** | 模板只存 Definition，规则存 `schedule_triggers`（000019/000020） | 调度不绑定业务对象，模板可直调 / 手动 / 定时共用同一 `runPipeline` | 模板不再有 cron/启停/状态列；删模板需级联清规则 |
+| **编排内联在任务里** | Definition 存 `ai_jobs.target_json`（000027 删独立模板表） | 编排只是定时任务的一种可执行对象，AI 直接生成复杂流程，无需模板库与版本历史；调度不绑定业务对象，直调 / 定时共用同一 `runPipeline` | Definition 由模型生成需校验；任务删除需级联清规则 |
 | **通用定时触发** | `cron_triggers_runner` + `TriggerHandler` 按 `target_type` 分发 | `schedule` 包零业务依赖，新增领域只需装配层注册 | `ClaimCronTrigger` CAS 租约（同分钟 + 长任务跨分钟防重）、15min 独立超时、无持久化队列 |
 | **定时任务执行对象** | `ai_jobs.target` 四类对象（ai / tool / interface / pipeline）归一化为 `Definition`，复用 `runPipeline`；cron 与启停归 `schedule_triggers` | 不为 schedule 写四套执行器，AI 工具 / 站内接口能力直接复用 | 写操作必须静态 `allowWrite`；外部 MCP 仅白名单；`api/*` 限站内；`pipeline` 单次总超时 15min |
 | **消息渲染共用** | PC/移动共用 `AiMessage.vue` + `aiChatKey` provide/inject | 消除两套消息模板分叉，审批/重新生成作用于正确会话 | 子组件依赖注入，不能独立调用 `useAIChat` |
@@ -543,7 +540,7 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | AI 会话持久化 | 前端 UI 快照 JSON 存 `ai_sessions.messages` | 刷新/断网保住半截回复 | 服务端不理解消息语义；按「轮」预算裁剪 ≤28 条；快照 ≤256KB；后台 run 正文另按 300ms 增量落 `ai_runs.result` 供游标恢复 |
 | MCP 接入 | 仅 stateless HTTP | 不引入会话生命周期与权限模型 | 不支持 stdio / 有状态 SSE / 重连 |
 | 可用性 | RAG / FTS / embedding / judge / MCP 失败静默降级 | 对话主链路优先 | 检索不完整时用户无感，需查 `/api/ai/index-status` |
-| 前端形态 | PC 与移动两套视图，共用业务层与 `AiMessage.vue` | 浏览优先、PC 零改动 | 两套视图需同步能力；`PC_TO_MOBILE` 未含 `/jobs` 与 `/pipelines` |
+| 前端形态 | PC 与移动两套视图，共用业务层与 `AiMessage.vue` | 浏览优先、PC 零改动 | 两套视图需同步能力；`PC_TO_MOBILE` 未含 `/jobs` |
 | 优雅关闭 | 无自定义信号处理，仅 `defer db.Close()` | job 为短扫描，中断无害 | 长请求/SSE 可能被截断；后台 run 重启不恢复 |
 
 **其他已核实的实现现状（中性记录，非缺陷判断）**：
@@ -565,8 +562,8 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 响应与错误码 | `internal/server/response.go`、`codes.go` |
 | 数据层 | `internal/db/*.go`、`internal/db/migrations/*.sql` |
 | AI / 后台 run | `internal/server/ai.go`（`handleAIChat`/`aiRunWriter`/`handleAIRuns*`）、`aitools.go`、`aiapproval.go`、`aitools_mcp.go`、`internal/db/ai_runs.go`（`splitRunResult`） |
-| 编排 | `internal/pipeline/pipeline.go`、`internal/server/pipeline.go`（`runPipeline`）、`pipeline_http.go`、`schedule_triggers.go`、`internal/db/pipeline_runs.go`、`pipeline_templates.go`、`cron_triggers.go` |
+| 编排 | `internal/pipeline/pipeline.go`、`internal/server/pipeline.go`（`runPipeline`）、`pipeline_http.go`、`schedule_triggers.go`、`aijob_target.go`、`internal/db/pipeline_runs.go`、`cron_triggers.go` |
 | RAG | `internal/rag/*.go`、`internal/db/rag.go`、`internal/sqlitevec/vec.go` |
 | 调度与通知 | `internal/schedule/*.go`（含 `triggers.go` 的 `NewTriggersJob`/`runCronTriggers`）、`internal/notify/*.go` |
-| 前端 | `frontend/src/router/index.ts`、`lib/common.ts`、`api/ai.ts`、`api/pipelines.ts`、`api/scheduleTriggers.ts`、`composables/useAIChat.ts`、`components/ai/AiMessage.vue`、`components/pipeline/PipelineGraph.vue`、`views/PipelineView.vue`、`composables/todoSync.ts` |
+| 前端 | `frontend/src/router/index.ts`、`lib/common.ts`、`api/ai.ts`、`api/pipelines.ts`、`api/scheduleTriggers.ts`、`composables/useAIChat.ts`、`components/ai/AiMessage.vue`、`components/pipeline/PipelineGraph.vue`、`views/AiJobsView.vue`、`composables/todoSync.ts` |
 | 构建 | `Makefile`、`frontend/vite.config.ts`、`embed.go`（详见 [`04-build-and-release.md`](04-build-and-release.md)） |

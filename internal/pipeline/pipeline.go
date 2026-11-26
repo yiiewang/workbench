@@ -1,6 +1,6 @@
 // Package pipeline 声明式编排执行引擎。
 //
-// 一份 Definition（纯数据，可存库复用即"模板"）交给 Runner，按序执行步骤、
+// 一份 Definition（纯数据，内联在定时任务里）交给 Runner，按序执行步骤、
 // 维护步骤输出与变量插值，失败即停。具体能力（AI 工具 / 站内 API / LLM）
 // 由调用方以 Executor 注入，本包不依赖 HTTP / iris / db，可独立测试。
 

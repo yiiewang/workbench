@@ -25,7 +25,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | 分享 | `/shares`、Tab 栏 Share / 仅访问 | 密码、有效期、访问次数上限的公开链接 `/s/{token}` |
 | Todo 看板 | `/todo` / `/m/todo` | 四象限/看板/日历甘特、任务↔文件关联、多设备同步 |
 | AI 对话 | 右下浮动面板 / `/m/ai` | 流式对话、推理展示、`@` 引用、Agent 工具与审批、RAG 引用、会话历史、**断连后后台跑完并恢复** |
-| 声明式编排 | `/pipelines`；AI 对话内 `run_pipeline` | 把工具/站内 API/LLM 调用编成 DAG 步骤；可直调 Definition、存成模板手动执行或按 cron 定时触发，流程图页查看每步结果 |
+| 声明式编排 | `/jobs`（任务类型选「编排流程」）；AI 对话内 `run_pipeline` | 把工具/站内 API/LLM 调用编成 DAG 步骤；Definition 内联在定时任务里，由 AI 生成或手动编辑，任务详情页用流程图查看每步结果 |
 | AI 定时任务与通知 | `/jobs` / 通过 `/jobs` 访问 | cron 定时执行 AI 提示词 / 工具 / 站内接口 / 编排，执行历史联动 `pipeline_runs`，邮件日报与任务提醒 |
 | 用户与组织管理 | `/admin`（仅管理员） / 不提供 | 用户增删改、重置密码、角色、按用户×组织的功能开关 |
 | 账号 | Account 弹窗 / `/m/profile` | 通知邮箱、组织切换、登出 |
@@ -219,9 +219,9 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 
 **其他限制**：`@` 引用仅文本类文件，单文件截断 20k 字；`read_file` 本体 ≤4 MB、内容 ≤64 KB，前 512 字节含 NUL 视为二进制；检索 8 秒超时静默降级；修改 `ai.embedding.dim` 会作废全部向量，必须全量 reindex；上游不支持 `include_usage` 时不显示 token 消耗。
 
-## 9. 声明式编排与模板（`/pipelines`）
+## 9. 声明式编排（`/jobs`）
 
-**场景**：把多步任务串成一张可复用的流程图。三种入口：AI 对话内由模型构造 Definition 调 `run_pipeline`；`POST /api/pipeline/run` 直接提交 Definition；把 Definition 存成模板后手动执行或按 cron 定时触发。`/pipelines` 页用 DAG 流程图编辑模板、查看每次运行的逐步结果。
+**场景**：把多步任务串成一张流程图。Definition 是纯数据，**内联在定时任务 `ai_jobs.target_json` 里**，由 AI 对话生成或手动编辑；不设独立模板表、模板页与版本历史。三种入口：AI 对话内由模型构造 Definition 调 `run_pipeline`；`POST /api/pipeline/run` 直接提交 Definition（供任务详情页「立即执行」使用）；定时任务按 cron 到点执行内联 Definition。`/jobs` 任务详情页用 DAG 流程图展示，并查看每次运行的逐步结果。
 
 ### 9.1 Definition 与步骤
 
@@ -232,8 +232,8 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | 依赖分层 | `needs` 缺省时依赖数组中的前一步（保持顺序语义），显式 `needs: []` 表示无依赖；`Layers()` 拓扑分层、同层并行（并发上限 4），未知依赖 / 自依赖 / 环在 `Validate` 阶段拒绝 |
 | 条件与重试 | `when` ∈ 空 / `on_success` / `on_failure` / `always`（默认 `on_success`）：主流程失败后跳过，补偿步骤仍可执行；`retry` ∈ 0–5，固定退避 200ms×次数 |
 | 插值 | `with` 中的字符串支持 `{{ steps.<id>.output }}` 引用已完成步骤输出（字符串直嵌，其余 JSON 序列化；未产出的引用原样保留） |
-| 输出 | `run_pipeline` 工具只回步骤摘要；直调 / 手动触发返回 `runId`；完整每步输出走 `GET /api/pipeline/runs/{id}` |
-| 状态查询 | `GET /api/pipeline/runs?limit=`、`GET /api/pipeline/runs/{id}`，按 org+user 隔离 |
+| 输出 | `run_pipeline` 工具只回步骤摘要；直调返回 `runId`；完整每步输出走 `GET /api/pipeline/runs/{id}` |
+| 状态查询 | `GET /api/pipeline/runs?limit=`、`GET /api/pipeline/runs/{id}`，按 org+user 隔离；实时进度走 SSE `GET /api/pipeline/runs/{id}/stream`（事件 `progress` 推整份快照、终态 `end` 关闭、`error` 报错） |
 
 示例（概念：`fetch_a` / `fetch_b` 同层并行，`summary` 等两者完成）：
 
@@ -254,33 +254,31 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 }
 ```
 
-### 9.2 模板与定时触发
+### 9.2 编排的持久化与触发
 
 | 能力 | 入口 / 接口 | 说明 |
 |---|---|---|
-| 模板 CRUD | `GET` · `POST` `/api/pipeline/templates`、`GET` · `PUT` · `DELETE` `/api/pipeline/templates/{id}` | 模板只存 `{name, definition}` 纯 Definition JSON；列表不含 definition，详情才返回；按 org+user 隔离 |
-| 版本历史 | `GET /api/pipeline/templates/{id}/versions`、`POST .../versions/{version}/restore` | 创建写 v1，每次保存/回滚写新版本（最多展示 50 条）；回滚生成新版本，当前内容仍可找回；删除模板级联清理 |
-| 直接执行 | `POST /api/pipeline/run` | 提交 `{definition}` 后台异步执行，立即返回 `runId` |
-| 手动触发 | `POST /api/pipeline/templates/{id}/run` | 按 id 读模板 Definition 后台执行，返回 `runId`；每次执行产生一条 `pipeline_runs` |
-| 定时触发 | `GET` · `POST` `/api/schedule/triggers`、`GET` · `PUT` · `DELETE` `/api/schedule/triggers/{id}` | 通用触发规则 `{targetType:"pipeline_template"|"job", targetId, cronExpr, enabled}`；每分钟扫描、CAS 租约占用（同分钟不重跑、长任务跨分钟不重复），`lastRunAt` / `lastStatus` 回写 |
-| 流程图页 | `/pipelines` | 模板详情即 DAG 流程图，节点 Inspector 编辑步骤；点运行记录把状态叠加到同一张图；`PipelineTriggerCard` 管理该模板的触发规则 |
+| 定义存储 | `ai_jobs.target_json` 里 `{type:"pipeline", definition}` | Definition 与任务名称 / cron / 预授权一起存在同一行，无独立模板实体；按 org+user 隔离 |
+| 定时触发 | `GET|POST /api/ai/jobs`、`PUT|DELETE /api/ai/jobs/{id}` | 任务自带 `cronExpr` / `enabled`，后端映射为 `schedule_triggers` 中 `targetType="job"` 的规则；每分钟扫描、CAS 租约占用（同分钟不重跑、长任务跨分钟不重复），`lastRunAt` / `lastStatus` 回写 |
+| 直接执行 | `POST /api/pipeline/run` | 提交 `{definition}` 后台异步执行，立即返回 `runId`；任务详情页「立即执行」用它跑当前编辑中的 Definition，不写任务执行历史。启动后前端自动建立 SSE 订阅实时刷新流程图，终态自动刷新执行记录 |
+| 编辑与可视化 | `/jobs` | 任务详情下方是 DAG 流程图 + 节点 Inspector（uses/needs/when/retry/with/输出），可切换 JSON 编辑；执行记录里带 `pipelineRunId` 的运行可把状态叠加到流程图；「立即执行」后节点状态随 DAG 层推进实时刷新（头部「运行中…」指示），断流自动降级为拉取最终结果 |
 
-**模板与触发规则是两个领域的对象**：模板不存 cron / 启停 / 最近执行状态（000020 已把这些列迁走），状态由 `schedule_triggers` 与 `pipeline_runs` 提供。创建触发规则时服务端校验目标归属（`supportedTriggerTargets` 白名单 + `validateTriggerTarget`），创建后目标绑定不可变；删除模板会级联清理指向它的规则，避免调度器每分钟报「目标不存在」。
+**编排定义与调度规则属于同一条任务**：cron / 启停 / 最近执行状态都在任务与 `schedule_triggers` 上，运行明细在 `pipeline_runs`。任务删除时 `DeleteCronTriggersForTarget` 级联清理指向它的规则，避免调度器每分钟报「目标不存在」。`supportedTriggerTargets` 白名单只登记 `job`，`validateTriggerTarget` 校验目标归属，创建后绑定不可变。
 
 ### 9.3 操作流程
 
-1. 模型在对话中给出 Definition → 触发一次**整条流程的界面确认**（`run_pipeline` 是写类工具）；或在 `/pipelines` 新建模板并保存 Definition。
+1. 模型在对话中给出 Definition → 触发一次**整条流程的界面确认**（`run_pipeline` 是写类工具）；或在 `/jobs` 新建任务、选「编排流程」并保存内联 Definition。
 2. Runner 用 `Layers()` 分层执行：缺省 `needs` 保持顺序，显式依赖形成 DAG，同层并发上限 4；每步独立 5 分钟超时、可 `retry`；主流程失败即停，补偿步骤（`on_failure` / `always`）仍可执行；每层结束落一次 `pipeline_runs` 全量快照。
 3. 三类能力由服务端注入：`tool/<name>` 复用现有 AI 工具；`api/<path>` 仅限站内 `/api/*`（自签短期 token + `X-Org-Id`，经内部 `ServeHTTP` 调用）；`llm` 走非流式 `aiChatOnce`。
-4. 定时规则由 `cron_triggers_runner` 每分钟扫描，命中后由 `triggerPipelineTemplate` 读模板 Definition 执行；执行与请求连接解耦，断连后仍会落库。
+4. 定时规则由 `cron_triggers_runner` 每分钟扫描，命中后由 `triggerJob` 读任务的 `target_json` Definition 执行；执行与请求连接解耦，断连后仍会落库。
 
 ### 9.4 限制条件
 
 - **写操作必须预授权**：写类工具与非 GET 的 `api` 步骤必须在 `allowWrite` 显式列出，否则该步失败；这是「一次确认覆盖整条流程」的安全前提。
-- 最多 50 步、每步 5 分钟、`retry` ≤5；后台直调 / 手动触发 / 定时触发各有 15 分钟总超时。
+- 最多 50 步、每步 5 分钟、`retry` ≤5；后台直调 / 定时触发各有 15 分钟总超时。
 - `api/<path>` 只能调站内 `/api/*`，不能访问外部地址；工具执行仍走各自沙箱与结果限长。
-- 模板、触发规则与运行记录均按 org+user 隔离；跨身份访问返回 `40401`（而非 403）。
-- 定时触发依赖 `schedule.enabled`，为进程内每分钟扫描，无持久化队列；规则增删改下一分钟生效。
+- 定时任务、触发规则与运行记录均按 org+user 隔离；跨身份访问返回 `40401`（而非 403）。
+- 定时触发依赖 `schedule.enabled`，为进程内每分钟扫描，无持久化队列；任务增删改下一分钟生效。
 - 每步输出会写入 `pipeline_runs.steps`，大结果会增大数据库。
 
 ## 10. AI 定时任务与通知
@@ -292,12 +290,12 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | `name` | 任务名（邮件主题前缀） |
 | `cronExpr` | 标准 5 段 cron，支持 `*`、`*/n`、`a-b`、逗号列表、英文别名（`wed`/`nov`）；创建时校验，非法即失败 |
 | `enabled` | 增删改下一分钟生效，无需重启 |
-| `target` | 执行对象：`{type:"ai", prompt}` / `{type:"tool", tool, params?}` / `{type:"interface", method, path, query?, body?}` / `{type:"pipeline", templateId}` 或 `{type:"pipeline", definition}` |
+| `target` | 执行对象：`{type:"ai", prompt}` / `{type:"tool", tool, params?}` / `{type:"interface", method, path, query?, body?}` / `{type:"pipeline", definition}`（Definition 内联，无模板引用） |
 | `prompt` | 老字段兼容：只传 `prompt` 等价于 `target={type:"ai", prompt}`；`ai` 类型必填 |
 | `allowWrite` | 静态预授权清单：写类工具名（如 `notify_user`）或非 GET 的 `api/<path>`（如 `api/tasks`） |
 | `retry` | 失败重试次数 0-3；仅对无写步骤的执行生效，避免重跑写操作 |
 
-**四种执行对象**：`ai`（单 `llm` 步，自动附带本人任务数据与 RAG）、`tool`（单 `tool/<name>` 步）、`interface`（站内 `api/<path>` 单步）、`pipeline`（模板或内联 Definition，支持 DAG / `when` / `retry`）。执行时统一归一化为编排 Definition，由同一个 `runPipeline` 核心运行；步骤结果写入 `pipeline_runs`，任务级结果写入 `ai_job_runs`（含 `targetType`、`pipelineRunId`、`stepsSummary`、`durationMs`）。
+**四种执行对象**：`ai`（单 `llm` 步，自动附带本人任务数据与 RAG）、`tool`（单 `tool/<name>` 步）、`interface`（站内 `api/<path>` 单步）、`pipeline`（内联 Definition，支持 DAG / `when` / `retry`）。执行时统一归一化为编排 Definition，由同一个 `runPipeline` 核心运行；步骤结果写入 `pipeline_runs`，任务级结果写入 `ai_job_runs`（含 `targetType`、`pipelineRunId`、`stepsSummary`、`durationMs`）。
 
 **安全**：定时执行没有界面审批，写操作必须在创建/更新时列入 `allowWrite`；`tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*` 一律拒绝；外部 MCP 工具同样按 `allowWrite` 白名单执行。
 
@@ -337,7 +335,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | AI 对话（流式、`@`、审批、历史、RAG 引用、消息操作） | ✅ 浮动面板 | ✅ 全屏页，能力一致 |
 | 后台运行断连恢复（`run_id` 轮询） | ✅ | ✅ 共用 `useAIChat` |
 | 声明式编排（`run_pipeline` 审批与卡片） | ✅ | ✅ 同一工具链路 |
-| 编排模板 / 流程图 / 定时触发（`/pipelines`） | ✅ 模板页 + DAG 图 | — 不在 PC→移动映射，窄视口走响应式 PC 布局 |
+| 编排流程图 / 节点 Inspector / 运行叠加（`/jobs`） | ✅ 任务详情页 | — 不在 PC→移动映射，窄视口走响应式 PC 布局 |
 | AI 面板左栏三 tab / `AiMessage` 共用消息组件 / 剧场模式 / 宽度拖拽 | ✅ | ✅ 共用 `AiMessage`，左栏形态仅 PC |
 | AI 定时任务 | ✅ `/jobs` | ✅ 首页入口指向 `/jobs` |
 | 通知邮箱编辑 | — | ✅「我的」页 |
@@ -355,7 +353,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | AI 对话 | 请求体 512 KB、消息 ≤30 条、单次上游 10 分钟、**后台 run 总超时 15 分钟**、Agent ≤5 轮工具、工具结果 32 KB、`write_file` 256 KB、`read_file` 4 MB（内容 64 KB）、审批 5 分钟 |
 | 断连恢复 | 300ms 轮询 `/api/ai/runs/{id}?offset=` 取 `delta` 增量，上限 15 分钟；本地 runId 30 分钟过期保护；运行状态不跨进程重启 |
 | 会话 | 快照 JSON ≤256 KB，列表最多 50 条，回传历史展开 ≤28 条；多个会话可同时生成并自由切换 |
-| 编排 | ≤50 步、每步 5 分钟、`retry` ≤5、同层并发 ≤4；写操作须 `allowWrite` 预授权；模板/规则/运行记录按 org+user 隔离；定时触发依赖 `schedule.enabled` |
+| 编排 | ≤50 步、每步 5 分钟、`retry` ≤5、同层并发 ≤4；写操作须 `allowWrite` 预授权；任务/规则/运行记录按 org+user 隔离；定时触发依赖 `schedule.enabled` |
 | RAG | 单文件 ≤2 MiB + 24 类白名单、query ≤2000 字、检索 8 秒超时、对话 top-5、索引 5 分钟超时 |
 | 定时任务 | 每分钟扫描（统一 `cron_triggers_runner`）、总超时 15 分钟（单步 5 分钟）、prompt ≤50 条任务、执行记录输出前 4 KB、写操作须 `allowWrite` |
 | 通知 | 587 STARTTLS 强制；`EMAIL_PASS` 必填；投递前去重，SMTP 失败不重投 |
@@ -373,8 +371,8 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | 关闭面板/断网后回答丢了 | 服务端后台 run 仍会跑完；刷新后会自动按 runId 恢复，也可查 `GET /api/ai/runs` |
 | 编排里写步骤失败 | 该工具名或非 GET 的 api 路径未写进 `allowWrite`；补上后重新执行 |
 | 编排结果太长看不到完整输出 | 工具只回步骤摘要，用 `GET /api/pipeline/runs/{id}` 查每步完整输出 |
-| 打开 `/pipelines?id=6` 提示「载入模板失败：Not found」 | 模板按 org+user 隔离，当前身份下不存在该 id（`40401`）。先看 `GET /api/pipeline/templates` 列表，清掉地址栏残留的 `?id=` 再打开 |
-| 模板的定时触发没执行 | 依次查 `schedule.enabled`、`cronExpr` 合法性、规则 `enabled`、`lastRunAt` / `lastStatus`、目标模板是否已被删除或改归属；规则增删改下一分钟生效 |
+| 打开 `/jobs?id=6` 提示任务不存在 | 任务按 org+user 隔离，当前身份下不存在该 id（`40401`）。先看 `GET /api/ai/jobs` 列表，清掉地址栏残留的 `?id=` 再打开 |
+| 编排型任务到点没执行 | 依次查 `schedule.enabled`、`cronExpr` 合法性、任务 `enabled`、`lastRunAt` / `lastStatus`、任务是否已被删除或改归属；任务增删改下一分钟生效 |
 | 刷新后 AI 回复停在半截或显示 `⚠ Error in input stream` | 现行实现按 runId 以 `offset` 游标增量续着输出；若是修复前已落库的占位消息，点「重新生成」或删除该条 |
 | 删掉的文件仍被 AI 检索/引用 | 多为绕过接口删除留下的孤儿索引；执行一次 `POST /api/ai/reindex` 即会按 owner 清掉，详见 [`05-operations.md`](05-operations.md#53-全量重建会清理孤儿索引) |
 | 上传成功但文件树看不到 | 命中 `server.hidden`，查看上传响应 `hiddenNames` |
@@ -397,8 +395,8 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | HITL 审批 | 写类工具执行前需用户在独立请求中确认 |
 | 后台 run / runId | 一次 `/api/ai/chat` 的后台执行实体与标识；断连后按此轮询恢复 |
 | Definition / Step | 编排的纯数据定义（`name`/`allowWrite`/`steps`）与单个步骤（`id`/`uses`/`needs`/`when`/`retry`/`with`） |
-| 模板（`pipeline_templates`） | 只存纯 Definition 的可复用编排对象，不含 cron / 启停 / 状态字段 |
-| 通用触发规则（`schedule_triggers`） | `target_type + target_id + cron` 的调度对象，当前目标类型为 `pipeline_template` 与 `job` |
+| 内联 Definition | 编排流程的纯数据定义，存在 `ai_jobs.target_json` 里，与 cron / 启停 / 预授权同属一条任务 |
+| 通用触发规则（`schedule_triggers`） | `target_type + target_id + cron` 的调度对象，定时任务由装配层写入 `target_type="job"` 的规则 |
 | DAG / `Layers()` | 按 `needs` 拓扑分层、同层并行的编排执行模型 |
 | `needs` / `when` / `retry` | 步骤依赖、执行条件（默认 `on_success`）与失败重试次数 |
 | `offset` / `delta` | 后台 run 详情接口的增量游标与本次新增正文 |

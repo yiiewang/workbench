@@ -12,6 +12,7 @@ package server
 //     形式回传模型，模型可据此向用户解释失败原因，而不是中断整次对话。
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -236,7 +237,7 @@ var aiTools = []aiTool{
 				},
 				"target": map[string]any{
 					"type":        "object",
-					"description": "执行对象（可选，替代 prompt）：{type: ai|tool|interface|pipeline, prompt?, tool?, path?, method?, query?, body?, definition?, templateId?, params?}",
+					"description": "执行对象（可选，替代 prompt）：{type: ai|tool|interface|pipeline, prompt?, tool?, path?, method?, query?, body?, definition?, params?}",
 				},
 				"allowWrite": map[string]any{
 					"type":        "array",
@@ -864,7 +865,10 @@ func execNotifyUser(s *Server, ctx iris.Context, args map[string]any) any {
 	if len(body) > 32*1024 {
 		return map[string]any{"error": "body too large (max 32KB)"}
 	}
-	s.bus.Publish(aiToolRunCtx(ctx), schedule.Event{
+	// 发布事件用独立 ctx：Publish 的订阅者各自 goroutine 异步执行，
+	// runCtx/请求 ctx 在工具返回后即被取消，会导致订阅者查库报 context canceled
+	// （与 aijob_trigger.go 同一处理方式）。
+	s.bus.Publish(context.Background(), schedule.Event{
 		Topic: schedule.TopicUserNotify,
 		Payload: schedule.UserNotifyEvent{
 			UserID:  currentUserID(ctx),

@@ -1,6 +1,6 @@
 # Workbench 文档中心
 
-> 文档版本：`docs v2.2`｜ 更新日期：2026-11-25 ｜ 状态：现行
+> 文档版本：`docs v2.4`｜ 更新日期：2026-11-25 ｜ 状态：现行
 > 本文件是 `docs/` 的 **00 号入口**：统一组织全部文档，定义编号规则、目录结构、版本说明、更新记录与维护规范。
 
 ## 1. 文档编号规则
@@ -36,7 +36,7 @@ workbench/
 | 03 | [`03-design.md`](03-design.md) | 开发者 | 架构、模块划分、关键流程、数据模型、接口/SSE、安全模型、扩展点、设计取舍 | 改代码、做方案评审 |
 | 04 | [`04-build-and-release.md`](04-build-and-release.md) | 开发者、发布者 | 工具链、Makefile target、构建约束、质量门禁、xgo 打包、发布流程、构建故障 | 构建、发版、排查编译问题 |
 | 05 | [`05-operations.md`](05-operations.md) | 运维、开发者 | 配置与合并语义、启用矩阵、**RAG 索引运维**、备份、迁移、日志、故障排查 | 配置、升级、索引清理、线上排查 |
-| 06 | [`06-schedule-executable-design.md`](06-schedule-executable-design.md) | 开发者 | 定时任务四种执行对象、target 归一化、调度收敛、静态预授权、迁移 000022–000024 | 改定时任务、评审调度方案 |
+| 06 | [`06-schedule-executable-design.md`](06-schedule-executable-design.md) | 开发者 | 设计决策记录：定时任务四种执行对象、target 归一化、调度收敛、静态预授权、迁移 000022–000027；顶部标注现行状态 | 评审调度方案、追溯 P0/P1/P2 决策 |
 
 | 状态 | 含义 | 处理 |
 |---|---|---|
@@ -56,14 +56,14 @@ workbench/
 
 | 项 | 值 |
 |---|---|
-| 文档版本 | `docs v2.3`（2026-11-25；追平定时任务四种执行对象、调度收敛与执行历史详情） |
-| 代码基线 | `v1.3.0-26-gc0577c4` + 工作树 000021–000026（AI 会话消息、target 五列、调度收敛、执行历史详情、job 重试、模板版本） |
-| 工作树增量 | 000021–000026 与定时任务 P0/P1/P2 代码；`make check`、`pnpm build` 通过 |
-| 撰写结束后新增 | 000021 已纳入本版；000022–000026 随定时任务改造同批纳入 |
+| 文档版本 | `docs v2.4`（2026-11-25；编排模板移除，编排流程并入定时任务） |
+| 代码基线 | `v1.3.0-26-gc0577c4` + 迁移 000021–000027（AI 会话消息、target 五列、调度收敛、执行历史详情、job 重试、模板表删除） |
+| 工作树增量 | `000027_drop_pipeline_templates`、模板 API / 页面 / 组件删除、`AiJobsView` 流程图集成；编排运行 SSE 进度流（`/api/pipeline/runs/{id}/stream` + 前端实时叠加）、`withToolContext` 身份反查、`notify_user` 发布 ctx 修复；`go test -tags sqlite_fts5 ./...`、`pnpm build` 通过 |
+| 撰写结束后新增 | 000021 已纳入 v2.3；000022–000026 随定时任务改造纳入；000027 随 v2.4 模板移除纳入；SSE 进度流与两处修复随 v2.5 纳入 |
 | 最近已发布版本 | `v1.3.0`（2026-11-10） |
-| 数据库迁移基线 | `000026_pipeline_template_versions`（26 个版本 / 52 个脚本） |
+| 数据库迁移基线 | `000027_drop_pipeline_templates`（27 个版本 / 54 个脚本） |
 | 内置 AI 工具 | 16 个（含运行时合成的 `run_pipeline`；8 个需审批） |
-| SSE 自定义事件 | 8 类（含 `run_id`） |
+| SSE 自定义事件 | AI 对话流 8 类（含 `run_id`）；另编排进度流 `progress` / `end` / `error` |
 | 运行时 | Go 1.25.0、`CGO_ENABLED=1`、tag `sqlite_fts5`；Vue 3 + Vite 5；SQLite WAL |
 
 ### 3.3 基线策略
@@ -74,6 +74,8 @@ workbench/
 
 | 版本 | 日期 | 变更 | 对应代码基线 |
 |---|---|---|---|
+| `docs v2.5` | 2026-11-25 | **编排运行实时进度链路**：新增 SSE 端点 `GET /api/pipeline/runs/{id}/stream`（推送源为 pipeline_runs 表 1s 轮询，`progress` 推整份快照、终态 `end` 关闭、15s 心跳防代理掐断、连接寿命上限 = 执行总超时 + 1min），前端 `streamPipelineRun` + `AiJobsView`「立即执行」后实时叠加流程图（「运行中…」指示、断流降级拉取最终结果、终态刷新执行记录）；两处缺陷修复同步成文：`withToolContext` 经 `db.GetUserNames` 反查补齐 `userName`/`orgName`（修定时任务里 `reindex_files` 拿空用户根目录、扫 0 文件"成功"）、`notify_user` 发布事件改用 `context.Background()`（修异步订阅者 `context canceled`）；同步 `02` §9.1/§9.2、`03` §5.8/§10、`05` §9、根 `README.md` | `v1.3.0-26-gc0577c4` + 工作树（未提交） |
+| `docs v2.4` | 2026-11-25 | **编排模板概念整体移除**（迁移 000027 删两张模板表与模板 API）：编排 Definition 内联进 `ai_jobs.target_json`、流程图 / 节点 Inspector / 运行叠加 / 立即执行并入 `/jobs`、`supportedTriggerTargets` 只留 `job`；同步 `01`/`02`/`03`/`04`/`05`/`06`/根 `README.md`；`06` 转为设计决策记录并标注现行状态；迁移基线 26/52 → 27/54、表 24 → 22 项 | `v1.3.0-26-gc0577c4` + 工作树 000027 |
 | `docs v2.3` | 2026-11-25 | 定时任务执行对象多态化与调度收敛：`ai_jobs` target 五列（000022）、`ai_jobs` 去调度列 + `schedule_triggers.lease_until` + job 规则回填（000023）、`ai_job_runs` 详情列（000024）、`ai_jobs.retry` 重试（000025）、模板版本历史（000026）；`02` §2.1/§8.3/§10/§13/§14、`03` §2.1/§5.8/§5.9/§6/§7.2/§8/§10、本文件 §2/§3.2/§6 同步；新增 `06` 设计文档；迁移基线 20/40 → 26/52，关闭 D20 | `v1.3.0-26-gc0577c4` + 工作树 000021–000024 |
 | `docs v2.2` | 2026-11-25 | 追平 `c0577c4`：编排模板 CRUD/手动触发、通用定时触发规则（000018–000020）、DAG `needs`/`when`/`retry` 与同层并行、`/pipelines` 流程图与模板页、AI 对话 300ms 游标恢复/多会话/`AiMessage`/PC 左栏三 tab；同步 `01`/`02`/`03`/`04`/`05` 的文件头与正文，迁移基线 17/34 → 20/40、表 21 → 23 项，关闭 D16/D18；**移除 `archive/` 归档目录与 A1–A3 编号、删除 §5.6 归档规则**，关闭 D14、D19 收敛为代码注释旧路径 | `v1.3.0-26-gc0577c4` |
 | `docs v2.1` | 2026-11-24 | 全量重建新增孤儿索引清理（严格「文件已不存在」判定、按 owner 隔离、`pruned` 计数）；同步 `05` §5.3–§5.5/§9、`02` §8.4/§14、`03` §5.5/§10 | 同一代码基线 + 本次未提交改动 |
@@ -152,10 +154,10 @@ workbench/
 | 内置工具 | `internal/server/aitools.go` 的 `aiTools`（`Name`/`NeedApproval`）与 `pipelineTool()` | `02` §8.3、`03` §9 |
 | SSE 事件 | `internal/server/ai.go` 的 `sseWriteEvent`、`frontend/src/api/ai.ts`（含 `getAIRun(offset)` 的 `delta`） | `03` §7.3、`02` §8.2 |
 | 编排定义 | `internal/pipeline/pipeline.go` 的 `Definition`/`Step.Needs`/`When`/`Retry`/`Layers()`/`Runner`、`server/pipeline.go` 的 `runPipeline` | `02` §9、`03` §5.9 |
-| 模板与通用触发 | `internal/db/pipeline_templates.go`、`cron_triggers.go`、`internal/schedule/triggers.go` 的 `NewTriggersJob`/`TriggerHandler`、`server/pipeline_http.go`、`server/schedule_triggers.go` | `02` §9、`03` §5.8/§5.9/§6/§7.2 |
+| 定时任务与通用触发 | `server/aijob_target.go` / `aijob_exec.go` / `aijob_trigger.go`、`internal/db/cron_triggers.go`、`internal/schedule/triggers.go` 的 `NewTriggersJob`/`TriggerHandler`、`server/pipeline_http.go`、`server/schedule_triggers.go` | `02` §9/§10、`03` §5.8/§5.9/§6/§7.2 |
 | 事件 topic | `internal/schedule/jobs.go` 的 `KnownTopics`、`notify/email.go` | `03` §5.8 |
 | 业务码 | `internal/server/codes.go` | `02` §3 |
-| 前端路由与分流 | `frontend/src/router/index.ts`（含 `/pipelines`）、`config.yaml` 的 `routes` | `02` §12、`03` §5.10 |
+| 前端路由与分流 | `frontend/src/router/index.ts`（定时任务与编排共用 `/jobs`）、`config.yaml` 的 `routes` | `02` §12、`03` §5.10 |
 | 构建与发布 | `Makefile`、`frontend/package.json`、`vite.config.ts`、`scripts/package.sh` | `04` |
 | 版本基线 | `git describe --tags --always --dirty`、迁移目录最大编号 | 本文件 §3.2 |
 
@@ -168,7 +170,7 @@ workbench/
 | # | 位置 | 过时/不准确描述 | 当前事实 | 状态 |
 |---|---|---|---|---|
 | D01 | 根 `README.md` API Endpoints | `/__map__`、`/__tree__`、`/tasks.json` GET/PUT | 实际 `/api/map`、`/api/tree`、`/api/tasks*`；`PUT /api/tasks` 自 1.3.0 废弃，改为带 `baseRevision` 的 `PATCH/POST/DELETE /api/tasks/{id}` | 待修正 |
-| D02 | 根 `README.md` Database | 表清单含 `visit_logs`、`version_json`，密码写 SHA-256 | 两表/列已删；密码 bcrypt（仅兼容旧 SHA-256 存量）；现行 **23 项表**见 `03-design.md` §6.2 | 待修正 |
+| D02 | 根 `README.md` Database | 表清单含 `visit_logs`、`version_json`，密码写 SHA-256 | 两表/列已删；密码 bcrypt（仅兼容旧 SHA-256 存量）；现行 **22 项表**见 `03-design.md` §6.2 | 待修正 |
 | D03 | 根 `README.md` Directory Structure | `internal/` 只列 3 个包；Vite 多入口 `todo.html`；`scripts/` 只列 `package.sh` | 9 个包（含 `pipeline`/`rag`/`schedule`/`notify`/`mcpclient`/`sqlitevec`）；Vite 单入口；`scripts/` 另有 `ragclean.go` | 待修正 |
 | D04 | 根 `README.md` AI Agent Tools | 标题写「13 个」，表格列 12 个 | 实际 **16 个**（缺 `search_files`、`reindex_files`、`reindex_status`、`run_pipeline`）；8 个需审批，`create_task` 不需要 | 待修正 |
 | D05 | 根 `README.md` Quick Start | "open http://localhost:80" | 代码默认 `8080`，`config.yaml` 示例 `8001` | **已修正**（v2.0 迁入 `01`） |
@@ -186,6 +188,8 @@ workbench/
 | D17 | 根 `README.md` Features / API Endpoints | 未覆盖后台运行、编排模板/定时触发、断点恢复等新能力 | `docs v2.3` 已补 Features（编排、定时任务四类执行对象）、AI 工具 16 个、编排 / 模板版本 / 通用触发 API；断点恢复见 `02` §8.5 | **已补充（docs v2.3）** |
 | D18 | 提交 `c0577c4`（000018–000020 编排模板与通用定时触发） | v2.0 正文未包含（`pipeline_templates` 表、HTTP 直调入口、cron 触发模板、共享 `runPipeline` 核心） | 模板只存 Definition，cron/启停/状态已迁至 `schedule_triggers`（000019/000020）；`docs v2.2` 已写入 `02` §9、`03` §5.9/§6/§7.2、`05` §4/§7 | **已同步（docs v2.2）** |
 | D19 | `internal/notify/email_template.go` 注释、根 `CHANGELOG.md` 历史条目 | 仍写 `docs/email-template-preview.html` 及旧 `design.md` / 迁移基线 000015 路径 | 邮件模板预览与两份历史设计稿已删除；`CHANGELOG.md` 历史条目按「不删历史行」保留 | 代码注释待修正 |
-| D20 | 本文件 §3.2 / `03` §6.1 迁移基线 | `docs v2.2` 写 `000020_pipeline_templates_pure`（20 个版本 / 40 个脚本） | 工作树已有 000021（AI 会话消息）与 000022–000026，现为 26 个版本 / 52 个脚本；§3.2 与 `03` §6.1 已更新 | **已修正（docs v2.3）** |
+| D20 | 本文件 §3.2 / `03` §6.1 迁移基线 | `docs v2.2` 写 `000020_pipeline_templates_pure`（20 个版本 / 40 个脚本） | 000021–000026 补齐后为 26 个版本 / 52 个脚本（v2.3 修正）；000027 后为 **27 个版本 / 54 个脚本**，§3.2 与 `03` §6.1、`05` §7 已同步 | **已修正（docs v2.4）** |
+
+| D21 | `02`/`03`/`05`/`06`/根 `README.md` 的编排模板描述 | `docs v2.2`/`v2.3` 把编排模板写成独立功能（`/pipelines` 页、模板表/版本表、模板 CRUD API、`pipeline_template` 触发目标） | 000027 已整体移除模板概念：编排 Definition 内联进 `ai_jobs.target_json`，流程图能力并入 `/jobs`；`06` 转为设计决策记录并加顶部现行状态说明，`02`/`03`/`05`/根 `README.md` 同批同步；结果为邮件跳转死链 `/pipelines?run=` 改 `/jobs?id=` | **已同步（docs v2.4）** |
 
 新增偏差时追加一行并写清「位置 / 描述 / 当前事实 / 状态」；修正后把状态改为「已修正（版本）」，不删除历史行，便于追溯。

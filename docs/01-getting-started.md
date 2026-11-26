@@ -68,7 +68,7 @@ curl -s -X POST http://localhost:8001/api/set-password \
 
 ## 6. SPA 路由注册（部署必做）
 
-前端用 `createWebHistory()`，**所有 SPA 路径必须在 `config.yaml` 的 `routes` 注册为 `__spa__`**：`/login`、`/file`、`/todo`、`/jobs`、`/pipelines`、`/shares`、`/admin`、`/m`、`/m/files`、`/m/file`、`/m/ai`、`/m/todo`、`/m/profile` 等。未注册时浏览器直接刷新该 URL 会被静态兜底当作资源请求，返回 401。新增前端页面时同步加键，否则同样问题。`/pipelines` 与 `/jobs` 一样不在 PC→移动映射表中，窄视口下以响应式 PC 布局呈现。
+前端用 `createWebHistory()`，**所有 SPA 路径必须在 `config.yaml` 的 `routes` 注册为 `__spa__`**：`/login`、`/file`、`/todo`、`/jobs`、`/shares`、`/admin`、`/m`、`/m/files`、`/m/file`、`/m/ai`、`/m/todo`、`/m/profile` 等。未注册时浏览器直接刷新该 URL 会被静态兜底当作资源请求，返回 401。新增前端页面时同步加键，否则同样问题。`/jobs` 不在 PC→移动映射表中，窄视口下以响应式 PC 布局呈现；编排流程已并入该页，无独立 `/pipelines` 路由。
 
 ## 7. 公网部署
 
@@ -84,7 +84,7 @@ client ──HTTPS──> nginx (443, TLS) ──HTTP──> workbench (127.0.0.
 
 ## 8. 验证与下一步
 
-启动后依次确认：首页能打开 → 登录成功 → `/api/ai/status` 返回预期 `enabled` → `GET /api/ai/index-status` 可用（RAG 启用时）→ 上传一个文本文件后能被 `search_files` 检索到 → 打开 `/pipelines` 能新建模板并看到 DAG 流程图。
+启动后依次确认：首页能打开 → 登录成功 → `/api/ai/status` 返回预期 `enabled` → `GET /api/ai/index-status` 可用（RAG 启用时）→ 上传一个文本文件后能被 `search_files` 检索到 → 打开 `/jobs` 新建任务、类型选「编排流程」并看到 DAG 流程图。
 
 | 需求 | 文档 |
 |---|---|

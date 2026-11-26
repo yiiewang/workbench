@@ -82,7 +82,7 @@ build/workbench  （单二进制：HTTP 服务 + UI + SQLite 驱动 + vec0 扩�
 
 ## 6. 质量门禁
 
-发布前执行 `make check`（`vet` + `golangci-lint` + `test`），三者都带 `sqlite_fts5` 与 `CGO_ENABLED=1`。单测覆盖：cron 解析/匹配、事件总线分发与 panic 隔离、到期扫描去重、邮件内容与报文组装、`safeJoin` 沙箱、审批协调器、AI 会话持久化、vec0 KNN 冒烟、存量库基线迁移、压缩行为、RAG 切块与 HTML 提取、后台运行状态机（`TestSplitRunResult` / `TestForwardAIStream_DeltaCallback` 的 `offset` 增量）、编排 DAG 菱形/环/同层并行/`when`/`retry`、模板 CRUD 与 org+user 隔离、通用触发规则 CRUD/过滤/分钟键防重/未知类型/错误回写、000019 回填与 000020 回滚反向回填等。
+发布前执行 `make check`（`vet` + `golangci-lint` + `test`），三者都带 `sqlite_fts5` 与 `CGO_ENABLED=1`。单测覆盖：cron 解析/匹配、事件总线分发与 panic 隔离、到期扫描去重、邮件内容与报文组装、`safeJoin` 沙箱、审批协调器、AI 会话持久化、vec0 KNN 冒烟、存量库基线迁移、压缩行为、RAG 切块与 HTML 提取、后台运行状态机（`TestSplitRunResult` / `TestForwardAIStream_DeltaCallback` 的 `offset` 增量）、编排 DAG 菱形/环/同层并行/`when`/`retry`、定时任务 target 归一化与 org+user 隔离、通用触发规则 CRUD/过滤/分钟键防重/未知类型/错误回写、000019 回填与 000020 回滚反向回填等。
 
 ## 7. 跨平台打包
 

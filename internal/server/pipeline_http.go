@@ -1,31 +1,42 @@
 package server
 
-// 编排 HTTP 入口：直接运行 Definition、模板 CRUD、手动触发模板，
-// 以及注册给通用调度器的执行入口。模板只存 Definition；定时配置
-// 属于调度领域（schedule_triggers），不在这里。
+// 编排 HTTP 入口：直接运行一份 Definition（定时任务的内联编排、前端立即执行共用）。
+// 编排流程不落独立模板表，Definition 直接存在 ai_jobs.target_json 里。
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
-	"strconv"
-	"strings"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/kataras/iris/v12"
-	"github.com/yiiewang/workbench/internal/db"
 	"github.com/yiiewang/workbench/internal/pipeline"
 )
 
 // pipelineRunTimeout 后台异步执行一份编排的总超时
 const pipelineRunTimeout = 15 * time.Minute
 
-type pipelineTemplateBody struct {
-	Name       string `json:"name"`
-	Definition string `json:"definition"`
+// pipelineStreamPoll 轮询 pipeline_runs 的间隔（进度按 DAG 层落库，秒级足够）
+const pipelineStreamPoll = time.Second
+
+// pipelineStreamHeartbeat SSE 心跳间隔：慢步骤（llm 单步最长 5min）期间
+// 无事件可推，定期发一条注释行防止代理/浏览器按空闲连接掐断
+const pipelineStreamHeartbeat = 15 * time.Second
+
+// pipelineStreamWriter 最小 SSE 写出器：http.Flusher 断言刷新。
+// ai.go 的 aiRunWriter 自带镜像落库逻辑，这里只需要裸写。
+type pipelineStreamWriter struct{ w io.Writer }
+
+func (s pipelineStreamWriter) Write(p []byte) (int, error) { return s.w.Write(p) }
+
+func (s pipelineStreamWriter) Flush() {
+	if f, ok := s.w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func parsePipelineDefinition(raw string) (pipeline.Definition, error) {
@@ -37,16 +48,6 @@ func parsePipelineDefinition(raw string) (pipeline.Definition, error) {
 		return def, err
 	}
 	return def, nil
-}
-
-func validatePipelineTemplateBody(b pipelineTemplateBody) error {
-	if strings.TrimSpace(b.Name) == "" {
-		return fmt.Errorf("name is required")
-	}
-	if _, err := parsePipelineDefinition(b.Definition); err != nil {
-		return err
-	}
-	return nil
 }
 
 // handlePipelineRun POST /api/pipeline/run — 后台异步执行一份 Definition
@@ -75,204 +76,79 @@ func (s *Server) handlePipelineRun(ctx iris.Context) {
 	writeOK(ctx, map[string]any{
 		"runId":   runID,
 		"started": true,
-		"note":    "用 GET /api/pipeline/runs/{id} 查询逐步结果",
+		"note":    "用 GET /api/pipeline/runs/{id}/stream 实时订阅，或 GET /api/pipeline/runs/{id} 查询结果",
 	})
 }
 
-// ============================================================
-// 编排模板 CRUD（纯 Definition 固化复用；定时规则走 /api/schedule/triggers）
-// ============================================================
-
-func (s *Server) handlePipelineTemplatesList(ctx iris.Context) {
-	limit, _ := strconv.Atoi(ctx.URLParam("limit"))
-	templates, err := s.db.ListPipelineTemplates(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), limit)
-	if err != nil {
-		serverError(ctx, "list pipeline templates failed", err)
-		return
-	}
-	writeOK(ctx, map[string]any{"templates": templates})
-}
-
-// handlePipelineTemplateGet 模板详情（含 definition，编辑表单用）
-func (s *Server) handlePipelineTemplateGet(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
-		return
-	}
-	t, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id)
-	if err != nil || !ok {
-		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
-		return
-	}
-	writeOK(ctx, t)
-}
-
-func (s *Server) handlePipelineTemplateCreate(ctx iris.Context) {
-	var body pipelineTemplateBody
-	if err := readJSON(ctx, &body); err != nil {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
-		return
-	}
-	if err := validatePipelineTemplateBody(body); err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
-		return
-	}
-	id, err := s.db.CreatePipelineTemplate(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx),
-		body.Name, body.Definition)
-	if err != nil {
-		serverError(ctx, "create pipeline template failed", err)
-		return
-	}
-	writeOK(ctx, map[string]any{"id": id})
-}
-
-func (s *Server) handlePipelineTemplateUpdate(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
-		return
-	}
-	var body pipelineTemplateBody
-	if err := readJSON(ctx, &body); err != nil {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
-		return
-	}
-	if err := validatePipelineTemplateBody(body); err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
-		return
-	}
+// handlePipelineRunStream GET /api/pipeline/runs/{id}/stream — SSE 实时推送运行进度。
+// 推送源是 pipeline_runs 表轮询：Runner.onStep 按层全量快照落库，本端点比对
+// status/steps/err_msg 变化即推一份 progress（data 为整份运行快照），终态
+// （done/failed）再推 end 后关闭。不做进程内 pub/sub——DB 轮询对定时触发等
+// 所有入口产生的 run 一视同仁，实现最简，且执行端无需任何改动。
+func (s *Server) handlePipelineRunStream(ctx iris.Context) {
 	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
-	_, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), orgID, userID, id)
-	if err != nil || !ok {
-		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
-		return
-	}
-	if err := s.db.UpdatePipelineTemplate(ctx.Request().Context(), orgID, userID, id,
-		body.Name, body.Definition); err != nil {
-		serverError(ctx, "update pipeline template failed", err)
-		return
-	}
-	writeOK(ctx, map[string]any{"status": "ok"})
-}
+	runID := ctx.Params().Get("id")
+	rctx := ctx.Request().Context()
 
-func (s *Server) handlePipelineTemplateDelete(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
+	run, ok, err := s.db.GetPipelineRun(rctx, orgID, userID, runID)
 	if err != nil {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+		serverError(ctx, "get pipeline run failed", err)
 		return
-	}
-	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
-	if err := s.db.DeletePipelineTemplate(ctx.Request().Context(), orgID, userID, id); err != nil {
-		serverError(ctx, "delete pipeline template failed", err)
-		return
-	}
-	// 模板删除后清理指向它的触发规则，避免通用调度器每分钟报「目标不存在」
-	if err := s.db.DeleteCronTriggersForTarget(ctx.Request().Context(), orgID, userID, "pipeline_template", id); err != nil {
-		slog.Warn("delete orphan schedule triggers failed", "template", id, "err", err)
-	}
-	writeOK(ctx, map[string]any{"status": "ok"})
-}
-
-// handlePipelineTemplateVersions GET /api/pipeline/templates/{id}/versions — 版本列表
-func (s *Server) handlePipelineTemplateVersions(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
-		return
-	}
-	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
-	if _, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), orgID, userID, id); err != nil || !ok {
-		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
-		return
-	}
-	versions, err := s.db.ListPipelineTemplateVersions(ctx.Request().Context(), orgID, userID, id)
-	if err != nil {
-		serverError(ctx, "list pipeline template versions failed", err)
-		return
-	}
-	writeOK(ctx, map[string]any{"versions": versions})
-}
-
-// handlePipelineTemplateRestore POST /api/pipeline/templates/{id}/versions/{version}/restore
-func (s *Server) handlePipelineTemplateRestore(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	version, verr := strconv.Atoi(ctx.Params().Get("version"))
-	if err != nil || id <= 0 || verr != nil || version <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
-		return
-	}
-	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
-	if _, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), orgID, userID, id); err != nil || !ok {
-		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
-		return
-	}
-	newVersion, err := s.db.RestorePipelineTemplateVersion(ctx.Request().Context(), orgID, userID, id, version)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			writeFail(ctx, iris.StatusNotFound, CodeNotFound)
-			return
-		}
-		serverError(ctx, "restore pipeline template version failed", err)
-		return
-	}
-	writeOK(ctx, map[string]any{"status": "ok", "version": newVersion})
-}
-
-// handlePipelineTemplateRun POST /api/pipeline/templates/{id}/run — 手动触发
-func (s *Server) handlePipelineTemplateRun(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
-		return
-	}
-	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
-	t, ok, err := s.db.GetPipelineTemplate(ctx.Request().Context(), orgID, userID, id)
-	if err != nil || !ok {
-		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
-		return
-	}
-	def, err := parsePipelineDefinition(t.Definition)
-	if err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
-		return
-	}
-	// 手动触发只负责启动一次执行；状态与过程由 pipeline_runs 记录，
-	// 触发规则自身的 last_run_at/last_status 只归定时调度使用。
-	runID := uuid.NewString()
-	go func() {
-		if _, err := s.runTemplateAsync(runID, orgID, userID, def); err != nil {
-			slog.Warn("pipeline template manual run failed", "template", id, "run", runID, "err", err)
-		}
-	}()
-	writeOK(ctx, map[string]any{
-		"runId": runID, "templateId": id, "started": true,
-		"note": "用 GET /api/pipeline/runs/{id} 查询逐步结果",
-	})
-}
-
-// runTemplateAsync 后台执行一次模板（带独立超时，不绑定请求连接）
-func (s *Server) runTemplateAsync(runID string, orgID, userID int64, def pipeline.Definition) ([]pipeline.StepResult, error) {
-	runCtx, cancel := context.WithTimeout(context.Background(), pipelineRunTimeout)
-	defer cancel()
-	return s.runPipeline(runCtx, orgID, userID, runID, def)
-}
-
-// triggerPipelineTemplate 是 pipeline 模块注册给通用调度器的执行入口。
-// 只认通用触发规则行（含归属与 target_id），按 id 读模板 Definition 并执行；
-// schedule 包不需要知道 pipeline 是什么，也不需要反向依赖 server。
-func (s *Server) triggerPipelineTemplate(runCtx context.Context, t db.CronTriggerWithOwner) error {
-	tpl, ok, err := s.db.GetPipelineTemplate(runCtx, t.OrgID, t.UserID, t.TargetID)
-	if err != nil {
-		return err
 	}
 	if !ok {
-		return fmt.Errorf("pipeline template %d not found", t.TargetID)
+		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
+		return
 	}
-	def, err := parsePipelineDefinition(tpl.Definition)
-	if err != nil {
-		return err
+
+	ctx.ContentType("text/event-stream; charset=utf-8")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("X-Accel-Buffering", "no")
+	ctx.StatusCode(iris.StatusOK)
+	w := pipelineStreamWriter{w: ctx.ResponseWriter()}
+	// 连接建立先推一份当前快照（叠加历史 run 时立即有状态可显示）
+	sseWriteEvent(w, "progress", run)
+	if run.Status != "running" {
+		sseWriteEvent(w, "end", map[string]string{"status": run.Status})
+		return
 	}
-	_, err = s.runPipeline(runCtx, t.OrgID, t.UserID, uuid.NewString(), def)
-	return err
+
+	lastStatus, lastSteps, lastErr := run.Status, string(run.Steps), run.Error
+	ticker := time.NewTicker(pipelineStreamPoll)
+	defer ticker.Stop()
+	hb := time.NewTicker(pipelineStreamHeartbeat)
+	defer hb.Stop()
+	// 连接寿命上限 = 执行总超时 + 1min 余量：进程崩溃会让 run 永远停在
+	// running（落库方已不在），无此上限连接将永久挂起
+	limit := time.After(pipelineRunTimeout + time.Minute)
+	for {
+		select {
+		case <-rctx.Done(): // 客户端断开
+			return
+		case <-limit:
+			sseWriteEvent(w, "error", map[string]string{"msg": "run 超时仍在 running，订阅结束"})
+			return
+		case <-hb.C:
+			fmt.Fprint(w, ": keep-alive\n\n")
+			w.Flush()
+		case <-ticker.C:
+			r, ok, err := s.db.GetPipelineRun(rctx, orgID, userID, runID)
+			if err != nil {
+				slog.Error("pipeline run stream: query failed", "run", runID, "err", err)
+				return
+			}
+			if !ok {
+				sseWriteEvent(w, "error", map[string]string{"msg": "run not found"})
+				return
+			}
+			if r.Status == lastStatus && string(r.Steps) == lastSteps && r.Error == lastErr {
+				continue
+			}
+			lastStatus, lastSteps, lastErr = r.Status, string(r.Steps), r.Error
+			sseWriteEvent(w, "progress", r)
+			if r.Status != "running" {
+				sseWriteEvent(w, "end", map[string]string{"status": r.Status})
+				return
+			}
+		}
+	}
 }

@@ -1,0 +1,10 @@
+-- 000001_core.down.sql
+DROP TABLE IF EXISTS notify_log;
+DROP TABLE IF EXISTS app_secrets;
+DROP TABLE IF EXISTS rate_limits;
+DROP TABLE IF EXISTS user_org_feature;
+DROP TABLE IF EXISTS user_orgs;
+DROP TABLE IF EXISTS shares;
+DROP TABLE IF EXISTS roles;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS orgs;

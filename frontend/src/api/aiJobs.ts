@@ -1,4 +1,4 @@
-// 定时任务 API（/api/ai/jobs）：任务定义 + 触发规则（cron/enabled 由后端映射）。
+// 定时任务 API（/api/jobs）：任务定义 + 触发规则（cron/enabled 由后端映射）。
 import { apiCall } from '../lib/common'
 
 export type AIJobTargetType = 'ai' | 'tool' | 'interface' | 'pipeline'
@@ -46,11 +46,11 @@ export interface AIJobBody {
 }
 
 export async function listAIJobs(): Promise<{ jobs: AIJob[] }> {
-  return apiCall('/api/ai/jobs')
+  return apiCall('/api/jobs')
 }
 
 export async function createAIJob(body: AIJobBody): Promise<{ id: number }> {
-  return apiCall('/api/ai/jobs', {
+  return apiCall('/api/jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -58,7 +58,7 @@ export async function createAIJob(body: AIJobBody): Promise<{ id: number }> {
 }
 
 export async function updateAIJob(id: number, body: AIJobBody): Promise<void> {
-  return apiCall(`/api/ai/jobs/${id}`, {
+  return apiCall(`/api/jobs/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -66,7 +66,7 @@ export async function updateAIJob(id: number, body: AIJobBody): Promise<void> {
 }
 
 export async function deleteAIJob(id: number): Promise<void> {
-  return apiCall(`/api/ai/jobs/${id}`, { method: 'DELETE' })
+  return apiCall(`/api/jobs/${id}`, { method: 'DELETE' })
 }
 
 // 执行历史
@@ -85,5 +85,5 @@ export interface AIJobRun {
 }
 
 export async function listAIJobRuns(id: number, limit = 20): Promise<{ runs: AIJobRun[] }> {
-  return apiCall(`/api/ai/jobs/${id}/runs?limit=${limit}`)
+  return apiCall(`/api/jobs/${id}/runs?limit=${limit}`)
 }

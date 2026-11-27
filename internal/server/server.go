@@ -78,6 +78,9 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 		app: iris.New(),
 	}
 
+	// 阶段 2：存量 ai/tool/interface 任务统一转 pipeline（幂等，失败不影响启动）
+	srv.normalizeLegacyTargets(context.Background())
+
 	// MCP 外部工具：启动时拉取各服务 tools/list（配置错误 fail fast，服务不可达跳过）
 	if err := srv.initMCPTools(); err != nil {
 		return nil, err
@@ -87,7 +90,7 @@ func New(database *db.DB, cfg *config.Config, tokenSecret []byte, logFile string
 	// schedule.enabled 时启动 cron 引擎（表达式配置错误 fail fast）
 	bus := schedule.NewEventBus()
 	srv.bus = bus
-	if err := notify.SubscribeEmailNotifier(cfg.Notify.Email, cfg.SiteURL, database, bus); err != nil {
+	if err := notify.SubscribeEmailNotifier(cfg.Notify.Email, cfg.SiteURL, database, bus, srv.formatNotifyBody); err != nil {
 		return nil, err
 	}
 	if cfg.Schedule.Enabled {
@@ -236,11 +239,11 @@ func (s *Server) App() *iris.Application {
 	api.Put("/schedule/triggers/{id}", auth, s.handleScheduleTriggerUpdate)
 	api.Delete("/schedule/triggers/{id}", auth, s.handleScheduleTriggerDelete)
 	// AI 定时任务 CRUD（用户自建"到点让 AI 执行 prompt"）
-	api.Get("/ai/jobs", auth, s.handleAIJobsList)
-	api.Post("/ai/jobs", auth, s.handleAIJobCreate)
-	api.Get("/ai/jobs/{id}/runs", auth, s.handleAIJobRuns)
-	api.Put("/ai/jobs/{id}", auth, s.handleAIJobUpdate)
-	api.Delete("/ai/jobs/{id}", auth, s.handleAIJobDelete)
+	api.Get("/jobs", auth, s.handleAIJobsList)
+	api.Post("/jobs", auth, s.handleAIJobCreate)
+	api.Get("/jobs/{id}/runs", auth, s.handleAIJobRuns)
+	api.Put("/jobs/{id}", auth, s.handleAIJobUpdate)
+	api.Delete("/jobs/{id}", auth, s.handleAIJobDelete)
 	// AI 会话历史 CRUD（回到历史会话继续沟通）
 	api.Get("/ai/sessions", auth, s.handleAISessionsList)
 	api.Post("/ai/sessions", auth, s.handleAISessionCreate)

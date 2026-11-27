@@ -42,6 +42,7 @@ type StepResult struct {
 	Status     string `json:"status"` // ok | failed | skipped
 	Output     any    `json:"output,omitempty"`
 	Error      string `json:"error,omitempty"`
+	Reasoning  string `json:"reasoning,omitempty"` // llm 步的思考过程（非流式 Agent 一轮或多轮拼接）
 	DurationMs int64  `json:"durationMs"`
 }
 
@@ -165,15 +166,35 @@ func parseUses(uses string) (kind, name string, ok bool) {
 	return uses, "", true
 }
 
-// RunContext 一次运行的上下文：身份 + 已完成步骤的输出
+// RunContext 一次运行的上下文：身份 + 已完成步骤的输出 + llm 步思考过程
 type RunContext struct {
 	OrgID   int64
 	UserID  int64
 	Outputs map[string]any
+
+	mu         sync.Mutex
+	reasonings map[string]string
 }
 
 func NewRunContext(orgID, userID int64) *RunContext {
-	return &RunContext{OrgID: orgID, UserID: userID, Outputs: map[string]any{}}
+	return &RunContext{OrgID: orgID, UserID: userID, Outputs: map[string]any{}, reasonings: map[string]string{}}
+}
+
+// SetReasoning 记录某步 llm 的思考过程（worker goroutine 调用，需加锁）。
+func (r *RunContext) SetReasoning(stepID, text string) {
+	if text == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reasonings[stepID] = text
+}
+
+// Reasoning 读取某步的思考过程。
+func (r *RunContext) Reasoning(stepID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reasonings[stepID]
 }
 
 var outputRefRe = regexp.MustCompile(`\{\{\s*steps\.([A-Za-z0-9_-]+)\.output\s*\}\}`)
@@ -216,9 +237,9 @@ func (r *RunContext) Interpolate(v any) any {
 	}
 }
 
-// Executor 执行一个步骤；kind/name 来自 uses，args 已完成变量插值。
+// Executor 执行一个步骤；stepID/kind/name 来自步骤定义，args 已完成变量插值。
 // 由 server 装配注入（工具层/HTTP/LLM），本包不关心具体实现。
-type Executor func(ctx context.Context, kind, name string, args map[string]any, rctx *RunContext) (any, error)
+type Executor func(ctx context.Context, stepID, kind, name string, args map[string]any, rctx *RunContext) (any, error)
 
 // maxParallelSteps 同层并发上限：LLM / embedding 调用成本高，避免一次打满上游
 const maxParallelSteps = 4
@@ -226,12 +247,21 @@ const maxParallelSteps = 4
 // Runner DAG 执行器：按依赖分层、同层并行；任一步失败即停，未执行步骤保持 skipped。
 type Runner struct {
 	StepTimeout time.Duration
-	exec        Executor
-	onStep      func([]StepResult)
+	// LLMStepTimeout llm 步单独超时（联网检索 + 长文生成通常更久）；0 表示沿用 StepTimeout。
+	LLMStepTimeout time.Duration
+	// OnAttempt 每次尝试开始前的进度回调（可选）：把 attempt 写进运行快照，
+	// 避免重试期间 pipeline_runs 的 steps 一直是空数组。
+	OnAttempt func(StepResult)
+	exec      Executor
+	onStep    func([]StepResult)
 }
 
 func NewRunner(exec Executor, onStep func([]StepResult)) *Runner {
-	return &Runner{StepTimeout: 5 * time.Minute, exec: exec, onStep: onStep}
+	return &Runner{
+		StepTimeout:    5 * time.Minute,
+		LLMStepTimeout: 10 * time.Minute,
+		exec:           exec, onStep: onStep,
+	}
 }
 
 type stepOutcome struct {
@@ -293,7 +323,8 @@ func (r *Runner) Run(ctx context.Context, def Definition, rctx *RunContext) ([]S
 					out, err, dur := r.execWithRetry(ctx, s, kind, name, args, rctx)
 					outCh <- stepOutcome{
 						idx: idx,
-						res: StepResult{ID: s.ID, Uses: s.Uses, DurationMs: dur.Milliseconds()},
+						res: StepResult{ID: s.ID, Uses: s.Uses, DurationMs: dur.Milliseconds(),
+							Reasoning: rctx.Reasoning(s.ID)},
 						out: out, err: err,
 					}
 				}(idx, s, kind, name, args)
@@ -324,16 +355,28 @@ func (r *Runner) execWithRetry(ctx context.Context, s Step, kind, name string, a
 	start := time.Now()
 	var out any
 	var err error
+	// 单步含重试的总预算：不能超过父 ctx 的剩余时间（定时任务父 ctx 是 15min
+	// runCtx）。llm 步按 LLMStepTimeout 单独计算，其余步骤用 StepTimeout。
+	timeout := r.StepTimeout
+	if kind == "llm" && r.LLMStepTimeout > 0 {
+		timeout = r.LLMStepTimeout
+	}
+	budgetCtx, cancelBudget := context.WithTimeout(ctx, timeout*time.Duration(s.Retry+1))
+	defer cancelBudget()
 	for attempt := 0; attempt <= s.Retry; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
-			case <-ctx.Done():
-				return nil, ctx.Err(), time.Since(start)
+			case <-budgetCtx.Done():
+				return nil, budgetCtx.Err(), time.Since(start)
 			}
 		}
-		stepCtx, cancel := context.WithTimeout(ctx, r.StepTimeout)
-		out, err = r.exec(stepCtx, kind, name, args, rctx)
+		if r.OnAttempt != nil {
+			r.OnAttempt(StepResult{ID: s.ID, Uses: s.Uses, Status: "running",
+				Error: fmt.Sprintf("attempt %d/%d", attempt+1, s.Retry+1)})
+		}
+		stepCtx, cancel := context.WithTimeout(budgetCtx, timeout)
+		out, err = r.exec(stepCtx, s.ID, kind, name, args, rctx)
 		cancel()
 		if err == nil {
 			return out, nil, time.Since(start)

@@ -60,7 +60,8 @@
 | 定时调度 | `schedule.enabled: true` | 不启动 cron，任务提醒、定时任务与通用触发规则（job）都不执行 |
 | 通用定时触发 | `schedule.enabled: true` + 任务 `enabled=true` + 合法 `cronExpr` + 目标任务存在且归属当前身份 | `cron_triggers_runner` 不扫描或跳过该规则；任务详情页「立即执行」与 `POST /api/pipeline/run` 直调不受影响 |
 | 邮件通知 | `notify.email.enabled: true` **且** `schedule.enabled: true`，`host`/`user` 非空、`EMAIL_PASS` 已注入 | 事件照常发布但无订阅者；配置缺失时启动直接报错 |
-| 邮件跳转按钮 | `site_url` 为合法 http(s) 地址 | 邮件不含任何链接（避免 `localhost` 死链） |
+| 信件式结果邮件 | 上述条件 + `ai.chat.api_key` / `base_url` 已配置（AI 排版器可用） | 排版报错或 60s 超时 → 降级为卡片式模板 + `mdToHTML`，邮件照发；`notify_user` 短通知与到期/时刻提醒始终用卡片式 |
+| 邮件跳转按钮 | `site_url` 为合法 http(s) 地址 | 邮件不含任何链接（避免 `localhost` 死链）；AI 也不会生成站内链接 |
 
 ## 5. RAG 索引运维
 
@@ -173,11 +174,11 @@ HTTP 与 Agent 共用同一套「RAG 可用性检查 → org:user 防重 → 后
 
 ## 7. 升级与迁移
 
-`internal/db/migrations/` 用 golang-migrate 管理，`//go:embed` 内嵌；当前基线 **000027_drop_pipeline_templates**（27 个版本 / 54 个脚本，每个版本一对 `.up.sql` / `.down.sql`）。
+`internal/db/migrations/` 用 golang-migrate 管理，`//go:embed` 内嵌；当前基线 **000006_jobs**（6 个版本 / 12 个脚本，每个版本一对 `.up.sql` / `.down.sql`）。迁移按域拆分：`000001_core`（组织/用户/角色/成员/分享/限流/密钥/通知）、`000002_tasks`、`000003_files_rag`（文件索引 + FTS5；向量表由启动时 `EnsureVecIndex` 创建）、`000004_ai_sessions`、`000005_pipeline_runs`、`000006_jobs`（`jobs` / `job_runs` / `schedule_triggers`）。原 000001–000028 历史迁移已 squash 为这 6 组最终 schema。
 
-- 000017 新建 `pipeline_runs`；000018 新建 `pipeline_templates`（初版含 cron / 启停 / 状态列）；000019 新建 `schedule_triggers` 并回填已有规则；000020 重建模板表删掉 4 个调度列；000021 新建 `ai_session_messages`；000022 给 `ai_jobs` 加 target 五列并回填 `prompt`；000023 调度收敛（`ai_jobs` 去 4 个调度列、`schedule_triggers` 加 `lease_until`、回填 `target_type='job'`）；000024 给 `ai_job_runs` 加详情列；000025 给 `ai_jobs` 加 `retry`（job 级失败重试，0-3，仅无写步骤生效）；000026 新建 `pipeline_template_versions`（模板版本历史）；**000027 删除 `pipeline_templates` / `pipeline_template_versions` 两张表并清理 `target_type='pipeline_template'` 的孤儿触发规则**，编排 Definition 改为内联在 `ai_jobs.target_json`。000020 / 000023 的 `.down.sql` 都按规则反向回填调度列，回滚不丢配置；000027 的 `.down.sql` 只重建空表，**模板数据不可恢复**（升级前如需保留请先备份数据库）。
+- squash 前 000001–000028 的历史演进不再逐版本回放；存量库（已有 `schema_migrations`）由版本记录直接视为 000006，新库从 000001 全量建。squash 前如需回滚到中间版本，只能用备份库。
 - 启动时自动 `m.Up()`；`sqlite3.Config{NoTxWrap:true}`（`PRAGMA foreign_keys` 在事务内无效）。
-- 存量库无 `schema_migrations` 但有 `users` 时 `Force(1)` 跳过 baseline。
+- 存量库无 `schema_migrations` 但有 `users` 时 `Force(baselineVersion=6)` 跳过 baseline。
 - **生产不自动执行 down**；需要回滚时用 CLI 或显式调用 `m.Steps(-1)` / `m.Down()`。
 - 新增迁移规范：禁止手写 `BEGIN`/`COMMIT`；仅 `000001_baseline` 允许 `IF NOT EXISTS`，后续脚本必须精确表达增量。
 - 升级 `mattn/go-sqlite3` 后执行 `make sync-vec-headers`，再完整 `make check`。
@@ -204,8 +205,11 @@ HTTP 与 Agent 共用同一套「RAG 可用性检查 → org:user 防重 → 后
 | 上传成功但目录树看不到 | 命中 `server.hidden`；查看上传响应 `hiddenNames` 或调整 `hidden` |
 | 刷新 `/file`、`/jobs` 等返回 401 | `config.yaml` 的 `routes` 未把该路径注册为 `__spa__` |
 | 定时任务（含编排型）没执行 | 依次查 `schedule.enabled` → `cronExpr` 合法性 → 任务 / 规则 `enabled` → `lastRunAt` / `lastStatus`（未知 `target_type` / 目标不存在会写 `error: ...`）→ 目标任务归属与是否被删 → 15 分钟单次超时 → 分钟键防重 → 删任务时的级联清理；任务增删改下一分钟生效 |
+| AI 提示词任务没调工具 / 工具报错 | 依次查「静态预授权」框是否填了工具名（留空即不调工具，仍是单次文本生成）→ 工具名是否存在、是否命中黑名单、是否误填了 `api/<path>` → 上游是否支持非流式 `tools` / `tool_calls`（不支持时不会发起调用）→ 写类工具是否已列入白名单（填写即预授权）→ 日志 `scheduled job agent tool` 与 `pipeline_runs` 步骤结果；模型最多 5 轮，轮次用尽会强制输出文本 |
 | 「立即执行」后流程图长时间不更新 | 进度按 DAG 层推送：慢步骤（如 `llm`，单步最长 5min）期间无新事件属正常；SSE 每 15s 发一条心跳注释行，超过 ~1min 无任何字节到达说明连接被中间层掐断（确认反代 `proxy_buffering off` / `proxy_read_timeout`），前端断流会自动降级拉取最终结果 |
 | 收不到提醒邮件 | 依次查 `schedule.enabled`、`notify.email.enabled` + `host`/`user`、`EMAIL_PASS`、用户邮箱、任务是否 `done`、当天是否已去重（去重在发布前，SMTP 失败不重投） |
+| 定时任务邮件是卡片式而非信件式 | 查 `ai.chat.api_key`/`base_url` 是否配置、上游是否支持非流式生成、日志 `email notify: AI format failed`；60s 超时或返回空会降级，邮件仍会投递 |
+| 邮件正文里的外链 / 图片 / 脚本不见了 | 消毒层只放行语义标签与 `site_url` 同域链接，脚本/图片/表单整棵丢弃、外链降级为纯文字；属预期行为 |
 | 邮件里没有跳转按钮 | `site_url` 未配置或不是 http(s) |
 | AI 入口不显示 | `GET /api/ai/status` 的 `enabled`；检查 `AI_API_KEY` 与 `base_url` |
 | 公网访问 API 很慢 | 确认响应压缩生效、客户端带 `Accept-Encoding`、反代 `proxy_buffering off` |
@@ -219,4 +223,4 @@ HTTP 与 Agent 共用同一套「RAG 可用性检查 → org:user 防重 → 后
 - `ADMIN_SETUP_TOKEN` 只在用户表为空时校验，部署到首次注册之间应始终配置。
 - token 默认 30 天（示例配置 7 天），无状态、不可单独吊销；登录失败 5 次/分钟/IP、分享密码 5 次/5 分钟由 `rate_limits` 持久化。
 - HTML 预览运行在无 `allow-same-origin` 的沙箱 iframe；`/api/*` 固定 `Access-Control-Allow-Origin: null`。
-- 邮件正文经 HTML 转义，`safeHref` 只允许 http(s) 且与 `site_url` 同 host。
+- 邮件正文经 HTML 转义，`safeHref` 只允许 http(s) 且与 `site_url` 同 host；AI 排版结果另经 `sanitizeAIHTML` 标签白名单（脚本/图片/表单整棵丢弃，`style`/`class`/`on*` 全丢），模型不直接产出邮件外框。

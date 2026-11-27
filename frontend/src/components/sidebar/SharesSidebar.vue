@@ -2,24 +2,16 @@
 // Shares sidebar: reactive list of shares, no DOM manipulation
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { injectSidebarHeader } from '../../composables/useSidebarHeader'
-import { authToken, setLoadSharesFn } from '../../stores/indexStore'
+import { sharesRevision } from '../../composables/useShare'
+import { authToken } from '../../stores/indexStore'
 import { showToast, copyToClipboard } from '../../lib/common'
 import * as shareApi from '../../api/share'
+import type { ShareItem } from '../../api/share'
 
-interface Share {
-  id: string
-  token: string
-  resourcePath: string
-  resourceType: string
-  hasPassword: boolean
-  maxAccessCount: number
-  accessCount: number
-  expiresAt: string
-  remark: string
-  createdAt: string
-}
+const shares = ref<ShareItem[]>([])
 
-const shares = ref<Share[]>([])
+// 创建/撤销分享后由 useShare 递增版本号，触发列表刷新
+watch(sharesRevision, () => { loadShares() })
 
 const shareCount = computed(() => shares.value.length)
 
@@ -66,7 +58,7 @@ async function onDeleteShare(id: string) {
   }
 }
 
-function tagText(s: Share): string {
+function tagText(s: ShareItem): string {
   const parts = [s.resourceType === 'dir' ? 'Folder' : 'File']
   if (s.hasPassword) parts.push('Password')
   if (s.maxAccessCount > 0) parts.push(`Access ${s.accessCount}/${s.maxAccessCount}`)
@@ -76,16 +68,12 @@ function tagText(s: Share): string {
 }
 
 onMounted(() => {
-  setLoadSharesFn(loadShares)
   if (authToken.value) loadShares()
 })
 
 onUnmounted(() => {
-  setLoadSharesFn(null)
   if (header) header.badge = ''
 })
-
-defineExpose({ loadShares })
 </script>
 
 <template>

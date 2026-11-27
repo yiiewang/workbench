@@ -26,10 +26,12 @@ const TopicUserNotify = "user.notify"
 
 // UserNotifyEvent 用户自定义通知事件载荷
 type UserNotifyEvent struct {
-	UserID  int64
-	OrgID   int64
-	Subject string // 通知主题（邮件标题）
-	Body    string // 通知正文（纯文本）
+	UserID   int64
+	OrgID    int64
+	Subject  string // 通知主题（邮件标题）
+	Body     string // 通知正文，可能是 Markdown / 纯文本 / JSON / HTML 等任意格式
+	UserName string // 信件式模板的问候名；空则降级为「你好！」
+	JobName  string // 非空表示定时任务结果邮件，走 AI 排版 + 信件式模板
 }
 
 // TopicTaskReminder 任务精确时间提醒事件主题（每分钟扫描 scheduled_time/due_time）
@@ -112,7 +114,7 @@ var KnownTopics = []struct {
 }{
 	{TopicTaskDue, "任务到期提醒（TodoDueScan 定时扫描发布，含任务/截止日/逾期天数）"},
 	{TopicTaskReminder, "任务精确时间提醒（每分钟扫描 scheduled_time/due_time，开始/截止时刻到点）"},
-	{TopicUserNotify, "用户自定义通知（AI notify_user 工具发布，邮件投递给用户本人）"},
+	{TopicUserNotify, "用户自定义通知（AI notify_user 工具 / 定时任务结果发布，邮件投递给用户本人；定时任务结果由 AI 排版成信件式邮件）"},
 }
 
 // TaskDueEvent 任务到期事件载荷：投递给订阅者（EmailNotifier 等）

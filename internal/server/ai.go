@@ -219,6 +219,8 @@ type aiToolCall struct {
 type aiMessage struct {
 	Role    string `json:"role"` // system | user | assistant | tool
 	Content string `json:"content"`
+	// ReasoningContent 非流式响应里的思考过程（部分网关返回；定时任务落库用）
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 	// ToolCalls assistant 消息发起的工具调用（模型要求调用工具时 content 可为空）
 	ToolCalls []aiToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID tool 消息回传结果时对应的调用 ID
@@ -587,19 +589,86 @@ func (s *Server) handleAIRunGet(ctx iris.Context) {
 // aiMaxToolRounds 单次对话允许的最大工具轮数（防模型无限循环调用）
 const aiMaxToolRounds = 5
 
-// aiSystemPrompt Agent 模式的系统提示：角色 + 当前时间 + 写操作礼仪。
-// 模型没有时间感知——此前用户让 AI "建个明天截止的任务"时日期全靠猜。
+// aiSystemPrompt Agent 模式的系统提示：角色 + 当前时间 + 思考/执行协议。
+// 只放模型无法从工具描述获得的约束：任务时间参数在 create_task/update_task，
+// allowWrite 语义在 create_job，片段编号格式在 RAG 注入块，避免同一知识
+// 常驻 system 并在每轮被重复自检。
 func aiSystemPrompt(now time.Time) string {
 	local := now.Format("2006-01-02 15:04") + " " + []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}[now.Weekday()]
 	return "你是 Workbench 个人开发平台的 AI 助手，可调用工具帮助用户管理文件、Todo 任务、定时任务与通知。\n" +
 		"当前时间：" + local + "。涉及\"今天/明天/下周\"等日期推算时一律以此为准，不要凭空猜测。\n" +
-		"行为要求：\n" +
-		"1. 执行写操作（创建/修改任务、写文件、发通知、安排定时任务）前，先用一两句话向用户说明你的计划（要做什么、关键参数如日期时刻），再发起工具调用等待批准；一次只安排一个写操作，等确认后再进行下一个。\n" +
-		"2. 创建/修改任务时给全时间范围参数：用户说了开始与截止就都填；只说截止则 scheduled 与 due 相同；都没说则默认都为当天。涉及具体钟点（如\"晚上 8 点\"）时同时给对应的 Time 参数，到点会自动邮件提醒。\n" +
-		"3. 用户消息中引用的文件内容已附在消息里，无需再调用 read_file。\n" +
-		"4. 文件内容类问题优先依据语义检索片段（消息末尾的编号片段）；片段不足以回答时用 search_files 换关键词检索，不要猜测路径盲调 read_file；read_file 只用于已确认存在的具体文件（路径取自检索结果）。\n" +
-		"5. 避免重复检索：本会话中已检索到、已读取过的内容视为已知信息，足以回答时直接总结作答，不要为\"确认细节\"反复检索；只有信息确有缺口（关键内容完全缺失）才再检索，且同一问题换关键词不超过两次。\n" +
-		"6. 回答保持简洁，直接给出结果。"
+		"思考与执行协议：\n" +
+		"1. 先确定目标，再按需调用工具。同一轮可以并行发起互不依赖的调用，但同一目的不要重复发起。\n" +
+		"2. 只有用户文件内容相关的问题才用 search_files；通用知识、方案讨论直接回答。信息足够时直接给出结论，不要为确认细节反复检索；检索无命中即停止并说明未找到。\n" +
+		"3. 执行写操作（创建/修改任务、写文件、发通知、安排定时任务）前，先用一两句话说明计划与关键参数，一次只安排一个写操作，等确认后再进行下一个。\n" +
+		"4. 用户消息中已附的文件内容无需再调用 read_file；read_file 只用于已确认存在的具体文件。\n" +
+		"5. 回答只给结论与依据，不复述已排除的方案，不编造。\n"
+}
+
+// oneLine 把多行用户消息压成单行，避免日志出现换行与连续空白。
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// summarizeRagHits 聚合检索命中：同一文件计为 path×N，距离只打全局范围。
+func summarizeRagHits(hits []rag.Hit) string {
+	if len(hits) == 0 {
+		return ""
+	}
+	counts := make(map[string]int, len(hits))
+	order := make([]string, 0, len(hits))
+	minD, maxD := hits[0].Distance, hits[0].Distance
+	for _, h := range hits {
+		if counts[h.Path] == 0 {
+			order = append(order, h.Path)
+		}
+		counts[h.Path]++
+		if h.Distance < minD {
+			minD = h.Distance
+		}
+		if h.Distance > maxD {
+			maxD = h.Distance
+		}
+	}
+	parts := make([]string, 0, len(order))
+	for _, p := range order {
+		parts = append(parts, fmt.Sprintf("%s×%d", p, counts[p]))
+	}
+	return fmt.Sprintf("%s (%.3f~%.3f)", strings.Join(parts, ","), minD, maxD)
+}
+
+// ragBriefPrompt 后续轮使用的检索片段摘要：编号与来源行号保持一致，正文只留
+// 前 200 字。每轮请求都是无状态的完整 messages，直接移除片段会让模型丢失首轮
+// 已注入的内容；摘要版在保留引用定位的前提下把上下文压到约三分之一。
+func ragBriefPrompt(hits []rag.Hit) string {
+	var b strings.Builder
+	b.WriteString("以下语义检索片段为摘要（完整原文已在首轮提供，编号一致）；回答用到时标注编号。\n")
+	for i, h := range hits {
+		fmt.Fprintf(&b, "\n[%d] %s 第%d行起\n%s\n", i+1, h.Path, h.StartLine, truncateStr(h.Content, 200))
+	}
+	return b.String()
+}
+
+// summarizeToolResult 给工具结果前置一行模板摘要（状态/关键集合大小/字节数）。
+// 模型仍能看到完整 JSON，但不必为了"确认自己看到了什么"把整段结果复述进思考。
+func summarizeToolResult(name string, raw []byte) string {
+	line := "[tool] " + name
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return line + fmt.Sprintf(" | %d bytes\n", len(raw))
+	}
+	if ok, exists := m["ok"]; exists {
+		line += fmt.Sprintf(" | ok=%v", ok)
+	}
+	if e, _ := m["error"].(string); e != "" {
+		line += " | error=" + truncateStr(e, 80)
+	}
+	for _, k := range []string{"jobs", "tasks", "hits", "files", "events", "results", "steps", "items", "runs"} {
+		if arr, ok := m[k].([]any); ok {
+			line += fmt.Sprintf(" | %s=%d", k, len(arr))
+		}
+	}
+	return line + fmt.Sprintf(" | %d bytes\n", len(raw))
 }
 
 func (s *Server) handleAIChat(ctx iris.Context) {
@@ -656,10 +725,13 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 	if toolsOn {
 		msgs = append([]aiMessage{{Role: "system", Content: aiSystemPrompt(time.Now())}}, msgs...)
 	}
-	// RAG 前置检索：用最新一条 user 消息在其个人文件中做语义检索，
-	// 命中片段以独立 system 消息追加（与前端"引用文件"机制并存）。
+	// RAG 前置检索：用最新一条 user 消息在其个人文件中做语义检索。
+	// 完整片段只在首轮注入；后续轮换成摘要（编号与行号不变），因为每轮请求
+	// 都是无状态的完整 messages，直接移除会让模型丢失已注入的内容。
 	// 检索失败/超时静默降级——对话可用性优先于检索完整性。
 	var ragHits []rag.Hit
+	var ragPromptHits []rag.Hit // SSE 推送后 ragHits 会置 nil，摘要轮单独留一份
+	var ragMsg *aiMessage
 	if s.rag != nil {
 		if q := ragQueryFrom(req.Messages); q != "" {
 			hits, err := s.rag.Search(runCtx, orgID, userID, q, ragSearchTopK)
@@ -676,7 +748,9 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 				slog.Info("rag: context injected", "user", currentUserID(ctx),
 					"query", truncateStr(q, 100), "hits", len(hits), "files", files)
 				ragHits = hits
-				msgs = append(msgs, aiMessage{Role: "system", Content: rag.ContextPrompt(hits)})
+				ragPromptHits = hits
+				msg := aiMessage{Role: "system", Content: rag.ContextPrompt(hits)}
+				ragMsg = &msg
 			}
 		}
 	}
@@ -689,14 +763,33 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 	w := &aiRunWriter{w: ctx.ResponseWriter(), state: run, alive: true}
 	wroteHeader := false
 	usageSum := aiUsage{} // Agent 多轮 token 消耗累加
+	toolCallsUsed := 0    // 已执行的工具调用数（用于每轮预算提示）
 
 	for round := 0; ; round++ {
 		// 工具轮次用尽后不再携带 tools：模型只能文本回答。
 		// 否则上限轮模型仍可能请求调工具被掐断，表现为"只有工具卡片没有回答"。
 		forceAnswer := round >= aiMaxToolRounds
+		// 每轮按需组装 messages，不改动 msgs 本身：
+		// 1) 检索片段首轮给全文、后续轮给摘要，避免整段原文随每轮重发；
+		// 2) 工具轮显式告知剩余轮次，避免预算隐到最后一轮才收敛
+		//    （实测 6 轮 thinking 逐轮膨胀到 29070 字）。
+		payloadMsgs := make([]aiMessage, len(msgs), len(msgs)+2)
+		copy(payloadMsgs, msgs)
+		if ragMsg != nil {
+			if round == 0 {
+				payloadMsgs = append(payloadMsgs, *ragMsg)
+			} else {
+				payloadMsgs = append(payloadMsgs, aiMessage{Role: "system", Content: ragBriefPrompt(ragPromptHits)})
+			}
+		}
+		if toolsOn && !forceAnswer && round > 0 {
+			payloadMsgs = append(payloadMsgs, aiMessage{Role: "system", Content: fmt.Sprintf(
+				"工具轮次预算：剩余 %d 轮（已调用 %d 次工具）。信息足够时直接给出最终回答。",
+				aiMaxToolRounds-round, toolCallsUsed)})
+		}
 		payload := map[string]any{
 			"model":    s.cfg.AI.Chat.Model,
-			"messages": msgs,
+			"messages": payloadMsgs,
 			"stream":   true,
 			// 流式响应末尾带 usage 分片（token 消耗统计）；网关不支持时
 			// 分片缺失，前端不显示消耗（无害降级）
@@ -838,12 +931,9 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 // ============================================================
 
 // aiChatOnce 非流式调用上游 /chat/completions，返回首个回复文本。
-// 不走 Agent 循环/工具（定时任务是后台生成型任务，无需交互）。
+// 不带工具；带工具白名单的 llm 步走 aiChatAgent。
 func (s *Server) aiChatOnce(ctx context.Context, prompt string) (string, error) {
-	if !s.cfg.AI.Enabled() {
-		return "", fmt.Errorf("AI not configured (ai.api_key / AI_BASE_URL)")
-	}
-	payload, err := json.Marshal(map[string]any{
+	msg, _, err := s.aiChatCompletion(ctx, map[string]any{
 		"model": s.cfg.AI.Chat.Model,
 		"messages": []aiMessage{
 			{Role: "user", Content: prompt},
@@ -852,37 +942,7 @@ func (s *Server) aiChatOnce(ctx context.Context, prompt string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, normalizeAIEndpoint(s.cfg.AI.Chat.BaseURL), bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.cfg.AI.Chat.APIKey)
-	req.Header.Set("X-Model-Request-Id", uuid.NewString())
-
-	resp, err := aiClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("upstream %s: %s", resp.Status, truncateStr(string(body), 200))
-	}
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil || len(out.Choices) == 0 {
-		return "", fmt.Errorf("unexpected upstream response")
-	}
-	return out.Choices[0].Message.Content, nil
+	return msg.Content, nil
 }
 
 // truncateStr 字符串截断（错误信息拼装用）
@@ -894,7 +954,7 @@ func truncateStr(s string, n int) string {
 }
 
 // ============================================================
-// AI 定时任务 CRUD — /api/ai/jobs
+// AI 定时任务 CRUD — /api/jobs
 // ============================================================
 
 // aiJobBody 创建/更新请求体。prompt 与 target 至少提供一项：
@@ -1082,10 +1142,17 @@ func (s *Server) handleAIJobUpdate(ctx iris.Context) {
 		return
 	}
 	spec := aiJobSpecFromBody(&req)
-	if err := s.validateAIJobTarget(ctx.Request().Context(), aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))); err != nil {
+	preview := aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))
+	if err := s.normalizeTargetToPipeline(ctx.Request().Context(), &preview); err != nil {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
 		return
 	}
+	if err := s.validateAIJobTarget(ctx.Request().Context(), preview); err != nil {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
+		return
+	}
+	spec.TargetType = preview.TargetType
+	spec.TargetJSON = string(preview.Target)
 	if err := s.db.UpdateAIJobWithSpec(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, spec); err != nil {
 		serverError(ctx, "update ai job failed", err)
 		return
@@ -1116,7 +1183,7 @@ func (s *Server) handleAIJobDelete(ctx iris.Context) {
 	writeOK(ctx, map[string]any{"status": "ok"})
 }
 
-// handleAIJobRuns 任务执行历史（GET /api/ai/jobs/{id}/runs?limit=20）。
+// handleAIJobRuns 任务执行历史（GET /api/jobs/{id}/runs?limit=20）。
 // 归属：全局任务（user_id IS NULL）所有用户可查；私有任务仅归属人。
 func (s *Server) handleAIJobRuns(ctx iris.Context) {
 	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)

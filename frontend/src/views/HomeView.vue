@@ -38,15 +38,6 @@ const cards = computed<FeatureCard[]>(() => {
       icon: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
     })
   }
-  if (hasFeature('share')) {
-    list.push({
-      key: 'share',
-      title: '分享管理',
-      desc: '创建并管理文件分享链接',
-      path: '/shares',
-      icon: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/>',
-    })
-  }
   if (hasFeature('todo')) {
     list.push({
       key: 'todo',

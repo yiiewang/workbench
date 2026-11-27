@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Workbench · 分享管理并入文件页（原型）</title>
+<style>
+  :root {
+    --border: #e3e6ea;
+    --text: #24292f;
+    --dim: #6b7280;
+    --muted: #8b949e;
+    --accent: #0969da;
+    --accent-soft: #eaf2fd;
+    --soft: #f7f8fa;
+    --hover: #f1f3f5;
+    --danger: #cf222e;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 22px 26px 18px;
+    background: #fff;
+    color: var(--text);
+    font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { width: 1200px; }
+  h1 { margin: 0 0 4px; font-size: 17px; font-weight: 600; letter-spacing: .2px; }
+  .sub { margin: 0 0 14px; font-size: 12px; color: var(--dim); }
+  .sub code { font-family: var(--mono); font-size: 11px; color: var(--accent); background: var(--accent-soft); padding: 1px 5px; border-radius: 3px; }
+
+  .frame {
+    position: relative;
+    width: 1148px;
+    height: 646px;
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 6px 24px rgba(20, 30, 50, .07);
+    background: #fff;
+  }
+
+  /* ---------- activity bar ---------- */
+  .activity {
+    width: 48px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--soft);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 8px;
+    gap: 2px;
+  }
+  .act-item {
+    width: 46px; height: 46px;
+    display: flex; align-items: center; justify-content: center;
+    color: #7b8492; position: relative;
+    border-left: 2px solid transparent;
+  }
+  .act-item.active { color: var(--text); border-left-color: var(--accent); background: #eef2f7; }
+  .act-item svg { width: 21px; height: 21px; }
+  .act-spacer { flex: 1; }
+  .avatar {
+    width: 23px; height: 23px; border-radius: 50%;
+    background: #2f6fd0; color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600;
+  }
+
+  /* ---------- sidebar ---------- */
+  .sidebar {
+    width: 272px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: #fbfcfd;
+    display: flex; flex-direction: column;
+    min-height: 0;
+  }
+  .side-head {
+    height: 36px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 14px;
+    font-size: 10px; font-weight: 700; letter-spacing: .7px;
+    color: var(--dim); text-transform: uppercase;
+  }
+  .badge {
+    font-size: 10px; font-weight: 500; color: var(--muted);
+    background: #ecf0f4; border-radius: 9px; padding: 1px 7px;
+  }
+  .tabs {
+    display: flex; flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: #fff;
+    padding: 0 10px;
+  }
+  .tab {
+    flex: 1; padding: 10px 4px 9px;
+    border: none; border-bottom: 2px solid transparent;
+    background: none; cursor: pointer;
+    font: 600 10px/1.2 "Noto Sans SC", sans-serif;
+    letter-spacing: .6px; text-transform: uppercase;
+    color: var(--dim);
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .list { flex: 1; min-height: 0; overflow: hidden; }
+  .share {
+    padding: 10px 14px 9px;
+    border-bottom: 1px solid var(--border);
+  }
+  .share:nth-child(even) { background: #fdfdfe; }
+  .s-path {
+    font-size: 11.5px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-bottom: 3px;
+  }
+  .s-remark {
+    font-size: 10.5px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-bottom: 3px;
+  }
+  .s-meta { font-size: 9.5px; color: var(--muted); margin-bottom: 6px; }
+  .s-actions { display: flex; gap: 5px; }
+  .btn {
+    border: 1px solid #d7dce2; border-radius: 4px;
+    background: #fff; color: var(--text);
+    font: 500 10px/1 "Noto Sans SC", sans-serif;
+    padding: 4px 9px; cursor: pointer;
+  }
+  .btn.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .btn.danger { color: #fff; background: var(--danger); border-color: var(--danger); }
+  .btn.ghost { color: var(--dim); }
+
+  /* ---------- main ---------- */
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .tabbar {
+    height: 38px; flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--soft);
+    display: flex; align-items: stretch; justify-content: space-between;
+  }
+  .tabs-left { display: flex; align-items: stretch; }
+  .file-tab {
+    display: flex; align-items: center; gap: 7px;
+    padding: 0 14px; min-width: 210px;
+    border-right: 1px solid var(--border);
+    border-top: 2px solid var(--accent);
+    background: #fff;
+    font-size: 11.5px;
+  }
+  .file-tab.mute { border-top-color: transparent; background: var(--soft); color: var(--dim); min-width: 150px; }
+  .file-tab .dot { width: 7px; height: 7px; border-radius: 50%; background: #d0d7de; }
+  .file-tab.active .dot { background: var(--accent); }
+  .tabbar-actions { display: flex; align-items: center; gap: 6px; padding-right: 12px; }
+  .tabbar-actions .btn { padding: 5px 10px; }
+
+  .editor { flex: 1; min-height: 0; overflow: hidden; padding: 24px 34px; }
+  .doc h2 { font-size: 19px; margin: 0 0 6px; }
+  .doc .meta { font-size: 10.5px; color: var(--muted); margin-bottom: 18px; }
+  .doc h3 { font-size: 13px; margin: 20px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border); }
+  .doc p { font-size: 12px; line-height: 1.9; color: #3d444d; margin: 0 0 10px; }
+  .doc .callout {
+    border-left: 3px solid var(--accent);
+    background: #f4f8fd; padding: 9px 12px;
+    font-size: 11.5px; color: #3d444d; line-height: 1.8; margin-bottom: 14px;
+  }
+  .doc pre {
+    margin: 0 0 14px; padding: 12px 14px;
+    background: #f6f8fa; border: 1px solid var(--border); border-radius: 6px;
+    font: 11px/1.7 var(--mono); color: #374151; white-space: pre-wrap;
+  }
+  .doc ul { margin: 0; padding-left: 18px; }
+  .doc li { font-size: 12px; line-height: 1.9; color: #3d444d; }
+  .kbd { font: 10px var(--mono); background: #eef1f4; border: 1px solid #dfe3e8; border-radius: 3px; padding: 1px 4px; }
+
+  /* ---------- annotations ---------- */
+  .mark {
+    position: absolute; z-index: 5;
+    width: 19px; height: 19px; border-radius: 50%;
+    background: #0969da; color: #fff;
+    font: 600 11px/19px "Noto Sans SC", sans-serif;
+    text-align: center;
+    box-shadow: 0 0 0 3px rgba(9, 105, 218, .16);
+  }
+  .m1 { left: 292px; top: 44px; }
+  .m2 { left: 1080px; top: 48px; }
+
+  .legend {
+    margin-top: 16px; display: flex; gap: 26px; flex-wrap: wrap;
+    font-size: 12px; color: #3d444d;
+  }
+  .legend b { color: var(--accent); margin-right: 5px; }
+  .legend .before { color: var(--muted); }
+  .legend code { font: 10.5px var(--mono); color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Workbench · 分享管理并入文件页</h1>
+  <p class="sub">原型示意 ｜ 目标路由 <code>/file?tab=shares</code> ｜ 侧栏双 Tab + 主区保留文件编辑器</p>
+
+  <div class="frame">
+    <!-- ① 活动栏 -->
+    <div class="activity">
+      <div class="act-item" title="首页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg></div>
+      <div class="act-item active" title="文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>
+      <div class="act-item" title="Todo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></div>
+      <div class="act-item" title="定时任务"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div>
+      <div class="act-item" title="用户管理"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg></div>
+      <div class="act-spacer"></div>
+      <div class="act-item"><div class="avatar">Y</div></div>
+    </div>
+
+    <!-- ② 侧栏：EXPLORER / MY SHARES -->
+    <div class="sidebar">
+      <div class="side-head"><span>My Shares</span><span class="badge">6</span></div>
+      <div class="tabs">
+        <div class="tab">Explorer</div>
+        <div class="tab active">My Shares</div>
+      </div>
+      <div class="list">
+        <div class="share">
+          <div class="s-path">/sdk-go/docs/SDK-配置分析-java.md</div>
+          <div class="s-remark">SDK 配置分析 java.md</div>
+          <div class="s-meta">File · Access 2/10 · 2026-12-31</div>
+          <div class="s-actions"><button class="btn primary">Copy</button><button class="btn danger">Revoke</button></div>
+        </div>
+        <div class="share">
+          <div class="s-path">/store-leveldb</div>
+          <div class="s-remark">Folder · /store-leveldb</div>
+          <div class="s-meta">Folder · Access 7/∞</div>
+          <div class="s-actions"><button class="btn primary">Copy</button><button class="btn danger">Revoke</button></div>
+        </div>
+        <div class="share">
+          <div class="s-path">/store-leveldb/leveldb_shard_design.md</div>
+          <div class="s-remark">LevelDB 多实例分片存储 Handler 设计方案</div>
+          <div class="s-meta">File · Password · Access 7/∞</div>
+          <div class="s-actions"><button class="btn primary">Copy</button><button class="btn danger">Revoke</button></div>
+        </div>
+        <div class="share">
+          <div class="s-path">/pbdness/data-consistency-design-v4.h...</div>
+          <div class="s-remark">一致性设计 v4</div>
+          <div class="s-meta">File · Access 0/∞</div>
+          <div class="s-actions"><button class="btn primary">Copy</button><button class="btn danger">Revoke</button></div>
+        </div>
+        <div class="share">
+          <div class="s-path">/jsharding/DEPLOYMENT.html</div>
+          <div class="s-remark">分片与部署配置指南</div>
+          <div class="s-meta">File · Access 30/30</div>
+          <div class="s-actions"><button class="btn primary">Copy</button><button class="btn danger">Revoke</button></div>
+        </div>
+        <div class="share">
+          <div class="s-path">/autotest/autotest_execution_guide.html</div>
+          <div class="s-remark">ChainMaker Autotest 可执行操作手册</div>
+          <div class="s-meta">File · Access 10/10</div>
+          <div class="s-actions"><button class="btn primary">Copy</button><button class="btn danger">Revoke</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ 主区：文件编辑器保持可用 -->
+    <div class="main">
+      <div class="tabbar">
+        <div class="tabs-left">
+          <div class="file-tab active"><span class="dot"></span>SDK-配置分析-java.md <span style="color:#9aa4ae">×</span></div>
+          <div class="file-tab mute"><span class="dot"></span>leveldb_shard_design.md</div>
+        </div>
+        <div class="tabbar-actions">
+          <button class="btn">Share</button>
+          <button class="btn ghost">Download</button>
+        </div>
+      </div>
+      <div class="editor">
+        <div class="doc">
+          <h2>SDK 配置分析（Java）</h2>
+          <div class="meta">/sdk-go/docs/SDK-配置分析-java.md · 最近编辑 2 小时前 · Markdown</div>
+          <div class="callout">右侧不再显示「Select a file from the Explorer to preview」空态：分享管理与文件浏览共用同一个主区，切换 Tab 不打断当前打开的文件。</div>
+          <h3>1. 配置加载顺序</h3>
+          <p>客户端启动时按 <span class="kbd">chainmaker-sdk-config.yml</span> → 环境变量 → 显式 <span class="kbd">SdkConfig</span> 的顺序合并配置，后者覆盖前者。</p>
+          <pre>ChainClient client = ChainClient.build(sdkConfig);
+client.setAuthType(AuthType.PUBLIC);
+client.getChainInfo();   // 连接性自检</pre>
+          <h3>2. 关键字段</h3>
+          <ul>
+            <li><b>chain_client.org_id</b>：组织标识，必须与证书 OU 一致</li>
+            <li><b>chain_client.user_key_file_path</b>：签名私钥，支持 PEM / PKCS#11</li>
+            <li><b>chain_client.node_addr</b>：节点地址，多个节点自动轮询重试</li>
+            <li><b>archive / rpc_client</b>：归档查询与 RPC 超时参数</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="mark m1">1</div>
+    <div class="mark m2">2</div>
+  </div>
+
+  <div class="legend">
+    <span><b>①</b> 侧栏新增 <code>EXPLORER / MY SHARES</code> 双 Tab，状态写在 URL <code>?tab=shares</code></span>
+    <span><b>②</b> 主区仍是文件编辑器，右侧不再空白；点 Tab 不关闭已打开文件</span>
+    <span><b>③</b> 旧入口 <code>/shares</code> 重定向到 <code>/file?tab=shares</code>，收藏链接不失效</span>
+  </div>
+  <div class="legend before">
+    <span>删除：活动栏「分享」图标、首页「分享管理」卡片 —— 分享入口统一收敛到 <code>/file</code> 侧栏的 MY SHARES Tab，活动栏此时高亮「文件」；<code>hasFeature('share')</code> 为假时不渲染 Tab 头。</span>
+  </div>
+</div>
+</body>
+</html>

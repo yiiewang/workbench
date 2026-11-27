@@ -65,10 +65,10 @@ func (d *DB) ScanTimeReminders(ctx context.Context, today, hhmm string) ([]TimeR
 }
 
 // ============================================================
-// AI 定时任务（ai_jobs）：用户自建"到点让 AI 执行 prompt"
+// AI 定时任务（jobs）：用户自建"到点让 AI 执行 prompt"
 // ============================================================
 
-// AIJob 定时任务。ai_jobs 只存执行定义；CronExpr / Enabled / LastRunAt /
+// AIJob 定时任务。jobs 只存执行定义；CronExpr / Enabled / LastRunAt /
 // LastStatus 派生自 schedule_triggers（target_type='job'），仅用于兼容旧响应。
 type AIJob struct {
 	ID       int64  `json:"id"`
@@ -136,7 +136,7 @@ func scanAIJobRow(scan func(dest ...any) error) (AIJobWithOwner, error) {
 func (d *DB) ListAIJobs(ctx context.Context, orgID, userID int64) ([]AIJob, error) {
 	rows, err := d.conn.QueryContext(ctx,
 		`SELECT `+aiJobSelectCols+`
-		 FROM ai_jobs j WHERE (j.org_id = ? AND j.user_id = ?) OR j.user_id IS NULL ORDER BY j.id`, orgID, userID)
+		 FROM jobs j WHERE (j.org_id = ? AND j.user_id = ?) OR j.user_id IS NULL ORDER BY j.id`, orgID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +150,32 @@ func (d *DB) ListAIJobs(ctx context.Context, orgID, userID int64) ([]AIJob, erro
 		jobs = append(jobs, r.AIJob)
 	}
 	return jobs, nil
+}
+
+// ListAllAIJobs 全量任务（启动时把存量 target 统一转 pipeline 用）。
+func (d *DB) ListAllAIJobs(ctx context.Context) ([]AIJobWithOwner, error) {
+	rows, err := d.conn.QueryContext(ctx, `SELECT `+aiJobSelectCols+` FROM jobs j ORDER BY j.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AIJobWithOwner, 0)
+	for rows.Next() {
+		r, err := scanAIJobRow(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// UpdateAIJobTarget 只更新 target 两列（启动迁移用，不校验归属，调用方负责）。
+func (d *DB) UpdateAIJobTarget(ctx context.Context, id int64, targetType, targetJSON string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE jobs SET target_type = ?, target_json = ?, updated_at = datetime('now') WHERE id = ?`,
+		targetType, targetJSON, id)
+	return err
 }
 
 // UserEmailTarget 有邮箱的用户（全局公共任务展开用）
@@ -251,7 +277,7 @@ func (d *DB) CreateAIJobWithSpec(ctx context.Context, orgID, userID int64, spec 
 		retry = 0
 	}
 	res, err := d.conn.ExecContext(ctx,
-		`INSERT INTO ai_jobs (user_id, org_id, name, prompt, target_type, target_json, allow_write, context_json, notify_json, retry)
+		`INSERT INTO jobs (user_id, org_id, name, prompt, target_type, target_json, allow_write, context_json, notify_json, retry)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		userID, orgID, spec.Name, spec.Prompt, targetType, targetJSON, allowWrite, contextJSON, notifyJSON, retry)
 	if err != nil {
@@ -263,7 +289,7 @@ func (d *DB) CreateAIJobWithSpec(ctx context.Context, orgID, userID int64, spec 
 // GetAIJob 查单条（校验归属），不存在返回 nil
 func (d *DB) GetAIJob(ctx context.Context, orgID, userID, id int64) (*AIJob, error) {
 	row := d.conn.QueryRowContext(ctx,
-		`SELECT `+aiJobSelectCols+` FROM ai_jobs j WHERE j.org_id = ? AND j.user_id = ? AND j.id = ?`, orgID, userID, id)
+		`SELECT `+aiJobSelectCols+` FROM jobs j WHERE j.org_id = ? AND j.user_id = ? AND j.id = ?`, orgID, userID, id)
 	r, err := scanAIJobRow(row.Scan)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -278,7 +304,7 @@ func (d *DB) GetAIJob(ctx context.Context, orgID, userID, id int64) (*AIJob, err
 // 全局任务 IsGlobal=true；私有任务核对 UserID）。
 func (d *DB) GetAIJobAny(ctx context.Context, id int64) (*AIJobWithOwner, error) {
 	row := d.conn.QueryRowContext(ctx,
-		`SELECT `+aiJobSelectCols+` FROM ai_jobs j WHERE j.id = ?`, id)
+		`SELECT `+aiJobSelectCols+` FROM jobs j WHERE j.id = ?`, id)
 	r, err := scanAIJobRow(row.Scan)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -300,7 +326,7 @@ func (d *DB) UpdateAIJob(ctx context.Context, orgID, userID, id int64, name, cro
 // AllowWrite nil 表示保持、空切片表示显式清空。
 func (d *DB) UpdateAIJobWithSpec(ctx context.Context, orgID, userID, id int64, spec AIJobSpec) error {
 	_, err := d.conn.ExecContext(ctx,
-		`UPDATE ai_jobs SET name=?, prompt=?, retry=?,
+		`UPDATE jobs SET name=?, prompt=?, retry=?,
 		 target_type = COALESCE(NULLIF(?, ''), target_type),
 		 target_json = COALESCE(NULLIF(?, ''), target_json),
 		 allow_write = COALESCE(NULLIF(?, ''), allow_write),
@@ -317,7 +343,7 @@ func (d *DB) UpdateAIJobWithSpec(ctx context.Context, orgID, userID, id int64, s
 
 // DeleteAIJob 删除
 func (d *DB) DeleteAIJob(ctx context.Context, orgID, userID, id int64) error {
-	_, err := d.conn.ExecContext(ctx, `DELETE FROM ai_jobs WHERE org_id = ? AND user_id = ? AND id = ?`, orgID, userID, id)
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM jobs WHERE org_id = ? AND user_id = ? AND id = ?`, orgID, userID, id)
 	return err
 }
 
@@ -329,17 +355,42 @@ func (d *DB) MarkAIJobRun(ctx context.Context, id int64, status, output string) 
 // MarkAIJobRunDetail 追加一次执行历史（output 截断 4KB）。
 // 最近执行状态由 schedule_triggers.last_run_at/last_status 记录。
 func (d *DB) MarkAIJobRunDetail(ctx context.Context, id int64, run AIJobRun) error {
+	_, err := d.InsertAIJobRun(ctx, id, run)
+	return err
+}
+
+// InsertAIJobRun 插入一条执行历史并返回行 id：执行开始时先落 running，
+// 结束后用 UpdateAIJobRun 补终态，任务详情页就能看到运行中的记录。
+func (d *DB) InsertAIJobRun(ctx context.Context, jobID int64, run AIJobRun) (int64, error) {
 	if len(run.Output) > 4096 {
 		run.Output = run.Output[:4096] + "\n…（截断）"
 	}
 	if run.RanAt == "" {
 		run.RanAt = time.Now().Format("2006-01-02 15:04")
 	}
-	_, err := d.conn.ExecContext(ctx,
-		`INSERT INTO ai_job_runs (job_id, ran_at, status, output, target_type, pipeline_run_id, steps_summary, err_msg, duration_ms, finished_at)
+	res, err := d.conn.ExecContext(ctx,
+		`INSERT INTO job_runs (job_id, ran_at, status, output, target_type, pipeline_run_id, steps_summary, err_msg, duration_ms, finished_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, run.RanAt, run.Status, run.Output, run.TargetType, run.PipelineRunID,
+		jobID, run.RanAt, run.Status, run.Output, run.TargetType, run.PipelineRunID,
 		run.StepsSummary, run.ErrMsg, run.DurationMs, run.FinishedAt)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// UpdateAIJobRun 更新一条执行历史（running → ok/error）。
+func (d *DB) UpdateAIJobRun(ctx context.Context, runID int64, run AIJobRun) error {
+	if len(run.Output) > 4096 {
+		run.Output = run.Output[:4096] + "\n…（截断）"
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE job_runs
+		 SET status = ?, output = ?, target_type = ?, pipeline_run_id = ?,
+		     steps_summary = ?, err_msg = ?, duration_ms = ?, finished_at = ?
+		 WHERE id = ?`,
+		run.Status, run.Output, run.TargetType, run.PipelineRunID,
+		run.StepsSummary, run.ErrMsg, run.DurationMs, run.FinishedAt, runID)
 	return err
 }
 
@@ -367,7 +418,7 @@ func (d *DB) ListAIJobRuns(ctx context.Context, jobID int64, limit int) ([]AIJob
 		`SELECT id, job_id, ran_at, status, COALESCE(output,''),
 		        COALESCE(target_type,''), COALESCE(pipeline_run_id,''), COALESCE(steps_summary,''),
 		        COALESCE(err_msg,''), COALESCE(duration_ms,0), COALESCE(finished_at,'')
-		 FROM ai_job_runs WHERE job_id = ? ORDER BY id DESC LIMIT ?`,
+		 FROM job_runs WHERE job_id = ? ORDER BY id DESC LIMIT ?`,
 		jobID, limit)
 	if err != nil {
 		return nil, err

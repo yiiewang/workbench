@@ -74,8 +74,8 @@ func TestValidateAIJobDefinitionScheduledRules(t *testing.T) {
 		{
 			name: "job config write api",
 			def: pipeline.Definition{
-				AllowWrite: []string{"api/ai/jobs"},
-				Steps:      []pipeline.Step{{ID: "a", Uses: "api/ai/jobs", With: map[string]any{"method": "POST"}}},
+				AllowWrite: []string{"api/jobs"},
+				Steps:      []pipeline.Step{{ID: "a", Uses: "api/jobs", With: map[string]any{"method": "POST"}}},
 			},
 			want: "not allowed in scheduled jobs",
 		},
@@ -191,5 +191,89 @@ func TestExpandJobParams(t *testing.T) {
 	}
 	if q["kind"] != "daily" {
 		t.Fatalf("params.kind not expanded: %v", q["kind"])
+	}
+}
+
+// pipeline 的 llm 步归一化时补统一输出格式要求，tool 步与已有参数不受影响
+func TestPipelineLLMOutputRuleInjected(t *testing.T) {
+	job := db.AIJobWithOwner{AIJob: db.AIJob{
+		Target: json.RawMessage(`{"type":"pipeline","definition":{"steps":[
+			{"id":"fetch","uses":"tool/list_tasks"},
+			{"id":"sum","uses":"llm","with":{"prompt":"根据 {{ steps.fetch.output }} 写日报"}},
+			{"id":"notify","uses":"tool/notify_user","with":{"subject":"日报","body":"{{ steps.sum.output }}"}}
+		]}}`),
+	}}
+	def, err := (&Server{}).buildAIJobDefinition(context.Background(), job, false)
+	if err != nil {
+		t.Fatalf("build definition: %v", err)
+	}
+	prompt, _ := def.Steps[1].With["prompt"].(string)
+	if !strings.Contains(prompt, aiJobOutputRule) {
+		t.Fatalf("llm prompt missing output rule: %s", prompt)
+	}
+	if !strings.HasPrefix(prompt, "根据 {{ steps.fetch.output }} 写日报") {
+		t.Fatalf("original prompt damaged: %s", prompt)
+	}
+	if def.Steps[0].With != nil {
+		t.Fatalf("tool step should be untouched: %+v", def.Steps[0].With)
+	}
+	if body, _ := def.Steps[2].With["body"].(string); body != "{{ steps.sum.output }}" {
+		t.Fatalf("notify body should be untouched: %q", body)
+	}
+}
+
+func TestNormalizeTargetToPipeline(t *testing.T) {
+	s := &Server{}
+	cases := []struct {
+		name      string
+		targetTyp string
+		target    string
+		wantUses  string
+	}{
+		{"tool", "tool", `{"type":"tool","tool":"list_tasks"}`, "tool/list_tasks"},
+		{"interface", "interface", `{"type":"interface","method":"GET","path":"tasks/open"}`, "api/tasks/open"},
+		{"ai", "ai", `{"type":"ai","prompt":"写日报"}`, "llm"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job := db.AIJobWithOwner{
+				AIJob: db.AIJob{Name: "t", TargetType: tc.targetTyp, Target: json.RawMessage(tc.target)},
+				OrgID: 1, UserID: 2,
+			}
+			if err := s.normalizeTargetToPipeline(context.Background(), &job); err != nil {
+				t.Fatalf("normalize: %v", err)
+			}
+			if job.TargetType != aiJobTypePipeline {
+				t.Fatalf("target type = %q, want pipeline", job.TargetType)
+			}
+			var tgt aiJobTarget
+			if err := json.Unmarshal(job.Target, &tgt); err != nil {
+				t.Fatalf("unmarshal target: %v", err)
+			}
+			if tgt.Definition == nil || len(tgt.Definition.Steps) != 1 || tgt.Definition.Steps[0].Uses != tc.wantUses {
+				t.Fatalf("definition = %+v, want single %s step", tgt.Definition, tc.wantUses)
+			}
+			if tc.targetTyp == "ai" && tgt.Definition.Steps[0].With["render"] == nil {
+				t.Fatal("ai target should keep render metadata for task/RAG injection")
+			}
+		})
+	}
+}
+
+func TestMCPStepUsesCoversLLMTools(t *testing.T) {
+	steps := []pipeline.Step{
+		{Uses: "llm", With: map[string]any{"tools": []string{"mcp_exa_web_search", "list_tasks"}}},
+		{Uses: "tool/mcp_other_tool"},
+		{Uses: "llm", With: map[string]any{"tools": []any{"mcp_exa_web_search", "search_files"}}},
+	}
+	got := mcpStepUses(steps)
+	want := []string{"mcp_exa_web_search", "mcp_other_tool"}
+	if len(got) != len(want) {
+		t.Fatalf("mcpStepUses = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("mcpStepUses = %v, want %v", got, want)
+		}
 	}
 }

@@ -12,7 +12,7 @@
 | 阅读路径 | §2 架构 → §4 启动装配 → §6 数据模型 / §7 接口 → §5 流程 → §9 扩展点 |
 | 引用约定 | 「文件路径 + 函数/类型/常量名」，不写行号 |
 
-2026-08-21 的 RBAC / 迁移方案设计稿与邮件模板预览已从 `docs/` 移除；其中的 `CGO_ENABLED=0` + modernc、`org_features`、自愈式迁移等结论早已被取代，本文件只描述现行实现，历史决策见根 `CHANGELOG.md`。
+2026-08-21 的 RBAC / 迁移方案设计稿与旧邮件模板预览已从 `docs/` 移除（现行原型稿为 `docs/email-template-preview.html`）；其中的 `CGO_ENABLED=0` + modernc、`org_features`、自愈式迁移等结论早已被取代，本文件只描述现行实现，历史决策见根 `CHANGELOG.md`。
 
 ## 2. 架构总览
 
@@ -85,7 +85,7 @@
 | `server` | iris 路由与全部 handler、鉴权、沙箱、AI 代理/Agent/审批、后台 run、编排与通用触发的装配层 | `server.go`（`Server`/`New`/`App`/`safeJoin`）、`auth.go`、`ai.go`（`handleAIChat`/`aiRunWriter`/`handleAIRuns*`）、`aitools.go`、`aitools_mcp.go`、`aiapproval.go`、`pipeline.go`（`runPipeline`）、`pipeline_http.go`、`aijob_target.go`（`ResolveTarget`/`ValidateJobTarget`）、`aijob_exec.go`、`aijob_trigger.go`、`schedule_triggers.go`（`supportedTriggerTargets`/`validateTriggerTarget`）、`fsops.go`、`upload.go`、`media.go`、`share.go`、`admin.go`、`org.go`、`codes.go`、`response.go` | iris、db、rag、schedule、notify、mcpclient、pipeline、UIFS |
 | `rag` | 文件索引与混合检索、LLM 相关性预判与摘要卡 | `service.go`（`Service`/`IndexFile`/`ReindexTree`/`Search`）、`chunk.go`、`embedding.go`、`judge.go`、`extract.go` | db、OpenAI 兼容 HTTP |
 | `schedule` | 手写 cron 引擎、进程内事件总线、通用定时触发分发 | `scheduler.go`（`ParseCron`/`Scheduler`）、`bus.go`（`EventBus`）、`jobs.go`（`KnownTopics`）、`triggers.go`（`NewTriggersJob`/`TriggerHandler`/`runCronTriggers`/`ClaimCronTrigger`） | db、标准库；包内无业务对象类型 |
-| `notify` | 订阅事件总线并发邮件 | `email.go`（`SubscribeEmailNotifier`）、`email_template.go`（`mdToHTML`/`safeHref`）、`email_helper.go` | net/smtp、schedule、db |
+| `notify` | 订阅事件总线并发邮件；注入 `BodyFormatter` 做 AI 排版 | `email.go`（`SubscribeEmailNotifier`/`notifyUserBody`）、`email_template.go`（`mdToHTML`/`safeHref`）、`email_letter.go`（`renderLetterEmailHTML`/`sanitizeAIHTML`/`htmlToPlainText`）、`email_helper.go`；排版器实现在 `server/email_format.go` | net/smtp、schedule、db |
 | `mcpclient` | MCP Streamable HTTP 最小客户端 | `client.go`（`initialize` → `notifications/initialized` → `tools/list` / `tools/call`） | net/http |
 | `pipeline` | **声明式编排执行引擎**（DAG 分层 + 同层并行），不依赖 HTTP/iris/db | `pipeline.go`：`Definition` / `Step`（`Needs`/`When`/`Retry`）/ `StepResult` / `Layers()` / `RunContext.Interpolate` / `Runner.Run` / `Executor` | 仅标准库 |
 | `sqlitevec` | 注册 sqlite-vec 静态扩展、向量序列化 | `vec.go`（`Auto`/`SerializeFloat32`）+ vendor C 源码 | cgo |
@@ -263,7 +263,9 @@ PC 面板与移动端共用 `useAIChat` 与 `AiMessage.vue`（经 `aiChatKey` pr
 ### 5.6 Todo：revision 乐观锁
 
 ```
-GET /api/tasks → {revision, tasks}（content → 80 字 contentPreview）
+GET /api/tasks → {orgs.{orgId}.{userId}: {revision, tasks}}（仅本人任务摘要）
+  列表无 content 全文；正文 > 24 rune 才给 contentPreview（24 字 + …），短正文不下发
+GET /api/tasks/{id} → {task（含 content 全文）, revision}
 写路径 PATCH/POST/DELETE /api/tasks/{id} 携带 baseRevision
   → 与 users.revision 比对：不一致 409 + 40901 + 服务端任务副本
   → 一致：单条写入 + revision +1 → 返回新 revision
@@ -290,13 +292,15 @@ Scheduler（整分钟 ticker，Vixie cron bitset 匹配）
        → ClaimCronTrigger(nowKey, leaseUntil) CAS 占租约
          （同分钟不重跑；超过 1 分钟的长任务租约未过期不会被重复触发）
        → handlers[target_type]（15min 独立 runCtx，状态回写用独立 ctx）
-            job               → triggerJob：读 ai_jobs → ResolveTarget/Validate
+            job               → triggerJob：读 jobs → ResolveTarget/Validate
                                 → runPipeline → MarkAIJobRunDetail → user.notify
        → MarkCronTriggerRun(ok / "error: ...", nowKey)（同时清租约）
 
 EventBus.Publish → 每 handler 独立 goroutine（panic recover）
   → EmailNotifier.onTaskDue / onTaskReminder / onUserNotify
-  → GetUserEmail（空跳过）→ SMTP STARTTLS → multipart/alternative
+  → onUserNotify：JobName 非空 → BodyFormatter（60s，AI 排版任意格式正文）
+       → sanitizeAIHTML → 信件式模板；失败/未配置/短通知 → mdToHTML → 卡片式模板
+  → GetUserEmail（空跳过）→ SMTP STARTTLS → multipart/alternative（text + html）
 ```
 
 `KnownTopics`：`task.due`、`task.reminder`、`user.notify`（仅 `user.notify` 允许 AI 发布）。全局公共任务（`user_id IS NULL`）的 job 规则用 `org_id=0 / user_id=0` 标记，`triggerJob` 内按 `ListUsersWithEmail` 展开为每用户独立执行与投递；规则行的 `last_run_at` 记录本次触发。`cron_triggers_runner` 不走事件总线：只按 `target_type` 调装配层 `TriggerHandler`，未注册类型或非法 cron 记 `error: ...` 状态并跳过，不影响其他规则。
@@ -308,7 +312,7 @@ EventBus.Publish → 每 handler 独立 goroutine（panic recover）
 ```
 run_pipeline 工具（一次界面确认） / POST /api/pipeline/run（直调 Definition，
                                     供 /jobs 任务详情页「立即执行」使用）
-triggerJob（定时任务：读 ai_jobs.target_json 里的内联 Definition，
+triggerJob（定时任务：读 jobs.target_json 里的内联 Definition，
            ResolveTarget 归一化后进入同一核心）
   → db.CreatePipelineRun(status=running)
   → Definition.Validate：步骤非空、≤50、id 唯一合法、uses/when/retry 合法、
@@ -324,7 +328,9 @@ triggerJob（定时任务：读 ai_jobs.target_json 里的内联 Definition，
          tool/<name> → execAITool（复用内置/MCP 工具）
          api/<path>  → 站内 /api/*，自签短期 token + X-Org-Id，
                         经 app.ServeHTTP 内部调用
-         llm         → aiChatOnce 非流式
+         llm         → aiChatOnce 非流式；with.tools 有白名单时走
+                        aiChatAgent（非流式 tool_calls → 工具执行 →
+                        role:"tool" 结果回灌，最多 5 轮）
        execWithRetry：retry ≤5、固定退避 200ms×次数、每步 5min 超时
   → 每层结束 onStep 落一次 pipeline_runs 全量快照；主流程失败即停
   → 工具只回步骤摘要；直调返回 runId；完整输出 GET /api/pipeline/runs/{id}
@@ -333,9 +339,9 @@ triggerJob（定时任务：读 ai_jobs.target_json 里的内联 Definition，
     15s 心跳注释行防代理掐断，连接寿命上限 = 执行总超时 + 1min
 ```
 
-**领域解耦**：编排 Definition 内联在 `ai_jobs.target_json` 里（`000027` 删除独立模板表与版本表）；`ai_jobs` 只存执行定义（`target_type` / `target_json` / `allow_write` / context / notify，000023 删掉 4 个调度列），cron / 启停 / 最近状态由 `target_type='job'` 的 `schedule_triggers` 规则提供。`db` 层不解析 Definition。`schedule.NewTriggersJob` 只按 `target_type` 分发，`supportedTriggerTargets` 白名单只登记 `job`，目标是否存在与归谁所有由 `server/schedule_triggers.go` 的 `validateTriggerTarget` 在装配层校验（创建后目标绑定不可变）；删除任务经 `DeleteCronTriggersForTarget` 清理孤儿规则。`ai_jobs` / `pipeline_runs` / `schedule_triggers` 都按 `org_id + user_id` 隔离，跨身份读任务返回 `40401`。
+**领域解耦**：编排 Definition 内联在 `jobs.target_json` 里（`000027` 删除独立模板表与版本表）；`jobs` 只存执行定义（`target_type` / `target_json` / `allow_write` / context / notify，000023 删掉 4 个调度列），cron / 启停 / 最近状态由 `target_type='job'` 的 `schedule_triggers` 规则提供。`db` 层不解析 Definition。`schedule.NewTriggersJob` 只按 `target_type` 分发，`supportedTriggerTargets` 白名单只登记 `job`，目标是否存在与归谁所有由 `server/schedule_triggers.go` 的 `validateTriggerTarget` 在装配层校验（创建后目标绑定不可变）；删除任务经 `DeleteCronTriggersForTarget` 清理孤儿规则。`jobs` / `pipeline_runs` / `schedule_triggers` 都按 `org_id + user_id` 隔离，跨身份读任务返回 `40401`。
 
-安全模型：`allowWrite` 必须显式列出写类工具与非 GET 的 api 步骤，否则该步失败；`api/<path>` 限定站内 `/api/*`，不能外访。定时执行无人审批，创建 / 更新时即做 Definition 级预检，并拒绝 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*`。`internal/pipeline` 不依赖 HTTP/iris/db，`Executor` 由 server 注入，可独立单测。
+安全模型：`allowWrite` 必须显式列出写类工具与非 GET 的 api 步骤，否则该步失败；`api/<path>` 限定站内 `/api/*`，不能外访。定时执行无人审批，创建 / 更新时即做 Definition 级预检，并拒绝 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/jobs`、`api/pipeline/*`。`ai` 类型下 `allowWrite` 还是模型唯一可见的工具白名单（填写即预授权，写类工具无需重复填写），归一化后写进 `llm` 步 `with.tools`，由非流式 Agent 循环消费；创建时拒绝未知工具名与 `api/<path>` 条目，执行时再拦截白名单外的工具名。`internal/pipeline` 不依赖 HTTP/iris/db，`Executor` 由 server 注入，可独立单测。
 
 ### 5.10 SPA 路由与深链兜底
 
@@ -350,21 +356,21 @@ triggerJob（定时任务：读 ai_jobs.target_json 里的内联 Definition，
 | 版本 | 主题 | 版本 | 主题 |
 |---|---|---|---|
 | 000001 | baseline | 000010 | 全局公共 AI 任务 |
-| 000002 | RBAC 多组织 | 000011 | `ai_job_runs` |
+| 000002 | RBAC 多组织 | 000011 | `job_runs` |
 | 000003 | 删遗留列 | 000012 | 删 `visit_logs` |
 | 000004 | `user_org_feature` | 000013 | RAG 索引三表 + `rag_meta` |
 | 000005 | `tasks.files` | 000014 | `file_chunks.start_line` |
 | 000006 | `ai_sessions` | 000015 | FTS5 混合检索 |
 | 000007 | `users.revision` | 000016 | `ai_runs`（后台对话运行） |
 | 000008 | 用户邮箱 + `notify_log` | 000017 | `pipeline_runs`（编排运行） |
-| 000009 | 任务精确时刻 + `ai_jobs` | | |
+| 000009 | 任务精确时刻 + `jobs` | | |
 | 000018 | `pipeline_templates`（初版含 `cron_expr` / `enabled` / `last_run_at` / `last_status`） | | |
 | 000019 | `schedule_triggers` 通用规则表，并从模板 `cron_expr <> ''` 回填已有配置 | | |
 | 000020 | 模板表纯化：建新表 → 复制 → 删旧表 → 改名，删掉 4 个调度列 | | |
-| 000021 | AI 会话消息表（`ai_session_messages`，行级消息） | 000022 | `ai_jobs` 执行对象：target 五列 + `prompt` 回填 |
-| 000023 | 调度收敛：`ai_jobs` 去 4 个调度列 + `schedule_triggers.lease_until` + job 规则回填 | 000024 | `ai_job_runs` 详情列（run id / steps / 耗时） |
-| 000025 | `ai_jobs.retry`（job 级失败重试，0-3，仅无写步骤生效） | | |
-| 000026 | `pipeline_template_versions`（模板版本历史，历史迁移保留） | 000027 | 删除模板两张表 + 清理 `pipeline_template` 孤儿触发规则；编排 Definition 改为内联在 `ai_jobs.target_json` |
+| 000021 | AI 会话消息表（`ai_session_messages`，行级消息） | 000022 | `jobs` 执行对象：target 五列 + `prompt` 回填 |
+| 000023 | 调度收敛：`jobs` 去 4 个调度列 + `schedule_triggers.lease_until` + job 规则回填 | 000024 | `job_runs` 详情列（run id / steps / 耗时） |
+| 000025 | `jobs.retry`（job 级失败重试，0-3，仅无写操作时生效；按预授权 / llm 白名单里是否真含写类工具判定） | | |
+| 000026 | `pipeline_template_versions`（模板版本历史，历史迁移保留） | 000027 | 删除模板两张表 + 清理 `pipeline_template` 孤儿触发规则；编排 Definition 改为内联在 `jobs.target_json` |
 
 000020 是 SQLite 无 `DROP COLUMN` 时的标准重建写法；其 `.down.sql` 建回 `pipeline_templates_legacy`，按 `target_type='pipeline_template'` 从 `schedule_triggers` 取最近一条反向回填调度列。`000018`–`000026` 的历史脚本保留不动以维持新建库迁移链，`000027` 在运行时删表；其 `.down.sql` 只重建空表，模板数据不可恢复。
 
@@ -374,7 +380,7 @@ triggerJob（定时任务：读 ai_jobs.target_json 里的内联 Definition，
 |---|---|---|
 | 组织权限 | `orgs`、`roles`、`users`、`user_orgs`、`user_org_feature`、`app_secrets`、`rate_limits` | `users` 含 `is_platform_admin`/`revision`/`email`；`user_org_feature` 唯一 `(user_id,org_id,feature_code)` |
 | 业务 | `tasks`、`shares`、`notify_log` | `tasks.PK(id,user_id,org_id)` + `files`/`scheduled_time`/`due_time`；`notify_log` 唯一 `(topic,dedup_key,notify_date)` |
-| AI 会话调度 | `ai_sessions`、`ai_jobs`、`ai_job_runs` | `ai_sessions.messages` 为前端快照 JSON；`ai_jobs` 只存执行定义（`target_type`/`target_json`/`allow_write`/context/notify/`retry`，无调度列）；`ai_job_runs` 含 `target_type`/`pipeline_run_id`/`steps_summary`/`err_msg`/`duration_ms`/`finished_at` |
+| AI 会话调度 | `ai_sessions`、`jobs`、`job_runs` | `ai_sessions.messages` 为前端快照 JSON；`jobs` 只存执行定义（`target_type`/`target_json`/`allow_write`/context/notify/`retry`，无调度列）；`job_runs` 含 `target_type`/`pipeline_run_id`/`steps_summary`/`err_msg`/`duration_ms`/`finished_at` |
 | **后台运行** | `ai_runs` | `id TEXT PK`、org/user、`qa_id`/`session_id`、`status running/done/failed`、`events JSON`、`result`、`err_msg`、时间戳；索引 `(org_id,user_id,started_at DESC)` |
 | **编排运行** | `pipeline_runs` | `id TEXT PK`、org/user、`name`、`definition JSON`、`status`、`steps JSON`、`err_msg`、时间戳；同款 owner 索引；Definition 由任务 `target_json` 内联提供 |
 | **通用触发规则** | `schedule_triggers` | `id`、org/user、`target_type`（当前仅 `job`）、`target_id`、`cron_expr`、`enabled`、`last_run_at`/`last_status`、`lease_until`、时间戳；索引含 owner、enabled 与 `(target_type,target_id)` |
@@ -386,12 +392,12 @@ triggerJob（定时任务：读 ai_jobs.target_json 里的内联 Definition，
 ### 6.3 关系与约束要点
 
 ```
-orgs ─< user_orgs >─ users ─< tasks / ai_sessions / ai_jobs / shares
+orgs ─< user_orgs >─ users ─< tasks / ai_sessions / jobs / shares
                         └─< ai_runs / pipeline_runs
                              / schedule_triggers（org_id+user_id 隔离）
 user_orgs ─< user_org_feature
-ai_jobs ─< ai_job_runs
-ai_jobs ─< schedule_triggers（target_type='job' + target_id；逻辑关联，无外键）
+jobs ─< job_runs
+jobs ─< schedule_triggers（target_type='job' + target_id；逻辑关联，无外键）
 RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 ```
 
@@ -399,7 +405,7 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 - 存储层整数 id / 磁盘路径 `orgName/userName` 双轨，改名需同步迁移目录。
 - `users.revision` 是所有任务写入的单调版本号；`tasks.files` 为 JSON 数组，空关联归一 `nil` + `omitempty`。
 - `notify_log` 去重在 **Publish 之前**用 `INSERT OR IGNORE` + `RowsAffected` 原子判定，SMTP 失败不重投；`user.notify` 不去重。
-- `ai_runs` / `pipeline_runs` / `ai_jobs` / `schedule_triggers` 均按 org+user 隔离；列表不含大字段（events / steps / definition 由详情接口返回）；任务详情跨身份访问返回 `40401`。
+- `ai_runs` / `pipeline_runs` / `jobs` / `schedule_triggers` 均按 org+user 隔离；列表不含大字段（events / steps / definition 由详情接口返回）；任务详情跨身份访问返回 `40401`。
 
 ## 7. 接口设计
 
@@ -435,9 +441,9 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | POST | `/api/ai/reindex` | 全量重建（并发 `40902`）；与 `reindex_*` 工具共用 `startReindex` |
 | GET | `/api/ai/reindex/status` · `/api/ai/index-status` | 进度 / 文件索引状态 |
 | GET | `/api/ai/runs` · `/api/ai/runs/{id}?offset=` | 后台运行列表（不含 events）/ 详情（含 events，按 `offset` 切出 `delta` 与新游标） |
-| GET · POST | `/api/ai/jobs` | 定时任务列表 / 创建（`target` 四类执行对象；老 `prompt` 兼容） |
-| PUT · DELETE | `/api/ai/jobs/{id}` | 更新 / 删除（同步 `/api/schedule/triggers` 的 job 规则） |
-| GET | `/api/ai/jobs/{id}/runs` | 执行历史（含 targetType / pipelineRunId / stepsSummary / durationMs） |
+| GET · POST | `/api/jobs` | 定时任务列表 / 创建（`target` 四类执行对象；老 `prompt` 兼容） |
+| PUT · DELETE | `/api/jobs/{id}` | 更新 / 删除（同步 `/api/schedule/triggers` 的 job 规则） |
+| GET | `/api/jobs/{id}/runs` | 执行历史（含 targetType / pipelineRunId / stepsSummary / durationMs） |
 | GET · POST | `/api/ai/sessions` | 会话列表 / 创建 |
 | GET · PUT · DELETE | `/api/ai/sessions/{id}` | 会话详情 / 更新 / 删除 |
 
@@ -447,7 +453,7 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 |---|---|---|
 | GET | `/api/pipeline/runs` · `/api/pipeline/runs/{id}` | 运行列表（不含 steps）/ 详情（含逐步结果） |
 | GET | `/api/pipeline/runs/{id}/stream` | SSE 实时进度：`progress`（整份运行快照，按 DAG 层推进）→ 终态 `end` 关闭；推送源为 pipeline_runs 表 1s 轮询，非进程内 pub/sub |
-| POST | `/api/pipeline/run` | 直调 Definition，后台异步执行，返回 `runId`；任务的编排定义走 `ai_jobs.target_json`，无模板 CRUD 接口 |
+| POST | `/api/pipeline/run` | 直调 Definition，后台异步执行，返回 `runId`；任务的编排定义走 `jobs.target_json`，无模板 CRUD 接口 |
 | GET · POST | `/api/schedule/triggers` | 规则列表（可按 `targetType`/`targetId` 过滤）/ 创建；`targetType` 仅 `job` |
 | GET · PUT · DELETE | `/api/schedule/triggers/{id}` | 规则详情 / 更新 / 删除 |
 
@@ -482,13 +488,13 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 授权 | 每请求校验 `X-Org-Id` 归属；`RequireUserManager` + handler 内细粒度约束；功能开关控制入口 |
 | 首用户 | `ADMIN_SETUP_TOKEN` 常量时间比较，仅用户表为空时校验 |
 | 路径 | `safeJoin` + `resolveUserPathSafe`（`EvalSymlinks` 双校验）+ `sanitizeUploadName`；软链接条目只操作链接 |
-| 后台 run / 编排数据 | `ai_runs` / `pipeline_runs` / `ai_jobs` / `schedule_triggers` 按 org+user 隔离；断连后写工具跳过；审批绑定用户且一次性 |
+| 后台 run / 编排数据 | `ai_runs` / `pipeline_runs` / `jobs` / `schedule_triggers` 按 org+user 隔离；断连后写工具跳过；审批绑定用户且一次性 |
 | 编排 | `run_pipeline` 一次确认覆盖整条流程；`allowWrite` 显式预授权；`api/<path>` 限站内 `/api/*`，自签短期 token 带当前身份 |
-| 定时任务 | 创建 / 更新时按 Definition 预检 `allowWrite`；执行不进审批分支；拒绝 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*`；外部 MCP 仅白名单 |
+| 定时任务 | 创建 / 更新时按 Definition 预检 `allowWrite`；执行不进审批分支；拒绝 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/jobs`、`api/pipeline/*`；外部 MCP 仅白名单；`ai` 类型按工具白名单限制模型可见能力（填写即预授权、最多 5 轮），执行时再拦截白名单外的工具名 |
 | 通用触发 | 创建规则时校验 `target_type` 白名单（当前仅 `job`）与目标归属，创建后目标绑定不可变；任务 / 规则详情跨身份返回 `40401`，不泄露存在性 |
 | 凭据 | AI keys / SMTP 授权码 / MCP header token 走环境变量（`${ENV_VAR}` 展开），不落仓库 |
 | 渲染 | Markdown 经 DOMPurify；HTML 预览用无 `allow-same-origin` 沙箱 iframe + null-origin CORS |
-| 邮件 | 用户内容 HTML 转义；`safeHref` 只允许 http(s) 且与 `site_url` 同 host |
+| 邮件 | 用户内容 HTML 转义；`safeHref` 只允许 http(s) 且与 `site_url` 同 host；AI 排版结果经 `sanitizeAIHTML` 标签白名单（脚本/图片/表单丢弃、属性全丢、样式统一注入），信件外框由代码固定 |
 | 链路头 | `qaId`/`sessionId` 用 `validTraceID` 限长 64 可见 ASCII 防 header 注入 |
 | 限流 | 登录失败 5 次/分钟/IP、分享密码 5 次/5 分钟，`rate_limits` 持久化 |
 | 已知边界 | token 无法单独吊销（只能轮换密钥）；Bearer 而非 Cookie，无 CSRF 面 |
@@ -524,14 +530,14 @@ RAG 五表 ← 按 (org_id,user_id) 分区，vec0 用 owner PARTITION KEY
 | 会话 | 无状态 token，`X-Org-Id` 传组织 | 无会话表、支持切换组织 | 不能单独吊销；每请求身份解析 |
 | 路径标识 | 整数 id 存储 / 名称路径 | 目录可读、账号隔离 | 改名需同步迁移磁盘 |
 | 任务同步 | 服务端 `revision` + 乐观锁 + 30s 轮询 | 增量写、多设备对账 | 1.3.0 起废弃 `PUT /api/tasks`，前后端须同版本 |
-| 列表瘦身 | `content` → `contentPreview` + 详情接口 | 省带宽 | `PATCH` 必须实现「缺省保留」语义 |
+| 列表摘要化 | `content` 不下发；长正文 24 字 `contentPreview` + `GET /api/tasks/{id}` 详情 | 压缩已把重复键名吃掉，中文预览是高熵大头，缩短/省略才能降传输 | `PATCH` 必须实现「缺省保留」语义；短正文卡片无备注 |
 | **对话与请求解耦** | 后台 run（`runCtx` 15min + `aiRunWriter` 镜像输出） | 断网/关面板不掐断 Agent 循环，结果可查 | 状态不跨进程重启；断连后写类工具跳过；15min 总超时 |
 | **断连恢复** | `run_id` + 300ms 游标轮询 `/api/ai/runs/{id}?offset=` | 无需 WebSocket/推送，改动集中在一个 composable，多个会话可并行恢复 | 轮询上限 15min、本地 runId 30min 过期保护；静默断流需与 `[DONE]` 区分；刷新中断判为可恢复，SSE `error` 带 `business` 才是业务错误 |
-| **编排 vs 改造 Agent** | 声明式纯数据 `Definition` + 独立 Runner | 模型自主规划多步，Agent 循环零改动；借鉴 GitLab CI 逐步状态、GitHub Actions `uses`/`with`/插值 | Definition 由模型生成需校验；写步骤须 `allowWrite` 预授权 |
+| **编排 vs 改造 Agent** | 声明式纯数据 `Definition` + 独立 Runner（编排）；定时任务另给 `ai` target 加白名单驱动的非流式 Agent 循环 | 编排由模型自主规划多步且逐步可观测；定时侧复用同一套工具执行与预授权判定，对话侧 SSE Agent 循环零改动；借鉴 GitLab CI 逐步状态、GitHub Actions `uses`/`with`/插值 | Definition 由模型生成需校验；写步骤须 `allowWrite` 预授权；定时侧模型仅可见白名单工具、最多 5 轮 |
 | **DAG 分层并行** | `needs` 缺省依赖前一步（默认顺序），显式 `needs` 拓扑分层 + 同层并发 4 | 保留旧定义的顺序语义，同时支持并行；`when`/`retry` 补条件与补偿 | 插值在启动 goroutine 前完成，层内不共享写；每层落一次全量快照 |
-| **编排内联在任务里** | Definition 存 `ai_jobs.target_json`（000027 删独立模板表） | 编排只是定时任务的一种可执行对象，AI 直接生成复杂流程，无需模板库与版本历史；调度不绑定业务对象，直调 / 定时共用同一 `runPipeline` | Definition 由模型生成需校验；任务删除需级联清规则 |
+| **编排内联在任务里** | Definition 存 `jobs.target_json`（000027 删独立模板表） | 编排只是定时任务的一种可执行对象，AI 直接生成复杂流程，无需模板库与版本历史；调度不绑定业务对象，直调 / 定时共用同一 `runPipeline` | Definition 由模型生成需校验；任务删除需级联清规则 |
 | **通用定时触发** | `cron_triggers_runner` + `TriggerHandler` 按 `target_type` 分发 | `schedule` 包零业务依赖，新增领域只需装配层注册 | `ClaimCronTrigger` CAS 租约（同分钟 + 长任务跨分钟防重）、15min 独立超时、无持久化队列 |
-| **定时任务执行对象** | `ai_jobs.target` 四类对象（ai / tool / interface / pipeline）归一化为 `Definition`，复用 `runPipeline`；cron 与启停归 `schedule_triggers` | 不为 schedule 写四套执行器，AI 工具 / 站内接口能力直接复用 | 写操作必须静态 `allowWrite`；外部 MCP 仅白名单；`api/*` 限站内；`pipeline` 单次总超时 15min |
+| **定时任务执行对象** | `jobs.target` 四类对象（ai / tool / interface / pipeline）归一化为 `Definition`，复用 `runPipeline`；cron 与启停归 `schedule_triggers` | 不为 schedule 写四套执行器，AI 工具 / 站内接口能力直接复用 | 写操作必须静态 `allowWrite`（`ai` 下白名单即预授权）；外部 MCP 仅白名单；`api/*` 限站内；`pipeline` 单次总超时 15min |
 | **消息渲染共用** | PC/移动共用 `AiMessage.vue` + `aiChatKey` provide/inject | 消除两套消息模板分叉，审批/重新生成作用于正确会话 | 子组件依赖注入，不能独立调用 `useAIChat` |
 | 编排执行器注入 | `internal/pipeline` 不依赖 HTTP/iris/db，`Executor` 由 server 注入 | 可独立单测、职责清晰 | `withToolContext` 需从 `ContextPool` 合成 iris.Context 预置身份 |
 | 编排写授权 | 一次审批覆盖整条流程 + `allowWrite` 显式列出 | 不让模型在长流程里绕过确认 | 写步骤未预授权即失败；Definition 由模型生成需校验 |

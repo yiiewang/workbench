@@ -215,3 +215,10 @@ func TestReindexToolsWhenRAGDisabled(t *testing.T) {
 		t.Fatalf("reindex_status: want explicit error when RAG disabled, got %+v", got)
 	}
 }
+
+func TestSummarizeToolArgsSteps(t *testing.T) {
+	raw := `{"name":"x","steps":[{"id":"gen","uses":"llm"},{"id":"send","uses":"tool/notify_user"}]}`
+	if got := summarizeToolArgs(raw); !strings.Contains(got, "steps=2[gen,send]") {
+		t.Fatalf("summarizeToolArgs = %q", got)
+	}
+}

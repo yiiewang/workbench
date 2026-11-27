@@ -19,6 +19,7 @@ type CronTrigger struct {
 	Enabled    bool   `json:"enabled"`
 	LastRunAt  string `json:"lastRunAt"`
 	LastStatus string `json:"lastStatus"`
+	FinishedAt string `json:"finishedAt"`
 	CreatedAt  string `json:"createdAt"`
 	UpdatedAt  string `json:"updatedAt"`
 }
@@ -34,7 +35,7 @@ func scanCronTrigger(s interface{ Scan(...any) error }) (CronTrigger, error) {
 	var t CronTrigger
 	var enabled int
 	err := s.Scan(&t.ID, &t.TargetType, &t.TargetID, &t.CronExpr, &enabled,
-		&t.LastRunAt, &t.LastStatus, &t.CreatedAt, &t.UpdatedAt)
+		&t.LastRunAt, &t.LastStatus, &t.FinishedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return t, err
 	}
@@ -49,7 +50,7 @@ func (d *DB) ListCronTriggers(ctx context.Context, orgID, userID int64, targetTy
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	q := `SELECT id, target_type, target_id, cron_expr, enabled, last_run_at, last_status, created_at, updated_at
+	q := `SELECT id, target_type, target_id, cron_expr, enabled, last_run_at, last_status, finished_at, created_at, updated_at
 	      FROM schedule_triggers WHERE org_id = ? AND user_id = ?`
 	args := []any{orgID, userID}
 	if targetType != "" {
@@ -103,7 +104,7 @@ func (d *DB) ListEnabledCronTriggers(ctx context.Context) ([]CronTriggerWithOwne
 // GetCronTrigger 单条详情；不存在返回 ok=false
 func (d *DB) GetCronTrigger(ctx context.Context, orgID, userID, id int64) (CronTrigger, bool, error) {
 	t, err := scanCronTrigger(d.conn.QueryRowContext(ctx,
-		`SELECT id, target_type, target_id, cron_expr, enabled, last_run_at, last_status, created_at, updated_at
+		`SELECT id, target_type, target_id, cron_expr, enabled, last_run_at, last_status, finished_at, created_at, updated_at
 		 FROM schedule_triggers WHERE id = ? AND org_id = ? AND user_id = ?`,
 		id, orgID, userID))
 	if err == sql.ErrNoRows {
@@ -152,23 +153,37 @@ func (d *DB) DeleteCronTriggersForTarget(ctx context.Context, orgID, userID int6
 
 // ClaimCronTrigger CAS 占用一次触发：同分钟不重跑，且租约未过期时不重复触发。
 // leaseUntil 为本次执行允许占用的截止时刻（YYYY-MM-DD HH:mm）。
-func (d *DB) ClaimCronTrigger(ctx context.Context, id int64, nowKey, leaseUntil string) (bool, error) {
+// recovered 表示本次是接管一个已过期的 running 租约（上一次执行未按时回收），
+// 调用方据此记日志，避免"僵尸执行 + 新执行"并发却无人知晓。
+func (d *DB) ClaimCronTrigger(ctx context.Context, id int64, nowKey, leaseUntil string) (claimed, recovered bool, err error) {
+	// 先取旧状态：查询失败不阻断 claim（宁可重复执行，也不要卡死调度）
+	var prevStatus, prevLease string
+	_ = d.conn.QueryRowContext(ctx,
+		`SELECT last_status, lease_until FROM schedule_triggers WHERE id = ?`, id).
+		Scan(&prevStatus, &prevLease)
 	res, err := d.conn.ExecContext(ctx,
 		`UPDATE schedule_triggers
 		 SET last_run_at = ?, lease_until = ?, last_status = 'running'
 		 WHERE id = ? AND last_run_at <> ? AND (lease_until = '' OR lease_until < ?)`,
 		nowKey, leaseUntil, id, nowKey, nowKey)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	n, err := res.RowsAffected()
-	return n == 1, err
+	if err != nil || n != 1 {
+		return false, false, err
+	}
+	return true, prevStatus == "running" && prevLease != "" && prevLease < nowKey, nil
 }
 
-// MarkCronTriggerRun 记录最近一次触发结果并释放租约（分钟键用于 cron 防重）。
+// MarkCronTriggerRun 记录最近一次触发结果并释放租约。
+// at 保持触发分钟（同分钟防重依赖它）；finished_at 单独记录真正完成时刻。
 func (d *DB) MarkCronTriggerRun(ctx context.Context, id int64, status, at string) error {
 	_, err := d.conn.ExecContext(ctx,
-		`UPDATE schedule_triggers SET last_run_at = ?, last_status = ?, lease_until = '', updated_at = datetime('now') WHERE id = ?`,
+		`UPDATE schedule_triggers
+		 SET last_run_at = ?, last_status = ?, lease_until = '',
+		     finished_at = datetime('now'), updated_at = datetime('now')
+		 WHERE id = ?`,
 		at, status, id)
 	return err
 }

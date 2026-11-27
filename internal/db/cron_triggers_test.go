@@ -64,6 +64,42 @@ func TestCronTriggerCRUD(t *testing.T) {
 }
 
 // 目标对象删除时按 (target_type, target_id) 批量清理，且不影响其他目标/其他用户
+// 租约：执行中的 trigger 不被重复 claim；过期租约可被接管，且 recoverd 标记用于日志留痕。
+func TestClaimCronTriggerLeaseRecovery(t *testing.T) {
+	d := newTestDB(t)
+	ctx := ctx()
+	if _, err := d.conn.ExecContext(ctx, `DELETE FROM schedule_triggers`); err != nil {
+		t.Fatal(err)
+	}
+	id, err := d.CreateCronTrigger(ctx, 1, 2, "job", 7, "* * * * *", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, recovered, err := d.ClaimCronTrigger(ctx, id, "2026-11-26 16:53", "2026-11-26 17:08")
+	if err != nil || !claimed || recovered {
+		t.Fatalf("first claim = (%v, %v, %v)", claimed, recovered, err)
+	}
+	claimed, _, err = d.ClaimCronTrigger(ctx, id, "2026-11-26 16:54", "2026-11-26 17:09")
+	if err != nil || claimed {
+		t.Fatalf("claim during lease = (%v, %v), want blocked", claimed, err)
+	}
+	claimed, recovered, err = d.ClaimCronTrigger(ctx, id, "2026-11-26 17:09", "2026-11-26 17:24")
+	if err != nil || !claimed || !recovered {
+		t.Fatalf("takeover = (%v, %v, %v), want claimed+recovered", claimed, recovered, err)
+	}
+
+	var status, lease string
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT last_status, lease_until FROM schedule_triggers WHERE id = ?`, id).
+		Scan(&status, &lease); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || lease != "2026-11-26 17:24" {
+		t.Fatalf("after takeover status=%q lease=%q", status, lease)
+	}
+}
+
 func TestDeleteCronTriggersForTarget(t *testing.T) {
 	d := newTestDB(t)
 	ctx := ctx()

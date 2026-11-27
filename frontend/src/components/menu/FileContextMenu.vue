@@ -6,7 +6,7 @@ import { contextMenu, closeFileContextMenu } from '../../composables/useContextM
 import { treeStore } from '../../composables/useTreeStore'
 import { activeTabPath, openTabs, storeRemoveTab, storeSetActiveTab, openTabFn } from '../../stores/indexStore'
 import { showToast, baseName, extFromPath } from '../../lib/common'
-import { openShareModal } from '../../lib/shareModal'
+import { openShareModal } from '../../composables/useShare'
 import { openPrompt } from '../../lib/promptModal'
 import * as fileApi from '../../api/files'
 

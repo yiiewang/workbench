@@ -1,7 +1,7 @@
 package server
 
 // 编排 HTTP 入口：直接运行一份 Definition（定时任务的内联编排、前端立即执行共用）。
-// 编排流程不落独立模板表，Definition 直接存在 ai_jobs.target_json 里。
+// 编排流程不落独立模板表，Definition 直接存在 jobs.target_json 里。
 
 import (
 	"context"

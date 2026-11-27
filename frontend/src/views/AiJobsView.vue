@@ -38,6 +38,9 @@ const form = ref({
   retry: 0,
 })
 const runsOpen = ref(new Set<number>())
+// 运行中任务的逐步快照：job_runs 先落 running，前端用 pipelineRunId 轮询 pipeline_runs.steps
+const runLiveSteps = ref<Record<number, PipelineStepResult[] | undefined>>({})
+const runPollTimers: Record<number, number> = {}
 
 const DEFAULT_DEF = JSON.stringify({
   name: '索引巡检',
@@ -65,7 +68,10 @@ function stopRunStream() {
   streaming.value = false
 }
 
-onBeforeUnmount(stopRunStream)
+onBeforeUnmount(() => {
+  stopRunStream()
+  stopAllRunPolls()
+})
 
 function pretty(v: unknown): string {
   if (v === undefined || v === null) return '—'
@@ -216,19 +222,52 @@ function buildBody(): any {
 
 function fillForm(j: AIJob) {
   const t = j.target
+  const storedType = (j.targetType || t?.type || 'ai') as TargetType
+  const def = t?.definition as any
+  let formType: TargetType = storedType
+  let prompt = t?.prompt || j.prompt || ''
+  let tool = t?.tool || ''
+  let toolParams = t?.params ? JSON.stringify(t.params, null, 2) : ''
+  let method = t?.method || 'GET'
+  let path = t?.path || ''
+  let query = t?.query ? JSON.stringify(t.query, null, 2) : ''
+  let body = t?.body ? JSON.stringify(t.body, null, 2) : ''
+  const definition = t?.definition ? JSON.stringify(t.definition, null, 2) : DEFAULT_DEF
+
+  // 新建/更新统一存 pipeline；单步 Definition 回显成原来的快捷表单，
+  // 编辑体验不变（ai 的 render 元数据随 Definition 保留）。
+  if (storedType === 'pipeline' && Array.isArray(def?.steps) && def.steps.length === 1) {
+    const step = def.steps[0] as any
+    const w = step.with || {}
+    if (step.uses === 'llm' && typeof w.prompt === 'string') {
+      formType = 'ai'
+      prompt = w.prompt
+    } else if (typeof step.uses === 'string' && step.uses.startsWith('tool/')) {
+      formType = 'tool'
+      tool = step.uses.slice(5)
+      toolParams = Object.keys(w).length ? JSON.stringify(w, null, 2) : ''
+    } else if (typeof step.uses === 'string' && step.uses.startsWith('api/')) {
+      formType = 'interface'
+      path = step.uses.slice(4)
+      method = w.method || 'GET'
+      query = w.query ? JSON.stringify(w.query, null, 2) : ''
+      body = w.body ? JSON.stringify(w.body, null, 2) : ''
+    }
+  }
+
   form.value = {
     name: j.name,
     cronExpr: j.cronExpr,
-    prompt: t?.prompt || j.prompt || '',
+    prompt,
     enabled: j.enabled,
-    targetType: (j.targetType || t?.type || 'ai') as TargetType,
-    tool: t?.tool || '',
-    toolParams: t?.params ? JSON.stringify(t.params, null, 2) : '',
-    method: t?.method || 'GET',
-    path: t?.path || '',
-    query: t?.query ? JSON.stringify(t.query, null, 2) : '',
-    body: t?.body ? JSON.stringify(t.body, null, 2) : '',
-    definition: t?.definition ? JSON.stringify(t.definition, null, 2) : DEFAULT_DEF,
+    targetType: formType,
+    tool,
+    toolParams,
+    method,
+    path,
+    query,
+    body,
+    definition,
     allowWrite: (j.allowWrite || []).join(', '),
     retry: j.retry || 0,
   }
@@ -357,11 +396,65 @@ async function remove() {
   }
 }
 
+function parseRunSteps(raw?: string): PipelineStepResult[] {
+  if (!raw) return []
+  try {
+    const v = JSON.parse(raw)
+    return Array.isArray(v) ? (v as PipelineStepResult[]) : []
+  } catch {
+    return []
+  }
+}
+
+function runStepList(r: AIJobRun): PipelineStepResult[] {
+  if (r.status === 'running') {
+    const live = runLiveSteps.value[r.id]
+    if (live && live.length) return live
+  }
+  return parseRunSteps(r.stepsSummary)
+}
+
+function stopRunPoll(id: number) {
+  const t = runPollTimers[id]
+  if (t) {
+    clearInterval(t)
+    delete runPollTimers[id]
+  }
+}
+
+function stopAllRunPolls() {
+  for (const id of Object.keys(runPollTimers)) stopRunPoll(Number(id))
+}
+
+async function refreshLiveRun(r: AIJobRun) {
+  if (!r.pipelineRunId) return
+  try {
+    const detail = await getPipelineRun(r.pipelineRunId)
+    runLiveSteps.value = { ...runLiveSteps.value, [r.id]: detail.steps }
+    if (detail.status !== 'running') {
+      stopRunPoll(r.id)
+      if (typeof selected.value === 'number') loadRuns(selected.value)
+    }
+  } catch { /* 轮询失败静默，下一轮再试 */ }
+}
+
+function startRunPoll(r: AIJobRun) {
+  if (!r.pipelineRunId || runPollTimers[r.id]) return
+  refreshLiveRun(r)
+  runPollTimers[r.id] = window.setInterval(() => refreshLiveRun(r), 3000)
+}
+
 function toggleRun(i: number) {
   const s = new Set(runsOpen.value)
-  if (s.has(i)) s.delete(i)
-  else s.add(i)
+  const opening = !s.has(i)
+  const r = runs.value[i]
+  if (opening) s.add(i)
+  else {
+    s.delete(i)
+    if (r) stopRunPoll(r.id)
+  }
   runsOpen.value = s
+  if (opening && r?.status === 'running') startRunPoll(r)
 }
 
 function statusText(j: AIJob): string {
@@ -483,12 +576,14 @@ function statusText(j: AIJob): string {
           </template>
 
           <div class="form-row">
-            <label>静态预授权（逗号分隔，写类工具或非 GET 接口）</label>
-            <input v-model="form.allowWrite" class="form-input mono" placeholder="notify_user, api/tasks" />
-            <p class="form-hint">定时执行无人审批，写操作必须在创建时显式列出；未列出的步骤会失败。</p>
+            <label v-if="form.targetType === 'ai'">可用工具（逗号分隔，填写即预授权）</label>
+            <label v-else>静态预授权（逗号分隔，写类工具或非 GET 接口）</label>
+            <input v-model="form.allowWrite" class="form-input mono" :placeholder="form.targetType === 'ai' ? 'list_tasks, notify_user' : 'notify_user, api/tasks'" />
+            <p v-if="form.targetType === 'ai'" class="form-hint">这里是模型唯一可用的工具清单，填写即视为提前审批通过（含写类工具，无需重复填写）；留空则只做一次文本生成，不调用任何工具。</p>
+            <p v-else class="form-hint">定时执行无人审批，写操作必须在创建时显式列出；未列出的步骤会失败。</p>
           </div>
           <div class="form-row">
-            <label>失败重试次数（0-3，仅无写步骤时生效）</label>
+            <label>失败重试次数（0-3，仅无写操作时生效）</label>
             <input v-model.number="form.retry" type="number" min="0" max="3" class="form-input" style="max-width: 120px" />
           </div>
           <div class="form-row form-row-inline">
@@ -567,17 +662,28 @@ function statusText(j: AIJob): string {
         </div>
         <div class="aijobs-card-body">
           <div v-if="!runs.length && !runsLoading" class="aijob-runs-empty">还没有执行记录<br /><span>到点触发后这里会显示每次的运行结果</span></div>
-          <div v-for="(r, i) in runs" :key="r.id" class="aijob-run" :class="{ 'is-err': r.status !== 'ok' }">
+          <div v-for="(r, i) in runs" :key="r.id" class="aijob-run" :class="{ 'is-err': r.status !== 'ok' && r.status !== 'running' }">
             <button class="aijob-run-head" @click="toggleRun(i)">
-              <span class="aijob-run-status" :class="r.status === 'ok' ? 'ok' : 'err'">
-                {{ r.status === 'ok' ? '✓' : '✕' }}
+              <span class="aijob-run-status" :class="r.status === 'ok' ? 'ok' : r.status === 'running' ? 'running' : 'err'">
+                {{ r.status === 'ok' ? '✓' : r.status === 'running' ? '…' : '✕' }}
               </span>
               <span class="aijob-run-time">{{ r.ranAt }}</span>
+              <span v-if="r.status === 'running'" class="aijob-run-live">运行中</span>
               <span v-if="r.targetType" class="aijob-run-type">{{ r.targetType }}</span>
               <span class="aijob-run-toggle">{{ runsOpen.has(i) ? '收起' : '查看输出' }}</span>
             </button>
             <div v-show="runsOpen.has(i)" class="aijob-run-detail">
-              <pre class="aijob-run-output">{{ r.output || '（无输出）' }}</pre>
+              <div v-if="r.errMsg" class="aijob-run-error">{{ r.errMsg }}</div>
+              <ul v-if="runStepList(r).length" class="aijob-run-steps">
+                <li v-for="s in runStepList(r)" :key="s.id" :class="{ 'is-fail': s.status === 'failed' }">
+                  <span class="s-id">{{ s.id }}</span>
+                  <span class="s-uses">{{ s.uses }}</span>
+                  <span class="s-status">{{ s.status }}</span>
+                  <span v-if="s.durationMs" class="s-dur">{{ (s.durationMs / 1000).toFixed(1) }}s</span>
+                  <span v-if="s.error" class="s-err">{{ s.error }}</span>
+                </li>
+              </ul>
+              <pre class="aijob-run-output">{{ r.output || (r.status === 'running' ? '运行中…' : '（无输出）') }}</pre>
               <button v-if="r.pipelineRunId" class="aijob-run-link" @click="overlayRun(r.pipelineRunId!)">
                 {{ activeRunId === r.pipelineRunId ? '已叠加 · 点击取消' : '叠加到流程图' }}
               </button>
@@ -689,6 +795,18 @@ textarea.form-input { resize: vertical; line-height: 1.6; }
 }
 .aijob-run-detail { border-top: 1px solid var(--border); }
 .aijob-run-detail .aijob-run-output { border-top: none; }
+.aijob-run-error { padding: 8px 12px; font-size: 12px; color: #cf222e; background: #fff5f5; border-bottom: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; }
+.aijob-run-steps { list-style: none; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+.aijob-run-steps li { display: block; font-size: 12px; }
+.aijob-run-steps .s-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.aijob-run-steps .s-id { font-weight: 600; }
+.aijob-run-steps .s-status { color: #2e7d32; }
+.aijob-run-steps li.is-fail .s-status { color: #cf222e; }
+.aijob-run-steps .s-uses, .aijob-run-steps .s-dur { color: var(--text-muted, #888); }
+.aijob-run-steps .s-err { color: #cf222e; word-break: break-word; }
+.aijob-run-steps .s-detail { margin-top: 4px; }
+.aijob-run-steps .s-detail summary { cursor: pointer; color: var(--text-muted, #888); }
+.aijob-run-steps .s-detail pre { margin: 4px 0 8px; padding: 8px; background: var(--bg-soft, #f6f8fa); border-radius: 4px; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
 .aijob-run-link {
   display: inline-block; padding: 6px 12px 10px; font-size: 11px; color: var(--accent);
   text-decoration: none; border: none; background: none; cursor: pointer;

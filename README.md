@@ -124,7 +124,7 @@ notify:                        # notification channels (subscribe to the event b
 - **Markdown Viewer** — Rendered markdown with Mermaid diagrams, cross-file link navigation, anchor scrolling
 - **JSON Viewer** — Collapsible tree view, raw text toggle, copy raw to clipboard
 - **AI Chat & Agent** — OpenAI-compatible streaming chat with 16 built-in tools (file ops / search / task management / event publishing / scheduled jobs / pipelines / indexing); Human-in-the-loop approval for write operations; `@` file references; reasoning display; session history persisted in SQLite
-- **Scheduled Tasks & Notifications** — Hand-written cron engine + in-process event bus; one scanner over `schedule_triggers`; a job can run an AI prompt, a tool, an in-site API call, or a pipeline at a cron time (static `allowWrite` pre-authorization; per-run history with target type and pipeline run id); precise task-time reminders (start/due HH:mm); email delivery via SMTP 587 STARTTLS
+- **Scheduled Tasks & Notifications** — Hand-written cron engine + in-process event bus; one scanner over `schedule_triggers`; a job can run an AI prompt, a tool, an in-site API call, or a pipeline at a cron time (static `allowWrite` pre-authorization; per-run history with target type and pipeline run id). For AI-prompt jobs, `allowWrite` doubles as the tool whitelist: the model can autonomously call only the listed tools (up to 5 non-streaming agent rounds, listing = pre-approval), while an empty list keeps the original single text generation; scheduled-job results are re-formatted by AI into a letter-style email with a fixed Workbench shell and a sanitized HTML body (falls back to the card template when AI is unavailable); precise task-time reminders (start/due HH:mm); email delivery via SMTP 587 STARTTLS
 - **Declarative Pipelines** — JSON `Definition` with DAG `needs`, `when`, `retry` and tool/api/llm steps, inlined in a scheduled job's `target` (AI can generate complex flows directly); run on cron or immediately; DAG view, node inspector and run overlay under `/jobs` with SSE live per-layer progress streaming
 - **Todo ↔ File Linking** — Tasks can link files (tree picker in todo editor); the file viewer shows linked tasks with jump-to-task and link-existing-task actions
 - **Download & Share** — Download any file; create time-limited, access-controlled shares for files or folders
@@ -145,7 +145,7 @@ When `ai.chat.tools` is enabled, the chat agent can call these tools (write oper
 | Files | `list_dir` · `read_file` · `write_file` |
 | Search | `search_files` |
 | Tasks | `list_tasks` · `create_task` · `update_task` |
-| Scheduled jobs | `list_ai_jobs` · `create_ai_job` · `update_ai_job` · `delete_ai_job` |
+| Scheduled jobs | `list_jobs` · `create_job` · `update_job` · `delete_job` |
 | Pipelines | `run_pipeline` |
 | Indexing | `reindex_files` · `reindex_status` |
 | Events & notifications | `list_events` · `notify_user` |
@@ -194,9 +194,9 @@ The mobile UI (`/m/*`, auto-served on viewports ≤900px) is a separate, browse-
 | `/api/profile/email` | POST | Update own notification email `{email}` (requires token) |
 | `/api/tasks/{id}` | GET | Task detail (full fields incl. content; requires token) |
 | `/api/ai/approval` | POST | Approve/decline an AI write-tool call `{id, approved}` (requires token) |
-| `/api/ai/jobs` | GET/POST | List / create scheduled jobs (`target`: ai / tool / interface / pipeline; requires token) |
-| `/api/ai/jobs/{id}` | PUT/DELETE | Update / delete a scheduled job (requires token) |
-| `/api/ai/jobs/{id}/runs` | GET | Execution history (target type, pipeline run id, steps summary; requires token) |
+| `/api/jobs` | GET/POST | List / create scheduled jobs (`target`: ai / tool / interface / pipeline; requires token) |
+| `/api/jobs/{id}` | PUT/DELETE | Update / delete a scheduled job (requires token) |
+| `/api/jobs/{id}/runs` | GET | Execution history (target type, pipeline run id, steps summary; requires token) |
 | `/api/pipeline/run` | POST | Run a pipeline Definition asynchronously (used by "Run now" in `/jobs`; requires token) |
 | `/api/pipeline/runs` · `/api/pipeline/runs/{id}` | GET | List / detail of pipeline runs incl. per-step results (requires token) |
 | `/api/pipeline/runs/{id}/stream` | GET | SSE live progress of a pipeline run: `progress` events with full run snapshot per DAG layer, `end` on terminal state (requires token) |

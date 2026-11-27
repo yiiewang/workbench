@@ -5,12 +5,12 @@ import { openTab } from './useTabs'
 import { dataSource } from './useEditor'
 import { getHashPath, clearHash } from './useHashRouting'
 import { showToast, API_CODE } from '../lib/common'
-import { showSharePasswordModal } from '../lib/sharePasswordModal'
+import { showSharePasswordModal } from './useShare'
 import {
   authToken as storeAuthToken,
   dsMode, dsToken, dsPathPrefix, shareRootPath,
   openTabs, activeTabPath,
-  setOpenTabFn, loadSharesFn,
+  setOpenTabFn,
   checkAuth, openFileFromHash,
 } from '../stores/indexStore'
 import { treeStore } from './useTreeStore'
@@ -147,11 +147,6 @@ export function setupIndexApp() {
       const authed = await checkAuth()
       if (!authed) {
         // checkAuth 内部已处理 401 清除认证，apiCall 全局拦截会跳转登录页
-        return
-      }
-
-      if (window.location.pathname === '/shares') {
-        loadSharesFn?.()
         return
       }
 

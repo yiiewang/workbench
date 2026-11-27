@@ -101,6 +101,27 @@ func TestMdToHTML(t *testing.T) {
 	}
 }
 
+// mdToHTML：管道表格 + 引用块渲染，分隔行不外泄，单元格内容仍转义
+func TestMdToHTML_TableAndQuote(t *testing.T) {
+	md := "| 指数 | 涨跌幅 |\n|---|---|\n| 上证指数 | +0.01% |\n| <script>alert(1)</script> | -0.02% |\n\n> 说明：今日为正常交易日。\n> 数据均为收盘后发布。"
+	html := string(mdToHTML(md, ""))
+	if !strings.Contains(html, "<table") || !strings.Contains(html, "<th") || !strings.Contains(html, "<td") {
+		t.Fatalf("table not rendered: %s", html)
+	}
+	if strings.Contains(html, "|---|") {
+		t.Fatalf("separator row leaked: %s", html)
+	}
+	if !strings.Contains(html, "上证指数") || !strings.Contains(html, "+0.01%") {
+		t.Fatalf("table cells missing: %s", html)
+	}
+	if strings.Contains(html, "<script>") || !strings.Contains(html, "&lt;script&gt;") {
+		t.Fatalf("table cell not escaped: %s", html)
+	}
+	if !strings.Contains(html, "border-left:3px solid #9aa1ab") || !strings.Contains(html, "说明：今日为正常交易日") {
+		t.Fatalf("quote not rendered: %s", html)
+	}
+}
+
 // 超长主题：多段 encoded-word + 空格续行折叠，每段完整闭合、每行 ≤75 字符
 func TestEncodeWord_LongSubject(t *testing.T) {
 	long := strings.Repeat("这是很长的邮件主题内容。", 30) // 420 字，编码必超单行上限

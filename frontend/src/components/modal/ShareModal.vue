@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { authToken, activeTabPath } from '../../stores/indexStore'
+import { activeTabPath } from '../../stores/indexStore'
 import { showToast, copyToClipboard } from '../../lib/common'
 import * as shareApi from '../../api/share'
+import {
+  shareModalVisible, shareResourceType,
+  closeShareModal, notifySharesChanged,
+} from '../../composables/useShare'
 import ModalShell from '../ui/ModalShell.vue'
 
-const visible = ref(false)
-const resourcePath = ref('')
-const resourceType = ref('file')
 const maxAccessCount = ref(0)
 const password = ref('')
 const remark = ref('')
@@ -19,23 +19,32 @@ const expiresAt = ref('')
 
 watch(dateRange, (v) => {
   if (Array.isArray(v) && v.length === 2) {
-    effectiveAt.value = new Date(v[0]).toISOString()
-    expiresAt.value = new Date(v[1]).toISOString()
+    // value-format="X" → Unix 秒时间戳字符串，需先按秒换算成毫秒
+    effectiveAt.value = new Date(Number(v[0]) * 1000).toISOString()
+    expiresAt.value = new Date(Number(v[1]) * 1000).toISOString()
   } else {
     effectiveAt.value = ''
     expiresAt.value = ''
   }
 })
 
-function close() { visible.value = false }
+// 每次打开重置表单
+watch(shareModalVisible, (v) => {
+  if (!v) return
+  maxAccessCount.value = 0
+  password.value = ''
+  remark.value = ''
+  dateRange.value = []
+  submitting.value = false
+})
 
 async function submit() {
   if (submitting.value) return
   submitting.value = true
   try {
     const data = await shareApi.createShare({
-      resourcePath: resourcePath.value,
-      resourceType: resourceType.value,
+      resourcePath: activeTabPath.value,
+      resourceType: shareResourceType.value,
       maxAccessCount: maxAccessCount.value,
       password: password.value,
       remark: remark.value,
@@ -50,9 +59,8 @@ async function submit() {
     const clipText = formatShareText(shareUrl, password.value, remark.value)
     copyToClipboard(clipText)
     showToast('Share created, link copied')
-    close()
-    const w = window as any
-    if (typeof w.loadShares === 'function') w.loadShares()
+    closeShareModal()
+    notifySharesChanged()
   } catch (err: any) {
     showToast('Create failed: ' + (err.msg || err.message))
   } finally {
@@ -66,34 +74,15 @@ function formatShareText(url: string, pwd: string, rem: string) {
   if (rem) text += '\nRemark: ' + rem
   return text
 }
-
-const router = useRouter()
-
-// expose to window for context menu access (will be replaced by event bus)
-;(window as any).openShareModal = (type: string) => {
-  if (!authToken.value) {
-    router.push('/login?redirect=' + encodeURIComponent(window.location.pathname))
-    return
-  }
-  if (!activeTabPath.value) { showToast('Select a file first'); return }
-  resourcePath.value = activeTabPath.value
-  resourceType.value = type || 'file'
-  maxAccessCount.value = 0
-  password.value = ''
-  remark.value = ''
-  dateRange.value = []
-  submitting.value = false
-  visible.value = true
-}
 </script>
 
 <template>
-  <ModalShell v-if="visible" title="创建分享" width="480px" @close="close">
+  <ModalShell v-if="shareModalVisible" title="创建分享" width="480px" @close="closeShareModal">
     <el-form label-position="top" @submit.prevent>
       <el-form-item label="Resource path">
-        <el-input :model-value="resourcePath" readonly></el-input>
+        <el-input :model-value="activeTabPath" readonly></el-input>
         <div style="font-size:11px;color:#999;margin-top:3px;">
-          Type: {{ resourceType === 'dir' ? 'Folder' : 'File' }}
+          Type: {{ shareResourceType === 'dir' ? 'Folder' : 'File' }}
         </div>
       </el-form-item>
       <div style="display:flex;gap:12px;">
@@ -121,7 +110,7 @@ const router = useRouter()
       </el-form-item>
     </el-form>
     <template #actions>
-      <el-button @click="close">Cancel</el-button>
+      <el-button @click="closeShareModal">Cancel</el-button>
       <el-button type="primary" :loading="submitting" @click="submit">Create</el-button>
     </template>
   </ModalShell>

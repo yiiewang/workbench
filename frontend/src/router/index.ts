@@ -2,13 +2,14 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { loggedIn, canManageUsers } from '../stores/auth'
 import IndexView from '../views/IndexView.vue'
 import ExplorerSidebar from '../components/sidebar/ExplorerSidebar.vue'
-import SharesSidebar from '../components/sidebar/SharesSidebar.vue'
+import FileSidebar from '../components/sidebar/FileSidebar.vue'
 
 // SPA 路由（嵌套布局）：
 //   /login              → 独立页面（无布局），公开
 //   /s/:token           → 分享预览（无布局守卫），公开
 //   /                   → PC 功能首页（各功能入口卡片，无侧栏）
-//   /file  /shares  /todo  /admin → PC 应用界面（DefaultLayout 包裹），需登录
+//   /file  /todo  /admin → PC 应用界面（DefaultLayout 包裹），需登录
+//   /shares             → redirect /file?tab=shares（分享管理并入文件页侧栏 Tab）
 //   /m/*                → 移动端专属 UI（MobileLayout + 独立页面，功能做减法）
 //
 // 设备分流：PC 路径 + 移动设备视口 → redirect /m 对应页；/m + 桌面 → redirect PC。
@@ -51,13 +52,13 @@ const router = createRouter({
         },
         {
           path: 'file',
-          components: { default: IndexView, sidebar: ExplorerSidebar },
+          components: { default: IndexView, sidebar: FileSidebar },
           meta: { sidebarTitle: 'EXPLORER' },
         },
         {
+          // 旧入口：分享管理已并入 /file 侧栏 Tab，保留链接兼容
           path: 'shares',
-          components: { default: IndexView, sidebar: SharesSidebar },
-          meta: { sidebarTitle: 'MY SHARES' },
+          redirect: { path: '/file', query: { tab: 'shares' } },
         },
         {
           path: 'todo',

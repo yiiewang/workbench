@@ -4,7 +4,6 @@ import { useRoute } from 'vue-router'
 import TabBar from '../components/tab/TabBar.vue'
 import EditorArea from '../components/editor/EditorArea.vue'
 import {
-  loadSharesFn,
   authToken as storeAuthToken,
   dsMode,
 } from '../stores/indexStore'
@@ -22,9 +21,6 @@ watch(() => route.path, (path) => {
       treeStore.loadDir('/').catch(() => {})
     }
     return
-  }
-  if (path === '/shares' && storeAuthToken.value) {
-    loadSharesFn?.()
   }
 }, { flush: 'post' })
 

@@ -122,13 +122,11 @@ export function resetIdentityScopedState(): void {
 let todoAppResetFn: (() => void) | null = null
 export function registerTodoAppReset(fn: (() => void) | null): void { todoAppResetFn = fn }
 // ============================================================
-// Delegated functions (set by composables/components)
+// Delegated function (set by composables/components)
 // ============================================================
 export let openTabFn: ((path: string, name: string, ext: string, size: number) => void) | null = null
-export let loadSharesFn: (() => Promise<void>) | null = null
 
 export function setOpenTabFn(fn: typeof openTabFn) { openTabFn = fn }
-export function setLoadSharesFn(fn: typeof loadSharesFn) { loadSharesFn = fn }
 
 // ============================================================
 // Data source abstraction

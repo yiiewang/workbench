@@ -3,7 +3,7 @@ package server
 // 编排执行装配：把 internal/pipeline 引擎接到平台已有能力上。
 //   tool/<name> → 复用 AI 工具注册表（合成 iris.Context，工具层零改动）
 //   api/<path>  → 站内 /api/* 自请求（自签 token 带当前用户身份）
-//   llm         → 非流式一次生成（aiChatOnce）
+//   llm         → 非流式一次生成（aiChatOnce）；带 with.tools 时走 Agent 工具循环
 // 每步状态写入 pipeline_runs，查询接口形态照 ai_runs。
 
 import (
@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/kataras/iris/v12"
@@ -98,12 +100,31 @@ func (s *Server) execPipelineTool(ctx context.Context, name string, args map[str
 	return result, nil
 }
 
-func (s *Server) execPipelineLLM(ctx context.Context, args map[string]any) (any, error) {
+func (s *Server) execPipelineLLM(stepID string, ctx context.Context, args map[string]any, def pipeline.Definition, rctx *pipeline.RunContext) (any, error) {
 	prompt, _ := args["prompt"].(string)
 	if strings.TrimSpace(prompt) == "" {
 		return nil, fmt.Errorf("llm step requires prompt")
 	}
-	return s.aiChatOnce(ctx, prompt)
+	// 由 ai 类型归一化来的 llm 步：执行时重新渲染任务数据与 RAG，避免把当天数据写死。
+	if r, ok := args["render"].(map[string]any); ok {
+		name, _ := r["name"].(string)
+		contextJSON, _ := r["context"].(string)
+		rendered, rerr := s.renderTaskContext(ctx, rctx.OrgID, rctx.UserID, name, json.RawMessage(contextJSON), prompt, false)
+		if rerr != nil {
+			return nil, rerr
+		}
+		prompt = rendered
+	}
+	names, err := stepToolNames(args)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return s.aiChatOnce(ctx, prompt)
+	}
+	content, reasoning, err := s.aiChatAgent(ctx, prompt, names, def, rctx)
+	rctx.SetReasoning(stepID, reasoning)
+	return content, err
 }
 
 // execPipelineAPI 调用站内 /api/*：自签 token 携带当前用户身份，
@@ -169,21 +190,39 @@ func (s *Server) runPipeline(ctx context.Context, orgID, userID int64, runID str
 	}
 
 	rctx := pipeline.NewRunContext(orgID, userID)
-	exec := func(stepCtx context.Context, kind, name string, stepArgs map[string]any, rctx *pipeline.RunContext) (any, error) {
+	exec := func(stepCtx context.Context, stepID, kind, name string, stepArgs map[string]any, rctx *pipeline.RunContext) (any, error) {
 		switch kind {
 		case "tool":
 			return s.execPipelineTool(stepCtx, name, stepArgs, def, rctx)
 		case "llm":
-			return s.execPipelineLLM(stepCtx, stepArgs)
+			return s.execPipelineLLM(stepID, stepCtx, stepArgs, def, rctx)
 		case "api":
 			return s.execPipelineAPI(stepCtx, name, stepArgs, def, rctx)
 		default:
 			return nil, fmt.Errorf("unknown step kind %q", kind)
 		}
 	}
+	// 进度快照：初始全部 skipped，每次尝试前把该步标成 running + attempt N/M，
+	// 重试期间也能从 GET /api/pipeline/runs/{id} 看到卡在哪一步。
+	progress := make([]pipeline.StepResult, len(def.Steps))
+	for i, st := range def.Steps {
+		progress[i] = pipeline.StepResult{ID: st.ID, Uses: st.Uses, Status: "skipped"}
+	}
+	var progressMu sync.Mutex
 	runner := pipeline.NewRunner(exec, func(results []pipeline.StepResult) {
 		save("running", "", results)
 	})
+	runner.OnAttempt = func(sr pipeline.StepResult) {
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		for i := range progress {
+			if progress[i].ID == sr.ID {
+				progress[i] = sr
+			}
+		}
+		snapshot := append([]pipeline.StepResult(nil), progress...)
+		save("running", "", snapshot)
+	}
 	results, runErr := runner.Run(ctx, def, rctx)
 	if runErr != nil {
 		save("failed", runErr.Error(), results)
@@ -191,6 +230,25 @@ func (s *Server) runPipeline(ctx context.Context, orgID, userID int64, runID str
 	}
 	save("done", "", results)
 	return results, nil
+}
+
+// aiJobIDFromArgs 解析 run_pipeline 的可选 jobId（JSON number/string 都可能）。
+func aiJobIDFromArgs(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return i
+	case string:
+		i, _ := strconv.ParseInt(n, 10, 64)
+		return i
+	}
+	return 0
 }
 
 // execRunPipeline AI 工具入口：整条流程一次审批，按序执行并逐步落库。
@@ -209,11 +267,40 @@ func execRunPipeline(s *Server, ctx iris.Context, args map[string]any) any {
 	}
 
 	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
+	// 可选关联任务：只补一条 job_runs 历史，不读取/覆盖任务本身的 Definition
+	var linkedJob *db.AIJob
+	if jobID := aiJobIDFromArgs(args["jobId"]); jobID > 0 {
+		job, err := s.db.GetAIJob(ctx.Request().Context(), orgID, userID, jobID)
+		if err != nil {
+			return map[string]any{"error": "load job failed: " + err.Error()}
+		}
+		if job == nil {
+			return map[string]any{"error": fmt.Sprintf("job %d not found or not owned by current user", jobID)}
+		}
+		linkedJob = job
+	}
+
+	start := time.Now()
 	runID := uuid.NewString()
 	results, runErr := s.runPipeline(aiToolRunCtx(ctx), orgID, userID, runID, def)
 	status, errMsg := "done", ""
 	if runErr != nil {
 		status, errMsg = "failed", runErr.Error()
+	}
+	if linkedJob != nil {
+		stepsSummary := summarizeAIJobResults(results, runErr)
+		dbStatus := "ok"
+		if runErr != nil {
+			dbStatus = "error: " + runErr.Error()
+		}
+		// 用独立 ctx：runCtx 可能已因超时/断连取消；不重复发通知（对话里已有回复）
+		_ = s.db.MarkAIJobRunDetail(context.Background(), linkedJob.ID, db.AIJobRun{
+			Status: dbStatus, Output: "[AI 对话触发] " + stepsSummary,
+			TargetType: linkedJob.TargetType, PipelineRunID: runID,
+			StepsSummary: stepsSummary, ErrMsg: errMsg,
+			DurationMs: time.Since(start).Milliseconds(),
+			FinishedAt: time.Now().Format("2006-01-02 15:04:05"),
+		})
 	}
 
 	brief := make([]map[string]any, 0, len(results))
@@ -223,7 +310,7 @@ func execRunPipeline(s *Server, ctx iris.Context, args map[string]any) any {
 			"error": r.Error, "durationMs": r.DurationMs,
 		})
 	}
-	return map[string]any{
+	out := map[string]any{
 		"runId":  runID,
 		"name":   def.Name,
 		"status": status,
@@ -231,6 +318,11 @@ func execRunPipeline(s *Server, ctx iris.Context, args map[string]any) any {
 		"steps":  brief,
 		"note":   "完整步骤输出可用 GET /api/pipeline/runs/{id} 查询；断连后状态仍会落库",
 	}
+	if linkedJob != nil {
+		out["jobId"] = linkedJob.ID
+		out["jobRunRecorded"] = true
+	}
+	return out
 }
 
 // ============================================================

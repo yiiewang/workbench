@@ -1,7 +1,7 @@
 package server
 
 // 列表/详情分离（content 瘦身）的接口行为测试：
-//   1. GET /api/tasks 列表不携带 content 全文，只带截断的 contentPreview；
+//   1. GET /api/tasks 列表不携带 content 全文，长正文只带 24 字 contentPreview（短正文不下发）；
 //   2. GET /api/tasks/{id} 详情返回完整任务（含 content）；
 //   3. PATCH 请求体 task.content 缺失 → 保留服务端现值（防快捷修改清空正文）；
 //      显式传空串 → 按传入值清空（用户主动清空正文）。
@@ -28,18 +28,23 @@ func TestHandler_TaskListSlimAndDetail(t *testing.T) {
 			"baseRevision": 1,
 		}).Expect().Status(http.StatusOK)
 
-	// 1. 列表瘦身：任务对象无 content 字段、有 contentPreview（截断 + 省略号，按 rune）
-	listTask := e.GET("/api/tasks").WithHeader("Authorization", authHeader(tok)).
-		Expect().Status(http.StatusOK).
-		JSON().Object().Value("data").Object().Value("orgs").Object().
+	// 1. 列表瘦身：任务对象无 content 字段、有 contentPreview（截断 + 省略号，按 rune）；
+	//    响应不再携带冗余的 version/lastUpdated 与旧版兼容字段 text/done
+	listData := e.GET("/api/tasks").WithHeader("Authorization", authHeader(tok)).
+		Expect().Status(http.StatusOK).JSON().Object().Value("data").Object()
+	listData.NotContainsKey("version")
+	listData.NotContainsKey("lastUpdated")
+	listTask := listData.Value("orgs").Object().
 		Value("1").Object().Value("1").Object().Value("tasks").Array().First().Object()
 	listTask.NotContainsKey("content")
+	listTask.NotContainsKey("text")
+	listTask.NotContainsKey("done")
 	preview := listTask.Value("contentPreview").String().Raw()
 	if !strings.HasPrefix(preview, "正文内容段落。") || !strings.HasSuffix(preview, "…") {
 		t.Fatalf("contentPreview = %q, want truncated with ellipsis", preview)
 	}
-	if rc := len([]rune(preview)); rc != 81 { // 80 字 + 省略号
-		t.Fatalf("contentPreview rune count = %d, want 81", rc)
+	if rc := len([]rune(preview)); rc != 25 { // 24 字 + 省略号
+		t.Fatalf("contentPreview rune count = %d, want 25", rc)
 	}
 
 	// 2. 详情：完整 content
@@ -85,7 +90,7 @@ func TestHandler_TaskListSlimAndDetail(t *testing.T) {
 	}
 }
 
-// 兼容性：空正文的任务在列表响应中 content/contentPreview 均省略（与旧版响应兼容）
+// 空正文的任务在列表响应中 content/contentPreview 均省略；旧版兼容字段 text/done 已移除
 func TestTaskItemJSON_OmitEmpty(t *testing.T) {
 	b, err := json.Marshal(db.TaskItem{ID: "x", Title: "t", Status: "todo"})
 	if err != nil {
@@ -94,5 +99,8 @@ func TestTaskItemJSON_OmitEmpty(t *testing.T) {
 	s := string(b)
 	if strings.Contains(s, "content") || strings.Contains(s, "contentPreview") {
 		t.Fatalf("empty content should be omitted, got %s", s)
+	}
+	if strings.Contains(s, "text") || strings.Contains(s, "done") {
+		t.Fatalf("legacy text/done fields should be removed, got %s", s)
 	}
 }

@@ -19,6 +19,8 @@ export interface PipelineStepResult {
   status: 'ok' | 'failed' | 'skipped'
   output?: unknown
   error?: string
+  /** llm 步的思考过程（非流式 Agent 一轮或多轮拼接） */
+  reasoning?: string
   durationMs?: number
 }
 

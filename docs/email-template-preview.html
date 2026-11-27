@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workbench 邮件模板原型 · 信件式</title>
+<style>
+  /* 仅原型页面外壳使用；下方邮件主体全部是 table + 内联样式，与正式模板一致 */
+  body{margin:0;padding:28px 12px 56px;background:#eef0f3;
+       font-family:-apple-system,'PingFang SC','Microsoft YaHei','Helvetica Neue',Arial,sans-serif;}
+  .proto{max-width:600px;margin:0 auto 16px;background:#fff;border:1px solid #e3e6ea;border-radius:8px;
+         padding:14px 18px;font-size:12px;color:#5b6472;line-height:1.8;}
+  .proto b{color:#1a1f27}
+  .proto button{margin-left:10px;padding:4px 10px;border:1px solid #c9d2dd;border-radius:5px;
+                background:#f7f9fc;color:#2563eb;font-size:12px;cursor:pointer;}
+  .ai-frame{border:1px dashed #9db8ee;}
+  .ai-tag{display:block;background:#f2f6ff;border-bottom:1px dashed #9db8ee;color:#2563eb;
+          font-size:11px;letter-spacing:.3px;padding:5px 10px;}
+  .var-chip{background:#fff3cd;color:#8a6d1f;padding:0 3px;border-radius:3px;}
+  body.clean .ai-frame{border:0;}
+  body.clean .ai-tag{display:none;}
+  body.clean .var-chip{background:transparent;color:inherit;padding:0;}
+</style>
+</head>
+<body>
+
+<div class="proto">
+  <b>原型说明</b>：信件式邮件模板，仅替换「AI 提示词定时任务」的结果邮件；其余邮件仍用现有卡片式模板。<br>
+  蓝色虚线框内是 <b>AI 直接输出的 HTML 片段</b>，由模板嵌入正文区；虚线与标签只在原型里显示，正式邮件不带。
+  <button id="toggle" type="button">隐藏结构标注（看真实效果）</button><br>
+  默认外观：纯文字标识 · 页脚保留管理链接 · 无按钮 / 无类型行 / 无灰底卡片。<br>
+  <b>问候行是模板变量</b>：<code>{{.UserName}}</code> 由任务归属用户的 <code>userName</code> 填入（发布事件时按 UserID 反查），不是写死的名字；点上方按钮切到真实效果，示例显示为「艺，你好！」。
+</div>
+
+<!-- ===================== 邮件主体开始 ===================== -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff;">
+<tr><td align="center" style="padding:0 12px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+         style="max-width:600px;margin:0 auto;background:#ffffff;padding:44px 48px 36px;">
+
+    <!-- 品牌标识 -->
+    <tr><td align="center" style="padding-bottom:34px;">
+      <div style="font-size:15px;font-weight:600;color:#1a1f27;letter-spacing:1px;">
+        <span style="display:inline-block;width:16px;height:16px;margin-right:8px;vertical-align:-2px;
+                     background:#2563eb;border-radius:4px;transform:rotate(45deg);"></span>Workbench
+      </div>
+    </td></tr>
+
+    <!-- 问候：{{.UserName}} 为模板变量，取自任务归属用户的 userName -->
+    <tr><td style="font-size:15px;color:#374151;line-height:1.9;padding-bottom:22px;">
+      <span id="greet-name" class="var-chip">{{.UserName}}</span>，你好！
+    </td></tr>
+
+    <!-- AI 输出 HTML 片段（嵌入区） -->
+    <tr><td class="ai-frame" style="padding:0;">
+      <span class="ai-tag">↓ AI 输出 HTML 片段（嵌入区）</span>
+      <div style="padding:2px 14px 6px;font-size:14px;color:#374151;line-height:1.95;">
+
+        <div style="padding-bottom:14px;">今天有 3 项任务到期，2 项已完成，整体进度符合预期。以下是需要你留意的部分：</div>
+
+        <div style="padding:5px 0 5px 16px;text-indent:-16px;">· <b>已完成</b>：接口联调、周报初稿；可在 <a href="https://wb.example.com/todo" style="color:#2563eb;text-decoration:underline;">任务看板</a> 查看明细。</div>
+        <div style="padding:5px 0 5px 16px;text-indent:-16px;">· <b>待跟进</b>：全量索引重建仍在进行，完成后建议用 <code style="padding:1px 4px;background:#f3f4f6;border-radius:3px;font-size:12px;color:#b91c1c;">reindex_status</code> 复核。</div>
+        <div style="padding:5px 0 5px 16px;text-indent:-16px;">· <b>风险</b>：「对账脚本」已逾期 1 天，且未指定负责人。</div>
+
+        <div style="font-weight:600;font-size:15px;color:#1a1f27;padding:22px 0 10px;">建议</div>
+        <div style="padding-bottom:14px;">优先处理逾期项，其余两项按原计划推进即可。若索引重建在明天仍未结束，建议检查 <b>embedding 配置</b> 是否变更过。</div>
+
+      </div>
+    </td></tr>
+
+    <!-- 落款 -->
+    <tr><td style="font-size:14px;color:#374151;line-height:1.9;padding-top:30px;">
+      谢谢！<br>Workbench 团队
+    </td></tr>
+
+    <!-- 页脚 -->
+    <tr><td align="center" style="padding-top:48px;">
+      <div style="height:1px;background:#f0f1f3;margin:0 0 22px;"></div>
+      <div style="font-size:20px;font-weight:600;color:#9aa1ab;letter-spacing:1px;padding-bottom:10px;">Workbench</div>
+      <div style="font-size:11px;color:#b0b6bf;line-height:1.9;">
+        © 2026 Workbench<br>
+        <a href="https://wb.example.com/jobs?id=9" style="color:#9aa1ab;text-decoration:underline;">管理定时任务</a>
+      </div>
+      <div style="font-size:11px;color:#c3c8d0;line-height:1.9;padding-top:18px;">
+        本邮件由定时任务「每日工作总结」自动生成，内容由 AI 整理，请自行核对关键信息。
+      </div>
+    </td></tr>
+
+  </table>
+</td></tr></table>
+<!-- ===================== 邮件主体结束 ===================== -->
+
+<script>
+  var btn = document.getElementById('toggle');
+  var greetName = document.getElementById('greet-name');
+  btn.addEventListener('click', function () {
+    var clean = document.body.classList.toggle('clean');
+    greetName.textContent = clean ? '艺' : '{{.UserName}}';
+    btn.textContent = clean ? '显示结构标注' : '隐藏结构标注（看真实效果）';
+  });
+</script>
+</body>
+</html>

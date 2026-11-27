@@ -10,7 +10,7 @@ import {
 } from '../../stores/indexStore'
 import { dataSource } from '../../composables/useEditor'
 import { showToast } from '../../lib/common'
-import { openShareModal } from '../../lib/shareModal'
+import { openShareModal } from '../../composables/useShare'
 import { treeStore } from '../../composables/useTreeStore'
 
 const tabs = computed<[string, { name: string; ext: string; size: number }][]>(() =>

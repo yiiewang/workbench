@@ -25,11 +25,19 @@ import (
 // emailTimeout 单封邮件投递超时
 const emailTimeout = 30 * time.Second
 
+// notifyFormatTimeout AI 排版单次超时；超时降级回卡片式模板，邮件照发。
+const notifyFormatTimeout = 60 * time.Second
+
+// BodyFormatter 把任意格式的 user.notify 正文整理成语义化 HTML 片段。
+// 由 server 装配时注入，notify 包不依赖 AI 配置与 Server。
+type BodyFormatter func(ctx context.Context, subject, body, siteURL string) (string, error)
+
 // EmailNotifier 邮件通知器：订阅 task.due → 发邮件给任务归属用户
 type EmailNotifier struct {
 	cfg     config.EmailNotifyConfig
 	siteURL string // 全局站点根地址（Config.SiteURL），生成邮件跳转链接用
 	db      *db.DB
+	format  BodyFormatter
 }
 
 // SubscribeEmailNotifier 创建通知器并订阅三类事件（enabled=false 时静默跳过）。
@@ -38,14 +46,14 @@ type EmailNotifier struct {
 // siteURL 由 server 装配时从全局配置传入，notify 包不依赖整个 Config。
 // 事件总线持有订阅的方法值，实例无需返回给调用方。
 func SubscribeEmailNotifier(cfg config.EmailNotifyConfig,
-	siteURL string, database *db.DB, bus *schedule.EventBus) error {
+	siteURL string, database *db.DB, bus *schedule.EventBus, format BodyFormatter) error {
 	if !cfg.Enabled {
 		return nil
 	}
 	if cfg.Host == "" || cfg.User == "" {
 		return fmt.Errorf("notify.email: host and user (SMTP auth) are required when enabled")
 	}
-	n := &EmailNotifier{cfg: cfg, siteURL: siteURL, db: database}
+	n := &EmailNotifier{cfg: cfg, siteURL: siteURL, db: database, format: format}
 	bus.Subscribe(schedule.TopicTaskDue, n.onTaskDue)
 	bus.Subscribe(schedule.TopicTaskReminder, n.onTaskReminder)
 	bus.Subscribe(schedule.TopicUserNotify, n.onUserNotify)
@@ -112,11 +120,24 @@ func (n *EmailNotifier) onUserNotify(ctx context.Context, evt schedule.Event) {
 		actionPath, actionLabel = "/jobs", "管理定时任务"
 	}
 	actionURL := siteActionURL(n.siteURL, actionPath)
-	text := ev.Body
-	if actionURL != "" {
-		text += "\n\n" + actionLabel + "：" + actionURL
+	text, html := n.notifyUserBody(ctx, ev, kind, title, actionURL, actionLabel)
+	if err := n.send(ctx, to, ev.Subject, text, html); err != nil {
+		slog.Error("email notify: send failed", "to", to, "subject", ev.Subject, "err", err)
+		return
 	}
-	html := renderEmailHTML(emailContent{
+	slog.Info("email notify: sent (user.notify)", "to", to, "subject", ev.Subject)
+}
+
+// notifyUserBody 组装 user.notify 的纯文本与 HTML 两部分。
+// 定时任务结果邮件（JobName 非空）先交给注入的 AI 排版器把任意格式正文
+// 整理成语义化 HTML 片段；排版失败或未配置时降级回卡片式模板，保证投递。
+func (n *EmailNotifier) notifyUserBody(ctx context.Context, ev schedule.UserNotifyEvent,
+	kind, title, actionURL, actionLabel string) (string, string) {
+	cardText := ev.Body
+	if actionURL != "" {
+		cardText += "\n\n" + actionLabel + "：" + actionURL
+	}
+	cardHTML := renderEmailHTML(emailContent{
 		Kind:        kind,
 		Title:       title,
 		BodyHTML:    mdToHTML(ev.Body, n.siteURL),
@@ -124,11 +145,27 @@ func (n *EmailNotifier) onUserNotify(ctx context.Context, evt schedule.Event) {
 		ActionLabel: actionLabel,
 		Footer:      "Workbench · " + time.Now().Format("2006-01-02 15:04"),
 	})
-	if err := n.send(ctx, to, ev.Subject, text, html); err != nil {
-		slog.Error("email notify: send failed", "to", to, "subject", ev.Subject, "err", err)
-		return
+	if ev.JobName == "" || n.format == nil {
+		return cardText, cardHTML
 	}
-	slog.Info("email notify: sent (user.notify)", "to", to, "subject", ev.Subject)
+	fmtCtx, cancel := context.WithTimeout(ctx, notifyFormatTimeout)
+	defer cancel()
+	formatted, err := n.format(fmtCtx, ev.Subject, ev.Body, n.siteURL)
+	if err != nil || strings.TrimSpace(formatted) == "" {
+		slog.Warn("email notify: AI format failed, fallback to card template",
+			"user", ev.UserID, "job", ev.JobName, "err", err)
+		return cardText, cardHTML
+	}
+	letterText := htmlToPlainText(formatted)
+	if actionURL != "" {
+		letterText += "\n\n" + actionLabel + "：" + actionURL
+	}
+	return letterText, renderLetterEmailHTML(emailLetterContent{
+		UserName:  ev.UserName,
+		JobName:   ev.JobName,
+		BodyHTML:  sanitizeAIHTML(formatted, n.siteURL),
+		ActionURL: template.URL(actionURL),
+	})
 }
 
 // onTaskReminder 精确时间提醒事件处理：scheduled_time/due_time 到点触发

@@ -144,7 +144,9 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   // "AI 回复"展开为 assistant(tool_calls) + N 条 tool 消息，按显示条数截断
   // 会超限，必须按展开后条数计
   const HISTORY_BUDGET = 28
-  const CTX_TEXT_LIMIT = 20_000
+  // 引用文件只带前 2k 字：全文并入 user 消息会撑大每轮上下文，也让模型倾向
+  // 直接复述而不定位；不足的部分由模型用 read_file 按需读取。
+  const CTX_TEXT_LIMIT = 2_000
 
   // ---- 消息渲染窗口：长会话只渲染最近 N 条（顶部"加载更早"逐批展开）----
   const INITIAL_VISIBLE = 5
@@ -213,7 +215,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         const text = await resp.text()
         if (!text) continue
         const truncated = text.length > CTX_TEXT_LIMIT
-          ? text.slice(0, CTX_TEXT_LIMIT) + '\n…（内容过长，已截断）'
+          ? text.slice(0, CTX_TEXT_LIMIT) + `\n…（内容过长，已截断；完整内容请用 read_file 读取 ${p}）`
           : text
         parts.push(`—— 引用文件：${p} ——\n${truncated}`)
       } catch {
@@ -585,6 +587,17 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     const sc = () => { if (s === current.value) scrollBottom() }
     scrollBottom(true)
 
+    // 思考过程只保留最近 4k 字：reasoning 与 steps 各存一份，全量落库会到
+    // 100KB+，回放时也没人从头读；更早的内容折叠成一行提示。
+    const REASONING_KEEP = 4_000
+    const FOLD_RE = /^…（前 \d+ 字已折叠）\n/
+    function keepReasoningTail(text: string): string {
+      // 超过 1.5 倍才重组，避免每个流式 delta 都做一次字符串替换
+      if (text.length <= REASONING_KEEP * 1.5) return text
+      const body = text.replace(FOLD_RE, '')
+      return `…（前 ${body.length - REASONING_KEEP} 字已折叠）\n` + body.slice(-REASONING_KEEP)
+    }
+
     // 时序步骤维护：reasoning/tool/text 按发生顺序追加进 steps（相邻同类增量合并
     // 到同一步），渲染层按此还原"思考 → 调工具 → 分析 → 回答"的时间线
     function appendStep(kind: MsgStep['kind'], text: string): MsgStep {
@@ -623,8 +636,9 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
         onRunId: (id) => { runId = id; setRunId(s, id) },
         onDone: () => { completed = true },
         onReasoning: (delta) => {
-          live.reasoning = (live.reasoning || '') + delta
-          appendStep('reasoning', delta)
+          live.reasoning = keepReasoningTail((live.reasoning || '') + delta)
+          const step = appendStep('reasoning', delta)
+          step.text = keepReasoningTail(step.text || '')
           sc()
           throttledPersist(s)
         },

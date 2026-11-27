@@ -24,9 +24,9 @@ func TestMCPToolsMerge(t *testing.T) {
 	if s.aiToolByName("missing") != nil {
 		t.Fatal("unknown tool should be nil")
 	}
-	// +1 = 注入的 MCP demo 工具，+1 = 运行时合成的 pipelineTool()
-	if got := len(s.allTools()); got != len(aiTools)+2 {
-		t.Fatalf("allTools len = %d, want %d", got, len(aiTools)+2)
+	// +1 = 注入的 MCP demo 工具，+2 = 运行时合成的 pipelineTool() 与 runJobTool()
+	if got := len(s.allTools()); got != len(aiTools)+3 {
+		t.Fatalf("allTools len = %d, want %d", got, len(aiTools)+3)
 	}
 
 	found := false

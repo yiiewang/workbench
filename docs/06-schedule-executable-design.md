@@ -1,9 +1,13 @@
 # 定时任务可执行对象设计
 
 > 面向：开发者 ｜ 状态：**设计决策记录（P0-a / P0-b / P1 / P2 已实现）** ｜ 代码基线：`v1.3.0-26-gc0577c4` + 迁移 000021–000027
+>
+> **表名现状（迁移 squash 后）**：本文历史段落中的 `ai_jobs` / `ai_job_runs` 现名 `jobs` / `job_runs`；`000001`–`000028` 已按域合并为 `000001_core` ~ `000006_jobs` 六组 baseline，下文迁移编号仅作决策记录。
 > 功能说明见 `02-functional-guide.md`、软件设计见 `03-design.md`、文档维护规范见 `README.md`（00 号入口）。
 
 > **现行状态补充（000027，编排模板移除）**：本文正文记录的是 P0/P1/P2 当时的决策与核对结论，其中 `pipeline_template` / 模板引用 / 版本历史 / `/pipelines` 等描述**均已不再适用**。现行实现是：编排 Definition 内联在 `ai_jobs.target_json` 的 `pipeline` target 里，AI 直接生成复杂流程，无独立模板表与模板页；`pipeline_templates` / `pipeline_template_versions` 由 `000027` 删除，`supportedTriggerTargets` 只登记 `job`，`schedule_triggers` 只有一种目标类型；编排流程图、节点 Inspector、运行叠加与「立即执行」并入 `/jobs` 任务详情页。历史迁移 `000018`–`000026` 保留以维持新建库迁移链。下文 §3 / §7 / §12 / §13 中带「模板」的对照表、分期项属于当时的记录，请以 `02` / `03` 为准。
+
+> **现行状态补充（AI 提示词任务按白名单自主调工具）**：正文 §4 记载的 `ai` = 单 `llm` 步 + `aiChatOnce` 单次生成，现仅在**未填 `allowWrite` 时**成立。填了之后该字段在 `ai` 类型下既是模型唯一可见的工具白名单，也是该步的静态预授权（填写即审批通过，写类工具不必再填一遍）；归一化时写进 `llm` 步的 `with.tools`，由非流式 Agent 循环消费：按白名单组装 `tools` payload → 解析 `tool_calls` → 复用 `execPipelineTool` 执行 → `role:"tool"` 结果回灌，最多 5 轮，上限轮不带 `tools` 强制出文本。留空则完全维持原单次生成。`pipeline` 内联 Definition 的 `llm` 步手写 `with.tools` 也走同一路径，但其余 target 的 `allowWrite` 仍是原来的步骤级预授权语义。创建时拒绝未知工具名、黑名单工具与 `api/<path>` 条目；执行时再按白名单拦截模型幻觉出的工具名；每次调用写 `scheduled job agent tool` 审计日志。`retry` 判定由「`allowWrite` 非空」改为「预授权与 llm 白名单里是否真含写类工具 / `api/<path>`」，只读白名单不再禁用 job 级重试。正文 §8 的授权表与 §4 的归一化表保留为当时的决策记录，现行功能说明见 `02` §9.3 / §10。
 
 ## 1. 结论与范围
 
@@ -143,7 +147,7 @@ cron_triggers_runner 整分钟 tick（唯一扫描器）
 | `ai_jobs`（000022） | 新增 `target_type`（`TEXT NOT NULL DEFAULT 'ai'`）、`target_json`（target 完整 JSON，含 prompt / templateId / definition / method / path）、`allow_write`（静态预授权清单 JSON）、`context_json` / `notify_json`；`prompt` 列保留不删 |
 | `ai_jobs`（000023） | 用 SQLite「建新表 → 复制 → 删旧表 → 改名」重建，删掉 `cron_expr` / `enabled` / `last_run_at` / `last_status`；`.down` 加回 4 列并从 `schedule_triggers` 反向回填（多规则取最近一条），回滚不丢配置（照搬 000020 的做法） |
 | `schedule_triggers`（000023） | 新增 `lease_until`（租约）；`target_type` 白名单增加中性类型 `job`；`validateTriggerTarget` 增加 `job` 归属 case 与全局公共任务分支 |
-| `ai_jobs`（000025） | 新增 `retry`（0-3，job 级失败重试；仅无写步骤生效） |
+| `ai_jobs`（000025） | 新增 `retry`（0-3，job 级失败重试；当时按「无写步骤」判定，现改为按预授权 / llm 白名单内是否真含写类工具，见顶部现行状态补充） |
 | `ai_job_runs` | 000011 原表仅 `id/job_id/ran_at/status/output`，增列 `target_type`、`pipeline_run_id`、`steps_summary`、`status`、`err_msg`、`duration_ms`、`finished_at` |
 | `pipeline_template_versions`（000026） | 当时新增的模板版本历史；**该表与 `pipeline_templates` 均已由 000027 删除**，此处仅保留决策记录 |
 
@@ -158,7 +162,7 @@ cron_triggers_runner 整分钟 tick（唯一扫描器）
 
 - `target_id INTEGER NOT NULL`：想「直接定时跑某个工具 / 站内接口」，字符串目标装不进这个字段，得先给它们建持久化对象，或给 `schedule_triggers` 增 `target_ref TEXT`。P0 只保留 `job` / `pipeline_template` 两类整数 id 目标，其余列为后续扩展点。
 - `org_id/user_id NOT NULL`：全局公共任务用 `0/0` 标记（见上方回填说明）。
-- 命名：`ai_jobs` 表名、`/api/ai/jobs` 路径、`ai_job_runs` 属历史命名，000023 不改（老客户端零改动、避免破坏性重命名）；它们在语义上是通用对象。重命名为 `scheduled_jobs` / `/api/schedule/jobs` 单独排期，不改行为，不计入本次改造。
+- 命名：`ai_jobs` 表名、`/api/jobs` 路径、`ai_job_runs` 属历史命名，000023 不改（老客户端零改动、避免破坏性重命名）；它们在语义上是通用对象。重命名为 `scheduled_jobs` / `/api/schedule/jobs` 单独排期，不改行为，不计入本次改造。
 - `task.due` / `task.reminder` 是独立扫描器、不读 cron 表达式，本次不纳入统一定时对象。
 
 ## 8. 安全模型
@@ -167,11 +171,11 @@ cron_triggers_runner 整分钟 tick（唯一扫描器）
 
 | 规则 | 说明 |
 |---|---|
-| 创建即校验 | `POST/PUT /api/ai/jobs` 时，Definition 内所有写类工具与非 GET `api` 步骤必须在 `allowWrite` 中，否则 400；判定函数与执行期共用（见 §3）；同时校验触发规则的目标归属（复用 `validateTriggerTarget`） |
+| 创建即校验 | `POST/PUT /api/jobs` 时，Definition 内所有写类工具与非 GET `api` 步骤必须在 `allowWrite` 中，否则 400；判定函数与执行期共用（见 §3）；同时校验触发规则的目标归属（复用 `validateTriggerTarget`） |
 | `ExecMode=Scheduled` | 在执行入口注入执行上下文；命中 `allowWrite` → 直接执行并写审计日志（job_id / tool / 参数摘要），未命中 → 该步失败 |
 | 不发审批请求 | 定时入口直接调 `runPipeline`，不进入工具层的 `approval_request` 分支；无无人确认挂死问题 |
 | 非 GET 授权 | POST/PUT/PATCH/DELETE 的 `api/<path>` 必须在 `allowWrite` 显式列出，GET 免授权 |
-| 递归 / 自修改黑名单 | 拒绝 `api/ai/chat`（会再起 SSE 后台 run）、`api/ai/jobs` 的非 GET（运行时改 cron/prompt 会绕过静态授权）、`api/pipeline/*`（触发执行），与 `tool/run_pipeline`、`tool/create_ai_job`/`update_ai_job` 合并成同一张黑名单 |
+| 递归 / 自修改黑名单 | 拒绝 `api/ai/chat`（会再起 SSE 后台 run）、`api/jobs` 的非 GET（运行时改 cron/prompt 会绕过静态授权）、`api/pipeline/*`（触发执行），与 `tool/run_pipeline`、`tool/create_job`/`update_job` 合并成同一张黑名单 |
 | 外部 MCP | 对话里一律需审批；定时模式 P0 默认禁用，P1 再按 `allowWrite` 白名单放开 |
 | 不变边界 | `api/<path>` 仅限站内、身份绑定归属用户、路径沙箱、结果限长、`withToolContext` 合成 `iris.Context` |
 
@@ -193,9 +197,9 @@ cron_triggers_runner 整分钟 tick（唯一扫描器）
 
 ## 11. 接口 / 工具 / 前端
 
-- `POST|PUT /api/ai/jobs`：老字段 `prompt` / `cronExpr` / `enabled` 继续接受；服务端自动包装 `target={type:"ai",prompt}`，并把 `cronExpr` / `enabled` 拆成 `ai_jobs` 一行 + `schedule_triggers` 一行；响应把触发规则的 cron / 启停映射回 `cronExpr` / `enabled`，同时返回 `target` 与 `prompt`，兼容旧客户端。`GET /api/ai/jobs/{id}/runs` 增 `target_type`/`pipeline_run_id`。
+- `POST|PUT /api/jobs`：老字段 `prompt` / `cronExpr` / `enabled` 继续接受；服务端自动包装 `target={type:"ai",prompt}`，并把 `cronExpr` / `enabled` 拆成 `ai_jobs` 一行 + `schedule_triggers` 一行；响应把触发规则的 cron / 启停映射回 `cronExpr` / `enabled`，同时返回 `target` 与 `prompt`，兼容旧客户端。`GET /api/jobs/{id}/runs` 增 `target_type`/`pipeline_run_id`。
 - 复用 `/api/schedule/triggers` 的通用触发规则，不另起一套 CRUD；任务的 `cronExpr` / `enabled` 由服务端映射成 `targetType="job"` 的规则。
-- `create_ai_job` / `update_ai_job` / `list_ai_jobs` 增 `target` 字段，审批策略不变；`create_ai_job` 的 `prompt` 改为可选（提供 `target` 时可省略）。
+- `create_job` / `update_job` / `list_jobs` 增 `target` 字段，审批策略不变；`create_job` 的 `prompt` 改为可选（提供 `target` 时可省略）。
 - `AiJobsView`：类型选择器（AI 提示词 / 工具 / 接口 / 编排）；编排类型渲染 `PipelineGraph` 流程图 + 节点 Inspector，可切换 JSON 编辑器，执行记录可把运行状态叠加到流程图，顶部「立即执行」直调 `/api/pipeline/run`。移动端 `/jobs` 沿用响应式 PC 布局，只加只读展示。
 - P0-a 已把 `LLMCaller` / `buildAIJobPrompt` / RAG 注入迁到装配层 `execAIJob`；P0-b 删除 `ai_jobs_runner`（`internal/schedule/aijobs.go`）后，同一段执行逻辑搬进 `triggerJob`，`internal/schedule` 不再含 `ai_jobs` 标识符。
 

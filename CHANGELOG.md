@@ -7,6 +7,23 @@
 
 ### Fixed
 
+- **启动时回收遗留的 `running` 状态**：进程在执行中被强杀时，`job_runs` 会永远停在 `running`（任务详情页一直显示运行中），`schedule_triggers` 的租约也要等 15min 过期。`db.Open` 在迁移后执行 `markInterruptedRuns`：`job_runs.status='running'` → `error: interrupted` 并写 `finished_at`，`schedule_triggers.last_status='running'` → `error: interrupted` 且清空 `lease_until`。新增 `TestMarkInterruptedRuns`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/db/ ./internal/server/ -count=1`
+
+- **编排 `llm` 步超时放宽到 10min**：job 9「A股收盘总结」连续在 15:10 自动执行与手动 `run_job` 时失败于 `step "run" failed: ... context deadline exceeded`。`Runner.StepTimeout` 统一 5min，而该步是 5 轮 MCP 联网检索 + 长文生成，5min 不够。`Runner` 新增 `LLMStepTimeout`（默认 10min），`execWithRetry` 按 `kind` 选择；重试总预算同步按该值计算，仍受父 ctx（cron 15min）截断。新增 `TestRunnerLLMStepTimeout`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/pipeline/ ./internal/server/ -count=1`
+
+- **`run_pipeline` 的 `llm` 步把工具调用标记当正文，原样进入邮件**：模型在带 tools 的 `llm` 步里偶发以 `<tool_calls:6124c78e><tool_call:6124c78e>mcp_exa…</tool_call:…></tool_calls:…>` 文本形式回传工具调用，`aiChatAgent` 直接作为答复返回，`notify_user` 原样拼进邮件正文（实测 A股收盘补跑第 2 次的邮件 body 全是该片段）。新增 `stripToolMarkers`：先删除完整块，再清理未闭合的残留尾巴与嵌套块留下的孤立标签；在 `aiChatAgent` 返回前统一清洗，覆盖定时任务与 `run_pipeline` 两条路径（对话侧流式输出不在本次范围）
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`；新增 `TestStripToolMarkers`
+
+- **pipeline 类型的定时任务 `llm` 步没有任何输出格式约束**：`renderAIJobPrompt` 的输出格式要求只注入 `type:"ai"` 的 job；`pipeline` 类型直接采用内联 Definition（`buildAIJobDefinition`），llm 步 prompt 写不写约束全凭配置者，模型把工具调用当正文输出（实测 `<tool_calls>…mcp_exa-websearch_web_search_exa…`）时就原样进了邮件。抽出 `aiJobOutputRule` 常量（新增第 6 条：禁止输出 `<tool_call>`/`<arg_key>` 等工具调用标记），新增 `injectOutputRule` 在 pipeline 归一化后给每个有 prompt 的 `llm` 步拼接；`tool`/`api` 步骤不动。初版要求「只输出 HTML 片段」，实测 pipeline 的 `tool/notify_user` 事件不带 `JobName`、跳过 AI 排版器走卡片模板 `mdToHTML`（只认 markdown），模型输出的 `<p>`/`<table>` 被整体转义成源码显示；最终统一改为要求 markdown（`#` 标题、`-` 列表、`|` 表格、`**` 粗体、`>` 引用），`mdToHTML` 与 AI 排版器都能正确处理。新增 `TestPipelineLLMOutputRuleInjected` 验证注入、原 prompt 保留与 tool 步不受影响
+- **AI 邮件通知里的 markdown 表格与引用块未渲染**：`mdToHTML` 是极简转换器，只认标题/列表/粗体/行内代码/站内链接，`|...|` 表格和 `> ` 引用行走 default 分支原样输出成纯文本 div——A股收盘总结邮件里两张表格的 `|---|---|` 分隔行和 `> 说明` 直接以管道符/尖括号出现在正文中。补齐两类语法：管道表格以「表头行 + `|---|` 分隔行 + 数据行」识别（分隔行仅用于判定、不输出），生成 `table` 布局 + 内联边框样式（`border-collapse:collapse`、表头灰底），单元格内容仍经 `inline()` 做 HTML 转义与粗体/链接处理；连续 `>` 行合并为灰底左边框引文块。新增 `TestMdToHTML_TableAndQuote` 锁住渲染结果与转义
+- **邮件卡片宽度过窄**：`emailTmpl` 的 `<table>` 写死 `max-width:560px`，A股收盘总结这类正文（含表格）被压在中间窄条、列多时尤其拥挤。改为 `max-width:880px`，保留 `width="100%"` + `margin:0 auto` 居中，窄屏下仍按视口自适应
+- **分享创建表单两处收尾清理**：
+  - **设置生效/失效时间无效**：`ShareModal.vue` 的 `el-date-picker` 用 `value-format="X"`，v-model 拿到 Unix **秒**时间戳字符串，`watch(dateRange)` 却直接 `new Date(v[0])`，解析成 Invalid Date 后 `.toISOString()` 抛 `RangeError`，`effectiveAt` / `expiresAt` 始终为空（后端 `POST /api/share` 用 `time.Parse(time.RFC3339, ...)` 校验）。改为 `new Date(Number(v[0]) * 1000).toISOString()`，结束时间同理；清空或单值时仍重置为空串
+  - **删除无调用方的 `getShareFileRaw`**：`api/share.ts` 该导出在前端 / 后端 / 文档中均无引用，分享模式下载实际走 `dataSource.getFile` 的 blob；随之移除 `authFetch` 导入
+  - 校验：`pnpm build`（`vue-tsc --noEmit` + `vite build`）通过
+
 - **流水线里 `reindex_files` 后紧跟 `reindex_status` 误报「尚未触发过全量重建」**：`startReindex` 返回 `started:true` 后、后台 goroutine 执行到 `ReindexTree` 写进度快照（收集完全部文件之后）之前存在调度窗口，窗口内 `ProgressOf` 返回 nil——AI 聊天路径下一轮工具调用隔数秒（模型流式生成），总是错过窗口；流水线 `reindex → status` 背靠背步骤则命中（实测 16:50 定时触发的运行：`reindex` 步骤 `started:true`，`status` 步骤却返回 `{"note":"尚未触发过全量重建","running":false}`，llm 分析步骤把"状态不一致"写进了结果邮件）。修复：`startReindex` 起 goroutine 前同步调 `rag.MarkReindexStarted` 预写一份 `running=true`（Total=0）的初始快照，`ReindexTree` 收集完成后以带 Total 的快照覆盖；新增 `TestMarkReindexStarted` 锁住「预写后立即可查、不泄漏到其他 owner」
 - **定时任务跑编排时 `reindex_files` 扫空目录"成功"结束（日志 `rag: reindex walk error path ""`）**：`withToolContext` 合成的 iris.Context 只注入 `userID`/`orgID`，而真实请求的 `userName`/`orgName` 由 auth 中间件写入——`userRoot()` 靠这两个 name 拼 `serDirAbs/{orgName}/{userName}/`，拿不到就返回空串。于是 `startReindex` 拿着空 root 调 `ReindexTree`，`os.ReadDir("")` 报错只记 warn，最终以 total=0"成功"结束，索引实际什么也没建。聊天里用同一个工具正常（有中间件），定时任务/编排路径必现。修复：`withToolContext` 按 id 经 `db.GetUserNames` 反查补齐 `userName`/`orgName` 两个 Values，合成上下文与真实请求身份对齐（`s.db` 为 nil 的单测构造跳过反查，保持原语义）。同一条日志里 `notify_user` 邮件投递成功，顺带验证了上一条 ctx 取消的修复
 
@@ -35,6 +52,106 @@
 
 ### Changed
 
+- **存量定时任务启动时统一转 pipeline**：阶段 2 数据迁移。`Server.New` 在装配调度前调用 `normalizeLegacyTargets`，把 `target_type != 'pipeline'` 的存量任务逐个归一化并写回 `target_type/target_json`；幂等，单个失败只记日志、不影响启动，旧类型读取分支保留作回退。新增 `db.ListAllAIJobs`、`db.UpdateAIJobTarget`
+  - 效果：id=9 等 `ai` 任务启动后 `target_type='pipeline'`，`target_json` 为单步 `llm` Definition（带 `render` 元数据），执行行为不变
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./... -count=1`
+
+- **新建/更新定时任务统一存 pipeline Definition**：执行核心本来就只认 Definition，`ai`/`tool`/`interface` 只是创建时的快捷表单。新增 `normalizeTargetToPipeline`：创建/更新（HTTP 与 `create_ai_job`/`update_ai_job` 工具）先把非 pipeline target 归一化为内联 Definition 再落库；读取路径继续兼容旧 `target_type`，存量任务不迁移。
+  - `ai` 归一化时 llm 步带 `with.render`（任务名 + `context_json`），`execPipelineLLM` 执行时调用 `renderTaskContext` 重新渲染任务数据与 RAG，避免把当天数据写死
+  - `renderAIJobPrompt` 拆出 `renderTaskContext`；旧 `ai` 记录仍走原入口（含 `aiJobOutputRule`），pipeline 内的 llm 步由 `injectOutputRule` 注入规则，不重复
+  - 前端 `fillForm` 从单步 Definition 反推回 `ai`/`tool`/`interface` 快捷表单，编辑体验不变
+  - 新增 `TestNormalizeTargetToPipeline`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./... -count=1`、`pnpm build`
+
+- **任务执行链路补输出详情与思考过程，空响应不再记 ok**：job 详情页只能看到「run（llm）：ok，耗时 188809ms」，`pipeline_runs.steps` 的 `output` 为空、`aiChatAgent` 的 `reasoning_content` 被丢弃；同时空正文被当成正常完成，邮件只剩步骤列表。
+  - `pipeline.StepResult` 增加 `reasoning`；`Executor` 签名增加 `stepID`；`RunContext` 增加 `SetReasoning/Reasoning`（mutex 保护，同层并行安全）；`Runner` 构造 `StepResult` 时带出 reasoning
+  - `aiChatAgent` 返回 `(content, reasoning, err)`，累加每轮 `msg.ReasoningContent`；最终正文清洗后为空则返回 `empty model response`（带 reasoning 长度），让步骤变 failed 而不是 ok
+  - `execPipelineLLM` 把 reasoning 写入 `RunContext`；`pipeline_runs.steps` 与 `job_runs.steps_summary` 自动包含
+  - `summarizeAIJobResults` 单步 llm 空输出文案改为「模型未返回正文（可能只返回了思考内容）」
+  - 前端运行历史步骤支持展开「输出 / 思考」，`PipelineStepResult` 增加 `reasoning?`
+  - 新增 `TestAIJobAgentEmptyResponse`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/pipeline/ ./internal/server/ ./internal/rag/ -count=1`、`pnpm build`
+
+- **任务执行历史支持运行中状态与步骤过程**：`job_runs` 原先只在执行结束写，运行中 job 详情看不到任何记录。`execAIJob` 改为执行前先插一条 `running`（带 `pipeline_run_id`），结束用新增的 `UpdateAIJobRun` 补终态；job 详情页运行历史展示 `stepsSummary`（步骤/状态/耗时/错误），`running` 记录每 3 秒轮询 `pipeline_runs.steps` 显示当前尝试（`attempt N/M`），并加「运行中」标识与独立颜色。新增 `TestAIJobRunInsertUpdate`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/db/ ./internal/server/ -count=1`、`pnpm build`
+
+- **定时任务命名收口与迁移 squash**：`ai_jobs` / `ai_job_runs` → `jobs` / `job_runs`；工具 `list_ai_jobs` / `create_ai_job` / `update_ai_job` / `delete_ai_job` → `list_jobs` / `create_job` / `update_job` / `delete_job`；API `/api/ai/jobs*` → `/api/jobs*`；前端 `aiJobs.ts` 路径同步。Go 类型名 `AIJob*` 暂保留（内部实现，214 处引用，后续可单独收口）
+  - 迁移 000001–000028 squash 为按域拆分的 6 组 baseline：`000001_core`（组织/用户/角色/成员/分享/限流/密钥/通知 + roles 种子）、`000002_tasks`、`000003_files_rag`（文件索引 + FTS5；向量表仍由 `EnsureVecIndex` 建）、`000004_ai_sessions`、`000005_pipeline_runs`、`000006_jobs`（`jobs` / `job_runs` / `schedule_triggers`）
+  - baseline 保留全部后期增量列：`users.email`、`tasks.files/scheduled_time/due_time`、`file_chunks.start_line`、`schedule_triggers.lease_until/finished_at`、`jobs.retry`、`job_runs.finished_at/pipeline_run_id` 等
+  - `migrate.go` 存量库基线 `Force(1)` → `Force(baselineVersion=6)`；现有库已 `ALTER TABLE` 重命名并把 `schema_migrations` 标记为 `version=6`
+  - 历史迁移专项测试（000021/000023/000024/000025/000026）随 squash 移除，新增 `migration_baseline_test.go` 校验最终表/列
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./...`、`pnpm build`；改前已备份 `data/workbench.db.bak-20261126`
+
+- **重构 Agent 思考协议，压缩 system prompt 常驻规则**：实测一次「主动触发 A股收盘总结任务」产生 6 轮 thinking 共 29070 字（153→1268→4009→6805→14024→2811）、8 次工具调用（其中 5 次近义 `search_files`）、prompt 71360 / completion 13748 tokens。根因不是任务复杂，而是 system prompt 的 7 条常驻规则与工具描述重复，模型每轮重发完整 messages 后反复自检与重述：
+  - `internal/server/ai.go` `aiSystemPrompt` 由 7 条改为 5 条，新增「思考与执行协议」：每轮只推进一个步骤、已确认事实与已排除方案不复述、信息足够即结论、思考过程不撰写/润色最终答复
+  - 「同一问题换关键词不超过两次」的计数约束改为「无命中即停止」的决策约束（实测计数约束未生效，本次仍检索 5 次）；`allowWrite` 与任务时间参数从 system prompt 移除，由 `create_job` / `create_task` 工具描述承担，避免同一知识两处维护
+  - `internal/server/aitools.go` `execSearchFiles` 无命中提示由「无命中，换关键词重试」改为「无命中：停止检索，直接说明未找到」，去掉诱发近义重复检索的强提示
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./...`；回归普通问答/文件检索/写操作/定时任务创建四类对话
+
+- **Agent 上下文与轮次预算优化**：实测每轮把完整 messages（含 RAG 片段全文、全部工具结果）重发，模型靠复述理解进度，thinking 逐轮膨胀到 29070 字。本次不改功能，只减少重复上下文与隐式预算：
+  - `internal/server/ai.go` 每轮按需组装 payload messages：RAG 片段首轮注入全文，后续轮换成 `ragBriefPrompt` 摘要（编号/行号不变、正文各 200 字），避免整段原文随每轮重发，同时不丢失无状态请求下的片段定位
+  - 工具轮注入剩余轮次与已用工具数（「工具轮次预算：剩余 N 轮（已调用 M 次工具）」），把收敛要求从「最后一轮才提示」提前到每轮
+  - `role:tool` 回填时前置 `summarizeToolResult` 模板摘要（ok/error/关键集合大小/字节数），模型无需为确认结果内容而整段复述 JSON
+  - `frontend/src/composables/useAIChat.ts` `CTX_TEXT_LIMIT` 20000 → 2000，截断提示明确要求用 `read_file` 读取完整内容
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./...`、`pnpm build`
+
+- **思考过程落库做有界截断**：单条 AI 回复的 `extras.reasoning` 与 `steps[].text` 各存一份思考全文（实测 29070 字 + 65KB），刷新/回放时既拖慢持久化也没人从头读。`useAIChat.ts` 新增 `keepReasoningTail`：两处都只保留末 4000 字，更早内容折叠为「…（前 N 字已折叠）」，超过 1.5 倍阈值才重组以避免每个流式 delta 做字符串替换；`AiMessage.vue` 的时间线直接展示截断后的文本，无需改渲染层
+  - 校验：`pnpm build`（`vue-tsc --noEmit` + `vite build`）通过
+
+- **AI 工具调用日志改为参数摘要**：`ai tool call` 原先直接打印 `call.Function.Arguments` 全量 JSON，`notify_user` 的邮件正文、`run_pipeline` 的整段 Definition、每次联网检索的 query 全部进日志（单条数 KB）；`aijob_agent.go` 另打一行同名工具，形成成对冗余。新增 `summarizeToolArgs`：query/path/subject/prompt 截断到 120 字，jobId/taskId/topK/numResults 原值，`body`/`content` 只打字节数，`steps` 打数量 + 前 5 个 id（如 `steps=2[gen,send]`，一眼能看出哪几步）；`ai tool call` 补 `org` 字段并删除 `scheduled job agent tool` 重复行
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **新增 `run_job` 工具：AI 可手动触发已有定时任务**：此前 job 只能由 cron 扫描器通过 `triggerJob` 执行，对话里没有按 id 触发的入口。抽出 `RunJobNow(ctx, orgID, userID, jobID)`：`GetAIJob` 校验归属；全局公共任务（`user_id IS NULL`）按调用者身份执行一次，不 `ListUsersWithEmail` 展开；复用 `runAIJobOnce` 写 `ai_job_runs` 并发通知。工具 `run_job(jobId)` 为写类（`NeedApproval`），加入 `scheduledJobBlacklist` 防定时任务递归触发
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **`run_pipeline` 支持关联定时任务写执行历史**：此前 AI 在对话里触发编排只写 `pipeline_runs`，`ai_job_runs` 无记录，任务详情页看不到这次执行。`run_pipeline` 新增可选 `jobId`：校验归属后执行，完成后补一条 `ai_job_runs`（`status`/`steps_summary`/`pipeline_run_id`/`duration_ms`/`finished_at`，`output` 前缀标注「[AI 对话触发]」），不重复发通知、不读取或覆盖任务 Definition；越权或全局只读任务直接返回错误。新增 `TestAIJobIDFromArgs`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **编排重试增加总预算与进度快照**：`Runner.execWithRetry` 每次 attempt 都新建 `StepTimeout=5min`，`retry=2` 时单步最坏 15min，正好吃满 `cronTriggerTimeout=15min`；期间 `pipeline_runs.steps` 一直是空数组（`emit` 只在整层结束调用），排障看起来像「一步都没开始」。改为单步总预算 `StepTimeout*(Retry+1)` 且继承父 ctx；新增 `Runner.OnAttempt`，`runPipeline` 每次尝试前落 `running` + `attempt N/M` 快照，并用 mutex 串行写避免快照乱序。新增 `TestRunnerOnAttemptPerRetry`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/pipeline/ ./internal/server/ -count=1`
+
+- **cron 触发器新增完成时刻与过期租约接管**：`last_run_at` 同时承担「同分钟防重」与「展示」，长任务跨分钟结束仍显示触发时刻（实测 id 14 16:53 触发、17:08 结束，列表仍显示 16:53），`last_status=running` 也无法区分「正在跑」与「进程已死」。新增迁移 000028 给 `schedule_triggers` 加 `finished_at`，`MarkCronTriggerRun` 完成时写入，`last_run_at` 语义保持不变；`ClaimCronTrigger` 增加 `recovered` 返回值，租约过期被接管时 `runCronTriggers` 记 `cron trigger lease expired, takeover` 警告，避免僵尸执行与新执行静默并发。新增 `TestClaimCronTriggerLeaseRecovery`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/db/ ./internal/schedule/ ./internal/server/ -count=1`
+
+- **定时任务审计漏报 llm 步的外部 MCP 工具，工具调用日志降噪**：`mcpStepUses` 只扫 `tool/mcp_*` 步骤，`llm` 步 `with.tools` 里的 MCP 白名单不计入——实测任务实际调了 `mcp_exa-websearch_web_search_exa`，审计却输出 `mcpSteps: null`。改为同时解析 llm 步 `with.tools` 并去重；`ai tool call` 对读类/检索类（`!NeedApproval` 或 `mcp_` 前缀）降为 Debug，写操作与编排保留 Info，避免定时任务每轮检索刷屏
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **Agent 提示词协议按实测再收紧**：上一版协议里「每轮只推进一个步骤」与真实行为冲突（日志中单轮并行 7~8 个 `tool_calls`），「思考过程只用于决策」对模型 hidden reasoning 不可控，实测仍出现大段推演。对话侧改为「同一轮可并行发起互不依赖的调用，同一目的不重复」；补「只有用户文件内容相关的问题才用 `search_files`」判据；删掉不可执行的思考约束，改为输出约束「只给结论与依据，不复述已排除方案」。定时任务侧补「正文即交付物：不输出工具调用标记、检索过程或『我将要…』说明」
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **`create_job` 工具描述补齐机制事实**：模型在创建临时任务时反复推演「创建后是否立刻执行 / 要不要 `enabled=false` / 用户说的『批准』指什么」，一次约 2000 字的 thinking 里 80% 用于同一歧义。Desc 补充「创建即启用、cron 到点自动执行、没有单独的『批准执行』步骤、最小粒度分钟、增删改下一分钟生效」；`target` 参数说明补 pipeline 的 `definition` 需含 `{name, steps}`、写类工具仍由顶层 `allowWrite` 静态预授权
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **RAG 命中按文件限流并聚合日志**：一次对话的前置检索 top5 里 4 条来自同一文档（`02-functional-guide.md`，distance 0.753~0.775），既占满注入上下文，也让模型误判资料不足而反复检索；日志又逐条打印同一文件的相似项。`rrfFuse` 在 topK 截断前按文件限流（`maxHitsPerFile=2`），从完整候选里补足其它文件；`ai.go` 的 `rag: context injected` 改为 `path×N (minD~maxD)` 聚合输出，query 压成单行并截到 80 字
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ ./internal/rag/ -count=1`；新增 `TestRRFFusePerFileCap`
+
+- **定时任务 Agent 循环补齐思考协议与轮次预算**：`run_pipeline` 的 `llm` 步与定时任务走 `aiChatAgent`（非流式），此前对话侧 P0/P1 优化未覆盖：system prompt 只有一句角色说明、5 轮循环无预算提示、工具结果原样回填。实测一次 A股收盘补跑日志中出现约 59 次 `exa` 联网检索（含两段重试与对话侧请求叠加）。改为与对话侧同一套协议：每轮只推进一个步骤、已确认事实不复述、信息足够即停；每轮注入「剩余 N 轮（已调用 M 次工具）」；`role:tool` 前置 `summarizeToolResult` 摘要行
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **分享管理并入文件页侧栏，取消独立 `/shares` 页面**：旧 `/shares` 路由复用文件页主区（`IndexView` = `TabBar` + `EditorArea`）却把侧栏换成 `SharesSidebar`，主区没有驱动源，常驻「Select a file from the Explorer to preview」空白。改为 `/file` 侧栏新增 EXPLORER / MY SHARES 双 Tab（新组件 `FileSidebar.vue`），Tab 状态放 URL query `?tab=shares`，右侧保持文件编辑器可用：
+  - 路由：`/file` 的 sidebar 命名视图指向新容器；`/shares` 改为 redirect 到 `/file?tab=shares`，旧链接与收藏不失效；移动端 PC→M 映射保持不变
+  - 外壳与入口收敛：`DefaultLayout` 依据 query 切换侧栏标题（EXPLORER / MY SHARES）；删除活动栏「分享」图标（含 `#shareBadge`、`isSharesActive`、`handleShareClick`）与首页「分享管理」卡片，入口统一收敛到侧栏 Tab，`/file` 无论哪个 Tab 都高亮「文件」图标；`hasFeature('share')` 为假时不渲染 Tab 头；同步清掉随之失去使用方的 `.activity-item .badge` 全局样式
+  - 联动清理：`useIndexApp.initApp` 与 `IndexView` watch 里为旧 `/shares` 准备的 `loadSharesFn?.()` 分支移除——前者原本 `return` 掉根目录树加载，正是右侧空白的直接原因；分享列表改由 `SharesSidebar` 挂载时自行加载
+  - 校验：`pnpm build`（`vue-tsc --noEmit` + `vite build`）通过
+  - 调用链重构分两步完成：第一步（删除 `window.loadShares()` 死代码与两套桥接）、第二步（密码弹窗 register 模式与 `api/share.ts` 类型）见下两条
+
+- **分享创建链路去掉全局桥接，统一到 `composables/useShare.ts`**：同一处功能此前有两套互不相通的注册机制——`ShareModal.vue` 把打开函数挂到 `window.openShareModal`（`lib/shareModal.ts` 薄封装供右键菜单 / TabBar 调用），`SharesSidebar.vue` 通过 `indexStore.setLoadSharesFn` 注册刷新回调；而 `ShareModal.submit()` 创建成功后调的是 `window.loadShares()`，window 上从未有人赋值，这条是死代码，创建分享后侧栏列表不刷新（需切走再切回 Tab 才更新）：
+  - 新增 `useShare.ts` 作为唯一入口：`shareModalVisible` / `shareResourceType` 驱动弹窗，`openShareModal(type)` 收口登录与资源路径校验（未登录跳登录页时带 `pathname + search`，可回到 `?tab=shares`），`notifySharesChanged()` 递增 `sharesRevision`
+  - `ShareModal.vue` 只读状态、打开时 watch 重置表单；资源路径直接取 `activeTabPath`，删掉 `resourcePath` / `resourceType` 本地副本与 `useRouter`；提交成功改调 `notifySharesChanged()` 修掉死代码
+  - `SharesSidebar.vue` 改为 `watch(sharesRevision, loadShares)`，删除注册/反注册与无使用方的 `defineExpose`；`indexStore` 里 `loadSharesFn` / `setLoadSharesFn` 一并移除；`lib/shareModal.ts` 删除，右键菜单与 TabBar 改从 `useShare` 导入
+  - 校验：`pnpm build`（`vue-tsc --noEmit` + `vite build`）通过
+
+- **密码弹窗并入 `useShare`、`api/share.ts` 补齐类型**：分享访问时 `lib/sharePasswordModal.ts` 靠 `registerSharePasswordModal(show)` 在组件挂载时注册函数，调用方（`FileViewer` / `useIndexApp` / 移动端 `MShareView`）再经薄封装取用；`api/share.ts` 另有三处显式 `any`（创建入参、两处请求 opts）：
+  - `useShare.ts` 增加 `sharePasswordVisible` / `sharePasswordError` 与 `showSharePasswordModal()` / `submitSharePassword()`，Promise resolver 由模块单例持有；`SharePasswordModal.vue` 只读状态、打开时 watch 重置输入并聚焦，删除注册与 `defineExpose`；三个调用方改从 `useShare` 导入，`lib/sharePasswordModal.ts` 删除
+  - `api/share.ts` 新增 `CreateShareBody` / `ShareItem` / `ShareData` 接口：`createShare` 返回 `{ token }`、`listShares` 返回 `{ shares: ShareItem[] }`、`getShareData` 返回 `ShareData`，两处 `opts: any` 改为 `RequestInit`；`SharesSidebar.vue` 删掉重复的本地 `interface Share`，复用 `ShareItem`
+  - `ShareData` 字段全部可选：后端按资源类型返回目录列表或文件元信息，调用方仍以 `any` 接收，取值逻辑不动
+  - 校验：`pnpm build`（`vue-tsc --noEmit` + `vite build`）通过
+
+- **`GET /api/tasks` 列表响应继续瘦身（摘要化）**：线上该接口 24.71 kB 未压缩 / 7.30 kB 传输，压缩中间件已生效，但重复键名被 br/gzip 吃掉后剩下的主要是高熵中文 `contentPreview`，删冗余字段对传输帮助有限，故收紧摘要本身：
+  - `taskPreviewLen` 80 → 24 rune，单条约省 168 B；只有正文超过 24 rune 才生成预览（`makeContentPreview` 按 rune 截断 + `…`），短正文直接返回空串由 `omitempty` 省略，避免列表把短正文原文整段带回（此前短正文不截断 = 全文下发）。正文全文仍只在 `GET /api/tasks/{id}` 返回，看板卡片备注相应变短或不显示
+  - 删除 `db.TaskItem` 的旧版兼容字段 `text`/`done`（无 `omitempty`，每条固定输出 `"text":"","done":false`，全库确认无读写方）；`GetTasksJSONByOwner` 去掉无人读取的外层 `version`/`lastUpdated`，返回体收敛为单一 `orgs` 键，并移除 `tasks.go` 的 `time` import
+  - 校验：`go build ./...`、`go test -tags sqlite_fts5 ./...` 全绿；`tasks_detail_test.go` 预览长度断言 81 → 25 rune 并补删字段断言，新增 `internal/db/tasks_preview_test.go` 覆盖空正文/短正文/恰好 24 字/25 字四种边界
+  - 文档同步：`02` §7.1/§7.2、`03` §5.6/§10、`docs/README.md` §3.2/§4（随当前 `docs v2.6` 工作树批次）；根 `README.md` 的 `/tasks.json` 旧条目按 §6 偏差清单约定保持登记不动
 - **「立即执行」编排改为 SSE 实时进度长连接**：此前 `POST /api/pipeline/run` 后台异步执行、按 DAG 层全量快照落 `pipeline_runs`，但前端拉一次快照后不再更新——流程图节点要等执行全部结束、手动点执行记录叠加才能看到状态，执行中完全无感知。本次打通实时链路：
   - 后端：新增 `GET /api/pipeline/runs/{id}/stream`（auth，`pipeline_http.go`）：SSE 推送进度，推送源为 `pipeline_runs` 表 1s 轮询（比对 `status`/`steps`/`err_msg` 变化推 `progress` 事件，data 为整份运行快照），终态推 `end` 后关闭连接——不做进程内 pub/sub，DB 轮询对定时触发等所有入口的 run 一视同仁，执行端零改动。细节：连接建立先推一份当前快照（叠加历史 run 也即时有状态）；15s 心跳注释行防代理/浏览器按空闲掐断（llm 单步最长 5min 无事件）；连接寿命上限 = 执行总超时 + 1min，兜住进程崩溃导致 run 永远停在 `running` 的连接挂起；SSE 头与 `sseWriteEvent` 复用 `ai.go` 的写法，另加 8 行 `pipelineStreamWriter`（裸 `http.Flusher` 断言，不带 aiRunWriter 的镜像落库逻辑）
   - 前端：`api/pipelines.ts` 新增 `streamPipelineRun(id, { onProgress, signal })`（fetch + ReadableStream 逐行解析，事件模型精简为 progress/end/error，忽略心跳注释行；断流以 resolve 收场由调用方决定降级）；`api/ai.ts` 的 `handleUnauthorized` 改为导出供复用
@@ -44,7 +161,7 @@
 
 - **「编排模板」整体移除，编排流程收敛为定时任务的一个可执行对象**：此前 `/pipelines` 是独立入口，模板另有一套表（`pipeline_templates` / `pipeline_template_versions`）、CRUD/版本回滚 API、独立页面与侧栏，而 AI 本就能直接生成复杂 Definition，模板复用与版本历史反而是多余的产品概念。本次把编排定义内联进 `ai_jobs.target_json`，并把模板页的流程图能力并进定时任务详情页：
   - 数据库：新增 `000027_drop_pipeline_templates`（`up` 删两张表并清理 `schedule_triggers` 里 `target_type='pipeline_template'` 的孤儿规则；`down` 重建空表以维持回滚链）。历史迁移 `000018/019/020/026` 保留不动，避免新建库迁移链断裂；存量库靠新迁移删表；已有模板数据不可恢复
-  - 后端：删除 `internal/db/pipeline_templates.go`（模板 CRUD、版本列表与恢复）与其测试；`pipeline_http.go` 只保留 `POST /api/pipeline/run`（Definition 直调）与 `parsePipelineDefinition`，移除 8 条 `/api/pipeline/templates/*` 路由、`triggerPipelineTemplate` 调度入口；`schedule_triggers.go` 白名单只留 `job`；`aijob_target.go` 移除 `TemplateID` 字段与「按模板 ID 读 Definition」分支，`pipeline` target 现在必须有内联 `definition`；`create_ai_job` 工具描述去掉 `templateId?`
+  - 后端：删除 `internal/db/pipeline_templates.go`（模板 CRUD、版本列表与恢复）与其测试；`pipeline_http.go` 只保留 `POST /api/pipeline/run`（Definition 直调）与 `parsePipelineDefinition`，移除 8 条 `/api/pipeline/templates/*` 路由、`triggerPipelineTemplate` 调度入口；`schedule_triggers.go` 白名单只留 `job`；`aijob_target.go` 移除 `TemplateID` 字段与「按模板 ID 读 Definition」分支，`pipeline` target 现在必须有内联 `definition`；`create_job` 工具描述去掉 `templateId?`
   - 前端：删除 `PipelineView.vue`、`PipelineSidebar.vue`、`PipelineVersionCard.vue`、`PipelineTriggerCard.vue` 与 `/pipelines` 路由 / activity-bar 入口 / 首页卡片 / `config.yaml` 路由映射；`api/pipelines.ts` 精简为 `runPipeline` / `listPipelineRuns` / `getPipelineRun` 与共享步骤类型；`AiJobsSidebar` 回到纯任务列表
   - `AiJobsView` 承接模板页能力：任务详情下方为 `PipelineGraph` 流程图 + 节点 Inspector（uses/needs/when/retry/with/输出），可切换 JSON 编辑；执行记录里带 `pipelineRunId` 的运行可「叠加到流程图」，节点显示 ok/failed/skipped 与耗时；顶部「立即执行」用当前 Definition 直调 `POST /api/pipeline/run` 并自动叠加结果。主区域改为单一纵向滚动列，避免嵌套 `flex:1` 高度塌陷；`pipeline` 类型不再有模板 ID 输入框
   - 校验：`go test -tags sqlite_fts5 ./internal/db/... ./internal/server/...` 全绿，`pnpm build` 通过且 dist 无模板 API 残留
@@ -116,13 +233,31 @@
 
 ### Added
 
+- **定时任务结果邮件改为信件式模板 + AI 排版**：此前所有 `user.notify` 邮件都走同一张卡片式模板（类型行 / 大标题 / Markdown 转 HTML / 蓝色按钮），AI 提示词任务虽已能输出 HTML 片段，也只被 `mdToHTML` 当 Markdown 转义。本次按 `docs/email-template-preview.html` 原型改成「固定信件外框 + AI 整理正文版式」：
+  - 模板与消毒：新增 `internal/notify/email_letter.go`，`renderLetterEmailHTML` 渲染品牌标识 / `{{.UserName}}` 问候 / 正文 / 落款 / 页脚；`sanitizeAIHTML` 基于 `golang.org/x/net/html` 做标签白名单（脚本/图片/表单整棵丢弃、未知标签 unwrap、文本重新转义、`style`/`class`/`on*` 全丢），链接沿用 `safeHref` 只放行 `site_url` 同域、外链降级为纯文字，样式由 `letterTagStyle` 统一注入；`htmlToPlainText` 从同一份 HTML 提取 multipart 的 text 部分
+  - 投递链路：`notify.EmailNotifier` 注入 `BodyFormatter`（60s 超时），`notifyUserBody` 仅在 `UserNotifyEvent.JobName` 非空时把任意格式正文（HTML 片段 / 工具输出 / JSON / Markdown / 纯文本）交给排版器，再消毒嵌入信件式模板；`notify_user` 短通知、任务到期/时刻提醒，以及 AI 未配置 / 超时 / 返回空时降级回卡片式 + `mdToHTML`，邮件照发。`notify` 包不反向依赖 `Server`，排版器实现在 `server/email_format.go`（复用 `aiChatCompletion`），由 `Server.New` 装配时注入
+  - 排版提示词：`notifyFormatPrompt` 要求只做版面整理、不改写/补充/删除事实，只输出正文 HTML 片段、标签限白名单、不写属性、不写问候/落款/任务名；站内链接可生成 `/jobs` / `/todo` 但不得编造路径或外链，`site_url` 未配置时禁止生成任何链接
+  - 事件字段：`UserNotifyEvent` 去掉 `BodyHTML`、改带 `JobName`（同时作为信件式页脚任务名，不再从邮件主题 `TrimPrefix` 反推）与 `UserName`（`db.GetUserNames` 反查，查不到降级「你好！」）；`KnownTopics` 的 `user.notify` 描述同步；`renderAIJobNotify` 恢复两返回值
+  - 原型稿：`docs/email-template-preview.html`（可切换结构标注查看「AI 输出 HTML 片段」嵌入区与真实效果）
+  - 代价：定时任务结果邮件消耗 2 次 LLM 调用（内容生成 + 排版），异步投递延迟增加数秒到数十秒
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./...` 全绿；新增单测覆盖消毒 / 模板 / 纯文本 / 排版分支 / 降级 / 短通知跳过 / 提示词约束
+  - 文档同步：`02` §10 / §14、`03` §1 / §2 / §5.8 / §9、`04` 单测清单、`05` §3 / §9 / §10、`docs/README.md` 升 `docs v2.7`、根 `README.md` Features
+- **AI 提示词定时任务可按白名单自主调用工具**：此前 `type:"ai"` 归一化后只有单 `llm` 步走非流式 `aiChatOnce`，提示词里写「请调用 xx 工具」不会真的执行；`/jobs` 表单里的「静态预授权」在 AI 类型下入库却没有任何消费方，还因 `Retryable = len(def.AllowWrite)==0` 误让「失败重试次数」失效。本次复用这个已有字段作为模型工具白名单，前端不新增输入框：
+  - 归一化：`buildAIJobDefinition` 在 `ai` target 下把 `job.AllowWrite` 写进 `llm` 步的 `with.tools`；留空则完全保持原单次生成路径。`pipeline` 内联 Definition 的 `llm` 步手写 `with.tools` 也走同一分派，其余 target 的 `allowWrite` 语义不变
+  - 执行：新增 `internal/server/aijob_agent.go`，`aiChatAgent` 按白名单顺序组装 `tools` payload → 非流式解析 `choices[0].message.tool_calls` → `execPipelineTool` 执行 → `role:"tool"` 结果回灌，最多 5 轮（复用 `aiMaxToolRounds`），上限轮不带 `tools` 强制模型用已有结果出文本；工具失败或越权以 `{"error":...}` 回灌而不中断任务，与对话侧一致。`aiChatOnce` 与 Agent 循环共用抽出的 `aiChatCompletion`；`runPipeline` 的 llm 分支补传 `def`/`rctx`
+  - 安全：白名单即该步的静态预授权，`mergeAllowWrite` 把它并入 `def.AllowWrite` 后复用 `checkToolAllowWrite` / `execPipelineTool` 的既有判定，写类工具无需重复填写；创建时校验拒绝未知工具名、黑名单工具（`run_pipeline`、`create_job` 等）与 `api/<path>` 条目；执行时再按白名单拦截模型幻觉出的工具名；每次调用写 `scheduled job agent tool` 审计日志（org / user / tool）
+  - `retry`：`Retryable` 由「`allowWrite` 非空」改为 `defHasWrite`，按预授权与 llm 白名单里是否真含写类工具 / `api/<path>` 判定，只填 `list_tasks` 这类只读工具不再禁用 job 级重试
+  - 前端：`AiJobsView.vue` 按任务类型切换该输入框的标签 / 占位 / 说明，AI 类型下提示「填写即预授权，留空不调工具」；文档同步 `02` §9.3 / §10、`03` §5.8 / §6 / §9 / §10、`04` 单测清单、`05` §7 / §9、`06` 顶部现行状态补充、`docs/README.md`（本批统一升 `docs v2.7`）、根 `README.md` Features
+  - 前提：上游需支持非流式 `tools` / `tool_calls`；不依赖 `ai.chat.tools` 全局开关
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./...` 全绿；新增 8 个单测覆盖归一化、白名单校验、多轮回灌、轮次上限、越权工具拒绝、无白名单不触发与重试判定
+  - 对话侧 AI 认知同步：`create_job` / `update_job` 的工具 schema 与 `aiSystemPrompt` 原本仍把 `allowWrite` 描述成纯静态预授权、`retry` 写成「仅无写步骤」，模型会误答「`ai` 类型不能调工具、必须改成 pipeline」。补齐 `ai` 类型下的白名单语义（填写即预授权、最多 5 轮、留空不调工具），系统提示明确「不要建议用户改用 pipeline」，`run_pipeline` 的 `with` 说明补 `llm` 步 `tools`；`02` §8.3 / §15 同步
 - **定时任务执行对象多态化（P0-a，迁移 000022）**：`ai_jobs` 从固定 `prompt` 扩展为多态 `target`，四类执行对象统一归一化为 `pipeline.Definition` 后复用 `runPipeline`，不再为定时任务单独写执行器：
   - 迁移 000022 加 `target_type` / `target_json` / `allow_write` / `context_json` / `notify_json` 五列，并从 `prompt` 回填 `{"type":"ai","prompt":...}`；`prompt` 列保留，老前端与只读查询零改动；down 删除五列可完整回滚（迁移测试覆盖往返）
   - `target.type` 支持 `ai`（单 `llm` 步 + 任务数据 ≤50 条 + RAG top3，保持日报正文形态）、`tool`（`tool/<name>`）、`interface`（站内 `api/<path>`，method/query/body，`/api/` 前缀由执行器补）、`pipeline`（内联 Definition 或模板引用）；解析与归一化集中在 `server/aijob_target.go`
-  - 调度安全：创建/更新 job 时都用与执行期共享的 `allowWrite` 判定做 Definition 级预检（`ai` 预检不查任务数据/RAG），拒绝 `tool/run_pipeline`、`tool/create_ai_job|update_ai_job|delete_ai_job`、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*`，避免「创建时放过、执行时才失败」；定时执行不进入 SSE 审批分支，不存在「无人确认挂死」
+  - 调度安全：创建/更新 job 时都用与执行期共享的 `allowWrite` 判定做 Definition 级预检（`ai` 预检不查任务数据/RAG），拒绝 `tool/run_pipeline`、`tool/create_job|update_job|delete_job`、`api/ai/chat`、非 GET `api/jobs`、`api/pipeline/*`，避免「创建时放过、执行时才失败」；定时执行不进入 SSE 审批分支，不存在「无人确认挂死」
   - `interface` 的 `query` 拼进站内请求 URL；`pipeline` 的 `params` 支持 `{{run.date}}` / `{{run.datetime}}` / `{{params.*}}` 展开（参数值本身也可引用 `{{run.*}}`）；执行前写审计日志（job_id / target / steps / allowWrite）
   - runner 改为注入 `JobExecutor`（`schedule` 包只负责扫描/判重/超时/通知），`buildAIJobPrompt` 与 `aiJobLLM` 的 RAG 注入迁到 server 侧；单次执行总超时 5min → 15min（对齐编排多步）
-  - API/工具：`POST/PUT /api/ai/jobs`、`create_ai_job` / `update_ai_job` 接受 `target` / `allowWrite` / `context` / `notify`，`prompt` 仍兼容（等价 `target={"type":"ai","prompt":...}`）；`list_ai_jobs` 返回 `targetType` / `target` / `allowWrite`；旧 `UpdateAIJob` 不清空已有 target
+  - API/工具：`POST/PUT /api/jobs`、`create_job` / `update_job` 接受 `target` / `allowWrite` / `context` / `notify`，`prompt` 仍兼容（等价 `target={"type":"ai","prompt":...}`）；`list_jobs` 返回 `targetType` / `target` / `allowWrite`；旧 `UpdateAIJob` 不清空已有 target
   - 单测覆盖 target 解析与非法输入、调度黑名单/预授权、结果摘要、target 列 CRUD 与旧更新兼容；迁移测试改为按版本回滚（不再依赖「最新版恰好是 000021」）；`go vet` + `go test -tags sqlite_fts5 ./internal/...` 全绿
 - **定时任务调度收敛（P0-b，迁移 000023）**：`cron` / 启停 / 最近执行状态统一归 `schedule_triggers`，`ai_jobs` 只留执行定义，全仓只剩一个 `cron_triggers_runner`：
   - 迁移 000023：`schedule_triggers` 加 `lease_until`；从 `ai_jobs.cron_expr <> ''` 回填 `target_type='job'` 规则（全局任务用 org/user=0 标记）；重建 `ai_jobs` 删掉 `cron_expr/enabled/last_run_at/last_status`；`.down` 加回 4 列并从 job 规则反向回填（多规则取最近一条），回滚不丢配置
@@ -132,7 +267,7 @@
   - `supportedTriggerTargets` 增加 `job`，`validateTriggerTarget` 校验 job 归属；`internal/schedule` 不再含任何业务标识符
   - 测试：000023 往返（回填/去列/回滚）、调度字段派生、租约下的触发分发与状态回写；`go vet` + `go test -tags sqlite_fts5 ./internal/...` 全绿
 - **定时任务 P1：执行历史联动、邮件分型与前端类型选择器（迁移 000024）**：
-  - 迁移 000024 给 `ai_job_runs` 加 `target_type` / `pipeline_run_id` / `steps_summary` / `err_msg` / `duration_ms` / `finished_at`；`MarkAIJobRunDetail` 落详情，`ListAIJobRuns` 一并返回，`/api/ai/jobs/{id}/runs` 可直接跳 `/pipelines?run=<id>`
+  - 迁移 000024 给 `ai_job_runs` 加 `target_type` / `pipeline_run_id` / `steps_summary` / `err_msg` / `duration_ms` / `finished_at`；`MarkAIJobRunDetail` 落详情，`ListAIJobRuns` 一并返回，`/api/jobs/{id}/runs` 可直接跳 `/pipelines?run=<id>`
   - `execAIJob` 返回结构化结果（输出、runID、步骤、耗时）；邮件按 target 分型：`ai` 原正文、`tool`/`interface` 代码块、`pipeline` 步骤摘要 + `site_url` 详情链接
   - `AiJobsView`：任务类型选择器（AI 提示词 / 工具 / 站内接口 / 编排）；工具参数、接口 method/path/query/body、模板 ID 或 Definition 分别编辑，`allowWrite` 逗号分隔；编辑按 `target` 回填，启停只改规则不动 target
   - 模板引用：`target.templateId` 走现有 `/api/pipeline/templates`，执行时读 Definition；外部 MCP 沿用 `allowWrite` 白名单判定（`NeedApproval` 工具必须在清单中），未额外放宽
@@ -140,7 +275,7 @@
 - **定时任务 P2：job 级失败重试（迁移 000025）**：`ai_jobs.retry`（0-3）仅对**无写步骤**的执行生效（`allowWrite` 为空），避免重跑写操作造成重复副作用：
   - 重试按 2s/4s/6s 退避，每次尝试各落一条 `pipeline_runs`；最终只写一条 `ai_job_runs`（最后一次输出 + 总耗时 + 错误）
   - 有写步骤的任务即使配置 `retry` 也不重试，审计日志与执行历史仍记录首次结果
-  - REST、`create_ai_job` / `update_ai_job` 工具与 `/jobs` 表单均支持 `retry`；迁移 000025 加列默认 0，down 可回滚
+  - REST、`create_job` / `update_job` 工具与 `/jobs` 表单均支持 `retry`；迁移 000025 加列默认 0，down 可回滚
 - **定时任务 P2：模板版本化与 MCP 审计（迁移 000026）**：
   - `pipeline_template_versions` 表：创建模板写 v1，每次保存写新版本；`GET /api/pipeline/templates/{id}/versions`、`POST .../versions/{version}/restore` 支持回滚（回滚也写新版本，当前内容不丢）；删除模板级联清理版本
   - `/pipelines` 模板页新增「版本历史」卡片：列表 + 回滚，回滚后自动重载 Definition
@@ -277,10 +412,10 @@
 - **任务精确时间提醒**（迁移 000009：tasks 加 `scheduled_time`/`due_time` 列，HH:mm 可选）：编辑弹窗时间范围选择器升级为 `datetimerange`（一个控件选日期 + 时刻；约定时刻 `00:00` = 未指定，归一为空，避免无时间任务触发凌晨提醒风暴）；每分钟扫描 job（`todo_time_reminder`）——`scheduled_time` 到点发"计划开始"提醒、`due_time` 到点且未完成发"即将截止"提醒，经 `task.reminder` 事件 → 邮件投递（含任务状态/优先级/进度）；去重键含时刻（`taskID:kind:HH:mm`），同分钟重跑不重发。PATCH 缺省保留语义扩展至 `scheduledTime`/`dueTime`（omitempty 空值省略，快捷修改不清空时刻）；AI 工具 `create_task`/`update_task` 支持 `dueTime`/`scheduledTime` 参数（HH:mm 校验，空串清除）
 - **AI 定时任务**（迁移 000009/000010/000011；功能栏「定时」入口 `/jobs`，首页功能卡片）：用户自建"到点让 AI 执行 prompt"的任务——
   - **全局公共任务模型**（000010）：`user_id IS NULL` = 全局任务只存一条（预置"每日工作总结"），执行时对所有有邮箱的用户逐个以本人身份展开（各自任务数据/投递），避免按用户复制记录导致数据量膨胀；私有任务（user_id 归属）用户自建自管；前端「公共」徽标 + 只读
-  - 管理：侧栏任务列表（名称/cron/启用状态点/新建）+ 主区域左右双卡片（左详情表单含 cron 频率预设，右执行记录）；CRUD API `/api/ai/jobs`（cron 创建时校验 fail fast）
-  - **执行记录**（000011 `ai_job_runs` 表）：每次触发留痕（时间/状态/输出前 4KB），`GET /api/ai/jobs/{id}/runs` 查看（全局任务的记录所有用户可查）
+  - 管理：侧栏任务列表（名称/cron/启用状态点/新建）+ 主区域左右双卡片（左详情表单含 cron 频率预设，右执行记录）；CRUD API `/api/jobs`（cron 创建时校验 fail fast）
+  - **执行记录**（000011 `ai_job_runs` 表）：每次触发留痕（时间/状态/输出前 4KB），`GET /api/jobs/{id}/runs` 查看（全局任务的记录所有用户可查）
   - 执行引擎：`ai_jobs_runner` 每分钟读库（增删改下一分钟生效，无需重载调度器）→ cron 命中且 `last_run_at` 非本分钟（幂等，重启不重跑）→ 组 prompt（平台角色 + 该用户任务数据精简 ≤50 条 + 指令）→ 非流式 LLM 调用（`aiChatOnce`，复用上游 AI 配置，2 分钟超时）→ 结果经 `user.notify` 事件邮件投递；失败也通知；单任务独立 goroutine 慢任务不阻塞 tick
-  - **Agent 工具接入**：`list_ai_jobs`（只读）/ `create_ai_job` / `update_ai_job`（先读后合并，公共任务不可改）/ `delete_ai_job`（写类走审批）——对话里一句话即可安排定时任务
+  - **Agent 工具接入**：`list_jobs`（只读）/ `create_job` / `update_job`（先读后合并，公共任务不可改）/ `delete_job`（写类走审批）——对话里一句话即可安排定时任务
   - 典型用法：每天 18:00 AI 总结任务发日报；每周一 09:00 生成周报与本周优先级建议
 
 ### Added

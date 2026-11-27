@@ -5,7 +5,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -45,10 +44,36 @@ func (s *Server) triggerJob(ctx context.Context, t db.CronTriggerWithOwner) erro
 	return firstErr
 }
 
+// RunJobNow 按 id 立即执行一次任务（手动触发）：读任务 → 执行 → 写历史 → 发通知。
+// 与 cron 路径的差异：
+//   - 归属校验以调用者身份；全局公共任务只按调用者跑一次，不 ListUsersWithEmail 展开；
+//   - 不占用/改写 cron 的租约，避免和定时触发互相阻塞（副作用由界面审批兜底）。
+func (s *Server) RunJobNow(ctx context.Context, orgID, userID, jobID int64) error {
+	job, err := s.db.GetAIJob(ctx, orgID, userID, jobID)
+	if err != nil {
+		return err
+	}
+	if job != nil {
+		return s.runAIJobOnce(ctx, db.AIJobWithOwner{AIJob: *job, OrgID: orgID, UserID: userID})
+	}
+	// 全局公共任务（user_id IS NULL）GetAIJob 查不到：按调用者身份跑一次
+	anyJob, err := s.db.GetAIJobAny(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if anyJob == nil || !anyJob.IsGlobal {
+		return fmt.Errorf("job %d not found or not owned by current user", jobID)
+	}
+	perUser := *anyJob
+	perUser.OrgID = orgID
+	perUser.UserID = userID
+	return s.runAIJobOnce(ctx, perUser)
+}
+
 // runAIJobOnce 执行一次任务并投递结果邮件；返回执行错误供规则状态回写。
 func (s *Server) runAIJobOnce(ctx context.Context, job db.AIJobWithOwner) error {
 	res, err := s.execAIJob(ctx, job)
-	// 仅无写步骤时按 job.Retry 重试；写操作重跑可能重复副作用。
+	// 仅无写操作时按 job.Retry 重试；写操作重跑可能重复副作用。
 	for attempt := 1; err != nil && res.Retryable && attempt <= job.Retry; attempt++ {
 		select {
 		case <-time.After(time.Duration(attempt) * 2 * time.Second):
@@ -58,33 +83,20 @@ func (s *Server) runAIJobOnce(ctx context.Context, job db.AIJobWithOwner) error 
 		slog.Warn("retry scheduled job", "job", job.ID, "attempt", attempt)
 		res, err = s.execAIJob(ctx, job)
 	}
-	status := "ok"
-	errMsg := ""
-	if err != nil {
-		status = "error: " + err.Error()
-		errMsg = err.Error()
-	}
-	stepsJSON, _ := json.Marshal(res.Steps)
-	if merr := s.db.MarkAIJobRunDetail(ctx, job.ID, db.AIJobRun{
-		Status:        status,
-		Output:        res.Output,
-		TargetType:    job.TargetType,
-		PipelineRunID: res.PipelineRunID,
-		StepsSummary:  string(stepsJSON),
-		ErrMsg:        errMsg,
-		DurationMs:    res.DurationMs,
-		FinishedAt:    time.Now().Format("2006-01-02 15:04:05"),
-	}); merr != nil {
-		slog.Warn("mark ai job run failed", "job", job.ID, "err", merr)
-	}
-
 	subject, body := s.renderAIJobNotify(job, res, err)
 	if s.bus != nil {
+		userName := ""
+		if s.db != nil {
+			if _, name, e := s.db.GetUserNames(context.Background(), job.OrgID, job.UserID); e == nil {
+				userName = name
+			}
+		}
 		// 发布事件用独立 ctx：runCtx 结束后异步订阅者仍要执行。
 		s.bus.Publish(context.Background(), schedule.Event{
 			Topic: schedule.TopicUserNotify,
 			Payload: schedule.UserNotifyEvent{
 				UserID: job.UserID, OrgID: job.OrgID, Subject: subject, Body: body,
+				UserName: userName, JobName: job.Name,
 			},
 		})
 	}

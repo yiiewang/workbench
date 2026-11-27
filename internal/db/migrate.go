@@ -24,8 +24,13 @@ var migrationsFS embed.FS
 //	000002_rbac_multi_org     阶段 A：加 user_orgs/org_features + is_platform_admin + 回填
 //	000003_drop_legacy_columns 删除 org_id/role_id 遗留列
 //
+// baselineVersion squash 后的最终基线版本（000006_jobs）。
+// 存量库（有 users 但无 schema_migrations）统一 Force 到该版本：
+// 迁移已按域合并为 000001-000006，不再逐版本回放。
+const baselineVersion = 6
+
 // 存量库基线：golang-migrate 引入前的库没有 schema_migrations 版本记录，
-// 统一视为已处于 baseline（version 1），Force(1) 后仅执行后续增量脚本。
+// 统一视为已处于 baselineVersion，Force 后不再执行历史脚本。
 func (d *DB) migrate() error {
 	// 基线检测必须先于 sqlite.WithInstance 执行：
 	// WithInstance 会调用 ensureVersionTable 提前创建 schema_migrations 表，
@@ -80,7 +85,7 @@ func hasTable(conn *sql.DB, name string) (bool, error) {
 //
 //	-1 → 已被 golang-migrate 管理（schema_migrations 存在），直接 Up
 //	 0 → 空库（无 users 表），从 000001 起全量迁移
-//	 1 → 存量库（有 users 表但无 schema_migrations），Force(1) 后执行增量
+//	 baselineVersion → 存量库（有 users 表但无 schema_migrations），Force 后跳过历史
 func detectBaseVersion(conn *sql.DB) (int, error) {
 	managed, err := hasTable(conn, "schema_migrations")
 	if err != nil {
@@ -95,7 +100,7 @@ func detectBaseVersion(conn *sql.DB) (int, error) {
 		return 0, err
 	}
 	if hasUsers {
-		return 1, nil
+		return baselineVersion, nil
 	}
 	return 0, nil // 空库
 }

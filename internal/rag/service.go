@@ -543,6 +543,11 @@ func (s *Service) Search(ctx context.Context, orgID, userID int64, query string,
 // 单路排名差异的影响越平缓
 const rrfK = 60
 
+// maxHitsPerFile 单次检索里同一文件的最大命中数：KNN 常把同一文档的相邻
+// chunk 一起召回（实测 top5 里 4 条同文件、距离几乎相同），既占满注入上下文，
+// 也让模型误判资料不足而反复检索。
+const maxHitsPerFile = 2
+
 // rrfFuse Reciprocal Rank Fusion：按 chunk id 对齐两路候选，
 // rank 从 1 计。只出现在一路的块也得该路分（保留精确命中的单路结果），
 // 两路同时命中的块显著加权。
@@ -570,11 +575,21 @@ func rrfFuse(vec, fts []db.ChunkHit, topK int) []db.ChunkHit {
 		list = append(list, e)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].score > list[j].score })
-	if len(list) > topK {
-		list = list[:topK]
+	// 按文件限流后再取 topK：从完整候选里补足其它文件，避免截断后无法回补
+	kept := make([]*entry, 0, topK)
+	perFile := make(map[string]int, topK)
+	for _, e := range list {
+		if perFile[e.hit.Path] >= maxHitsPerFile {
+			continue
+		}
+		perFile[e.hit.Path]++
+		kept = append(kept, e)
+		if len(kept) >= topK {
+			break
+		}
 	}
-	out := make([]db.ChunkHit, len(list))
-	for i, e := range list {
+	out := make([]db.ChunkHit, len(kept))
+	for i, e := range kept {
 		out[i] = e.hit
 	}
 	return out

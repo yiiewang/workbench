@@ -1,6 +1,6 @@
 # Workbench 文档中心
 
-> 文档版本：`docs v2.4`｜ 更新日期：2026-11-25 ｜ 状态：现行
+> 文档版本：`docs v2.7`｜ 更新日期：2026-11-26 ｜ 状态：现行
 > 本文件是 `docs/` 的 **00 号入口**：统一组织全部文档，定义编号规则、目录结构、版本说明、更新记录与维护规范。
 
 ## 1. 文档编号规则
@@ -56,10 +56,10 @@ workbench/
 
 | 项 | 值 |
 |---|---|
-| 文档版本 | `docs v2.4`（2026-11-25；编排模板移除，编排流程并入定时任务） |
-| 代码基线 | `v1.3.0-26-gc0577c4` + 迁移 000021–000027（AI 会话消息、target 五列、调度收敛、执行历史详情、job 重试、模板表删除） |
-| 工作树增量 | `000027_drop_pipeline_templates`、模板 API / 页面 / 组件删除、`AiJobsView` 流程图集成；编排运行 SSE 进度流（`/api/pipeline/runs/{id}/stream` + 前端实时叠加）、`withToolContext` 身份反查、`notify_user` 发布 ctx 修复；`go test -tags sqlite_fts5 ./...`、`pnpm build` 通过 |
-| 撰写结束后新增 | 000021 已纳入 v2.3；000022–000026 随定时任务改造纳入；000027 随 v2.4 模板移除纳入；SSE 进度流与两处修复随 v2.5 纳入 |
+| 文档版本 | `docs v2.7`（2026-11-26；信件式结果邮件与 AI 排版） |
+| 代码基线 | `v1.3.0-26-gc0577c4` + 迁移 000021–000027（AI 会话消息、target 五列、调度收敛、执行历史详情、job 重试、模板表删除）；本批功能变更不含新迁移 |
+| 工作树增量 | AI 提示词任务的 `allowWrite` 复用为工具白名单 + 非流式 Agent 循环（`internal/server/aijob_agent.go`）、`retry` 判定按写类工具、`AiJobsView` 表单文案按类型切换；定时任务结果邮件改信件式模板 + AI 排版（`notify/email_letter.go`、`server/email_format.go`、`docs/email-template-preview.html` 原型稿），`UserNotifyEvent` 改带 `JobName`；`GET /api/tasks` 列表响应瘦身（预览 80 → 24 rune、短正文不下发、删 `TaskItem.text`/`done` 与外层 `version`/`lastUpdated`）；`go test -tags sqlite_fts5 ./...`、`vue-tsc --noEmit` 通过 |
+| 撰写结束后新增 | 000021 已纳入 v2.3；000022–000026 随定时任务改造纳入；000027 随 v2.4 模板移除纳入；SSE 进度流与两处修复随 v2.5 纳入；AI 提示词工具白名单与 Agent 循环随 v2.6 纳入；信件式结果邮件与 AI 排版随 v2.7 纳入 |
 | 最近已发布版本 | `v1.3.0`（2026-11-10） |
 | 数据库迁移基线 | `000027_drop_pipeline_templates`（27 个版本 / 54 个脚本） |
 | 内置 AI 工具 | 16 个（含运行时合成的 `run_pipeline`；8 个需审批） |
@@ -74,9 +74,11 @@ workbench/
 
 | 版本 | 日期 | 变更 | 对应代码基线 |
 |---|---|---|---|
+| `docs v2.7` | 2026-11-26 | **信件式结果邮件与 AI 排版**：定时任务结果邮件改为固定信件外框（品牌 / 用户名问候 / AI 正文 / 落款 / 页脚）+ 模型整理正文版式；新增 `notify/email_letter.go`（`renderLetterEmailHTML` / `sanitizeAIHTML` / `htmlToPlainText`）与 `server/email_format.go`（`notifyFormatPrompt` / `formatNotifyBody`），`EmailNotifier` 注入 `BodyFormatter`（60s 超时，失败降级卡片式模板）；`UserNotifyEvent` 改带 `JobName` / `UserName`；原型稿 `docs/email-template-preview.html`；同步 `02` §10/§14、`03` §1/§2/§5.8/§9、`04` 单测清单、`05` §3/§9/§10、根 `README.md` Features 与本文件 §3.2/§4 | 同一代码基线 + 工作树（未提交） |
+| `docs v2.6` | 2026-11-26 | **AI 提示词定时任务按白名单自主调工具**：`ai` target 的 `allowWrite` 既是模型唯一可见工具白名单、也是该步静态预授权，归一化写进 `llm` 步 `with.tools`；新增非流式 Agent 循环（`aijob_agent.go`，最多 5 轮、轮满强制出文本、越权工具以 error 回灌）、创建时白名单校验、`Retryable` 按写类工具判定；同步 `02` §9.3/§10、`03` §5.8/§6/§9/§10、`04` 单测清单、`05` §7/§9、`06` 顶部现行状态、根 `README.md` Features 与本文件 §3.2/§4；同批纳入 `GET /api/tasks` 列表摘要化（`contentPreview` 80 → 24 rune、短正文不下发、删 `TaskItem.text`/`done` 与响应外层 `version`/`lastUpdated`），同步 `02` §7.1/§7.2、`03` §5.6/§10、根 `CHANGELOG.md` | 同一代码基线 + 工作树（未提交） |
 | `docs v2.5` | 2026-11-25 | **编排运行实时进度链路**：新增 SSE 端点 `GET /api/pipeline/runs/{id}/stream`（推送源为 pipeline_runs 表 1s 轮询，`progress` 推整份快照、终态 `end` 关闭、15s 心跳防代理掐断、连接寿命上限 = 执行总超时 + 1min），前端 `streamPipelineRun` + `AiJobsView`「立即执行」后实时叠加流程图（「运行中…」指示、断流降级拉取最终结果、终态刷新执行记录）；两处缺陷修复同步成文：`withToolContext` 经 `db.GetUserNames` 反查补齐 `userName`/`orgName`（修定时任务里 `reindex_files` 拿空用户根目录、扫 0 文件"成功"）、`notify_user` 发布事件改用 `context.Background()`（修异步订阅者 `context canceled`）；同步 `02` §9.1/§9.2、`03` §5.8/§10、`05` §9、根 `README.md` | `v1.3.0-26-gc0577c4` + 工作树（未提交） |
-| `docs v2.4` | 2026-11-25 | **编排模板概念整体移除**（迁移 000027 删两张模板表与模板 API）：编排 Definition 内联进 `ai_jobs.target_json`、流程图 / 节点 Inspector / 运行叠加 / 立即执行并入 `/jobs`、`supportedTriggerTargets` 只留 `job`；同步 `01`/`02`/`03`/`04`/`05`/`06`/根 `README.md`；`06` 转为设计决策记录并标注现行状态；迁移基线 26/52 → 27/54、表 24 → 22 项 | `v1.3.0-26-gc0577c4` + 工作树 000027 |
-| `docs v2.3` | 2026-11-25 | 定时任务执行对象多态化与调度收敛：`ai_jobs` target 五列（000022）、`ai_jobs` 去调度列 + `schedule_triggers.lease_until` + job 规则回填（000023）、`ai_job_runs` 详情列（000024）、`ai_jobs.retry` 重试（000025）、模板版本历史（000026）；`02` §2.1/§8.3/§10/§13/§14、`03` §2.1/§5.8/§5.9/§6/§7.2/§8/§10、本文件 §2/§3.2/§6 同步；新增 `06` 设计文档；迁移基线 20/40 → 26/52，关闭 D20 | `v1.3.0-26-gc0577c4` + 工作树 000021–000024 |
+| `docs v2.4` | 2026-11-25 | **编排模板概念整体移除**（迁移 000027 删两张模板表与模板 API）：编排 Definition 内联进 `jobs.target_json`、流程图 / 节点 Inspector / 运行叠加 / 立即执行并入 `/jobs`、`supportedTriggerTargets` 只留 `job`；同步 `01`/`02`/`03`/`04`/`05`/`06`/根 `README.md`；`06` 转为设计决策记录并标注现行状态；迁移基线 26/52 → 27/54、表 24 → 22 项 | `v1.3.0-26-gc0577c4` + 工作树 000027 |
+| `docs v2.3` | 2026-11-25 | 定时任务执行对象多态化与调度收敛：`jobs` target 五列（000022）、`jobs` 去调度列 + `schedule_triggers.lease_until` + job 规则回填（000023）、`job_runs` 详情列（000024）、`jobs.retry` 重试（000025）、模板版本历史（000026）；`02` §2.1/§8.3/§10/§13/§14、`03` §2.1/§5.8/§5.9/§6/§7.2/§8/§10、本文件 §2/§3.2/§6 同步；新增 `06` 设计文档；迁移基线 20/40 → 26/52，关闭 D20 | `v1.3.0-26-gc0577c4` + 工作树 000021–000024 |
 | `docs v2.2` | 2026-11-25 | 追平 `c0577c4`：编排模板 CRUD/手动触发、通用定时触发规则（000018–000020）、DAG `needs`/`when`/`retry` 与同层并行、`/pipelines` 流程图与模板页、AI 对话 300ms 游标恢复/多会话/`AiMessage`/PC 左栏三 tab；同步 `01`/`02`/`03`/`04`/`05` 的文件头与正文，迁移基线 17/34 → 20/40、表 21 → 23 项，关闭 D16/D18；**移除 `archive/` 归档目录与 A1–A3 编号、删除 §5.6 归档规则**，关闭 D14、D19 收敛为代码注释旧路径 | `v1.3.0-26-gc0577c4` |
 | `docs v2.1` | 2026-11-24 | 全量重建新增孤儿索引清理（严格「文件已不存在」判定、按 owner 隔离、`pruned` 计数）；同步 `05` §5.3–§5.5/§9、`02` §8.4/§14、`03` §5.5/§10 | 同一代码基线 + 本次未提交改动 |
 | `docs v2.0` | 2026-11-24 | **重建**：主文档加两位序号并重命名；新增 `01` 快速开始、`04` 构建与发布、`05` 配置与运维；`02`/`03` 全量重写并追平后台 run / 1b 恢复 / 声明式编排；根 `README.md` 的 Quick Start 与 Release Process 迁入 `01`/`04` 并改为链接；历史设计稿与模板预览归拢 `archive/`；建立编号规则；偏差清单复核 | `v1.3.0-25-g517f88c` + 工作树 000017 |
@@ -190,6 +192,6 @@ workbench/
 | D19 | `internal/notify/email_template.go` 注释、根 `CHANGELOG.md` 历史条目 | 仍写 `docs/email-template-preview.html` 及旧 `design.md` / 迁移基线 000015 路径 | 邮件模板预览与两份历史设计稿已删除；`CHANGELOG.md` 历史条目按「不删历史行」保留 | 代码注释待修正 |
 | D20 | 本文件 §3.2 / `03` §6.1 迁移基线 | `docs v2.2` 写 `000020_pipeline_templates_pure`（20 个版本 / 40 个脚本） | 000021–000026 补齐后为 26 个版本 / 52 个脚本（v2.3 修正）；000027 后为 **27 个版本 / 54 个脚本**，§3.2 与 `03` §6.1、`05` §7 已同步 | **已修正（docs v2.4）** |
 
-| D21 | `02`/`03`/`05`/`06`/根 `README.md` 的编排模板描述 | `docs v2.2`/`v2.3` 把编排模板写成独立功能（`/pipelines` 页、模板表/版本表、模板 CRUD API、`pipeline_template` 触发目标） | 000027 已整体移除模板概念：编排 Definition 内联进 `ai_jobs.target_json`，流程图能力并入 `/jobs`；`06` 转为设计决策记录并加顶部现行状态说明，`02`/`03`/`05`/根 `README.md` 同批同步；结果为邮件跳转死链 `/pipelines?run=` 改 `/jobs?id=` | **已同步（docs v2.4）** |
+| D21 | `02`/`03`/`05`/`06`/根 `README.md` 的编排模板描述 | `docs v2.2`/`v2.3` 把编排模板写成独立功能（`/pipelines` 页、模板表/版本表、模板 CRUD API、`pipeline_template` 触发目标） | 000027 已整体移除模板概念：编排 Definition 内联进 `jobs.target_json`，流程图能力并入 `/jobs`；`06` 转为设计决策记录并加顶部现行状态说明，`02`/`03`/`05`/根 `README.md` 同批同步；结果为邮件跳转死链 `/pipelines?run=` 改 `/jobs?id=` | **已同步（docs v2.4）** |
 
 新增偏差时追加一行并写清「位置 / 描述 / 当前事实 / 状态」；修正后把状态改为「已修正（版本）」，不删除历史行，便于追溯。

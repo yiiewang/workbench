@@ -27,11 +27,11 @@ func mcpToolName(server, tool string) string {
 	return "mcp_" + clean(server) + "_" + clean(tool)
 }
 
-// allTools 内置 + 运行时合成的编排工具 + MCP 工具（顺序稳定）
+// allTools 内置 + 运行时合成的编排/触发工具 + MCP 工具（顺序稳定）
 func (s *Server) allTools() []aiTool {
-	tools := make([]aiTool, 0, len(aiTools)+1+len(s.mcpTools))
+	tools := make([]aiTool, 0, len(aiTools)+2+len(s.mcpTools))
 	tools = append(tools, aiTools...)
-	tools = append(tools, pipelineTool())
+	tools = append(tools, pipelineTool(), runJobTool())
 	return append(tools, s.mcpTools...)
 }
 

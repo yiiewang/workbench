@@ -5,7 +5,7 @@
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getShareData } from '../../api/share'
-import { showSharePasswordModal } from '../../lib/sharePasswordModal'
+import { showSharePasswordModal } from '../../composables/useShare'
 import { API_CODE, formatSize } from '../../lib/common'
 import { dataSource } from '../../composables/useEditor'
 import { dsMode, shareRootPath } from '../../stores/indexStore'

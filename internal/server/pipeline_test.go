@@ -125,3 +125,22 @@ func TestExecPipelineAPIQuery(t *testing.T) {
 		t.Fatalf("query not propagated: %+v", out)
 	}
 }
+
+func TestAIJobIDFromArgs(t *testing.T) {
+	cases := []struct {
+		in   any
+		want int64
+	}{
+		{float64(9), 9},
+		{int64(9), 9},
+		{int(9), 9},
+		{"9", 9},
+		{"bad", 0},
+		{nil, 0},
+	}
+	for _, c := range cases {
+		if got := aiJobIDFromArgs(c.in); got != c.want {
+			t.Fatalf("aiJobIDFromArgs(%v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}

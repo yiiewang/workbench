@@ -62,13 +62,17 @@ func runCronTriggers(ctx context.Context, fireAt time.Time, database *db.DB, han
 		}
 		// CAS 占用：同分钟重复 tick 不重跑；跨分钟的长任务由租约拦住
 		leaseUntil := local.Add(cronTriggerTimeout).Format("2006-01-02 15:04")
-		claimed, err := database.ClaimCronTrigger(ctx, t.ID, nowKey, leaseUntil)
+		claimed, recovered, err := database.ClaimCronTrigger(ctx, t.ID, nowKey, leaseUntil)
 		if err != nil {
 			slog.Error("cron trigger claim failed", "trigger", t.ID, "err", err)
 			continue
 		}
 		if !claimed {
 			continue
+		}
+		if recovered {
+			slog.Warn("cron trigger lease expired, takeover",
+				"trigger", t.ID, "target", t.TargetType, "last_run_at", t.LastRunAt)
 		}
 		item, fn := t, handler
 		go func() {
@@ -79,7 +83,8 @@ func runCronTriggers(ctx context.Context, fireAt time.Time, database *db.DB, han
 				status = "error: " + err.Error()
 				slog.Error("cron trigger failed", "trigger", item.ID, "target", item.TargetType, "err", err)
 			}
-			// runCtx 在本 goroutine 结束后即 cancel，状态回写用独立 ctx
+			// runCtx 在本 goroutine 结束后即 cancel，状态回写用独立 ctx；
+			// last_run_at 保持触发分钟（同分钟防重），完成时刻由 finished_at 记录。
 			_ = database.MarkCronTriggerRun(context.Background(), item.ID, status, nowKey)
 			slog.Info("cron trigger done", "trigger", item.ID, "status", status)
 		}()

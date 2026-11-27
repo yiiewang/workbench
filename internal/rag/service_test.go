@@ -147,3 +147,26 @@ func TestMarkReindexStarted(t *testing.T) {
 		t.Fatalf("progress leaked to other owner: %+v", q)
 	}
 }
+
+func TestRRFFusePerFileCap(t *testing.T) {
+	vec := []db.ChunkHit{
+		{ID: 1, Path: "/a.md", StartLine: 10, Distance: 0.75},
+		{ID: 2, Path: "/a.md", StartLine: 20, Distance: 0.76},
+		{ID: 3, Path: "/a.md", StartLine: 30, Distance: 0.77},
+		{ID: 4, Path: "/b.md", StartLine: 5, Distance: 0.80},
+	}
+	out := rrfFuse(vec, nil, 5)
+	perFile := map[string]int{}
+	for _, h := range out {
+		perFile[h.Path]++
+	}
+	if perFile["/a.md"] > maxHitsPerFile {
+		t.Fatalf("/a.md hits = %d, want <= %d", perFile["/a.md"], maxHitsPerFile)
+	}
+	if perFile["/b.md"] != 1 {
+		t.Fatalf("/b.md hits = %d, want 1", perFile["/b.md"])
+	}
+	if len(out) != 3 {
+		t.Fatalf("out = %d, want 3", len(out))
+	}
+}

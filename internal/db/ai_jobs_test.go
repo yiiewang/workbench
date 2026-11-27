@@ -9,7 +9,7 @@ import (
 func TestAIJobTargetCRUD(t *testing.T) {
 	d := newTestDB(t)
 	ctx := context.Background()
-	// ai_jobs.user_id 有外键到 users；本测试只验证列读写，不铺用户数据。
+	// jobs.user_id 有外键到 users；本测试只验证列读写，不铺用户数据。
 	d.conn.SetMaxOpenConns(1)
 	if _, err := d.conn.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
 		t.Fatal(err)
@@ -124,5 +124,71 @@ func TestAIJobTriggerDerivedFields(t *testing.T) {
 	}
 	if found == nil || found.CronExpr != "0 9 * * *" || !found.Enabled {
 		t.Fatalf("list derived schedule mismatch: %+v", found)
+	}
+}
+
+func TestAIJobRunInsertUpdate(t *testing.T) {
+	d := newTestDB(t)
+	ctx := ctx()
+	// 全局任务（user_id NULL）避免 users 外键依赖
+	if _, err := d.conn.ExecContext(ctx,
+		`INSERT INTO jobs (id, user_id, org_id, name, prompt) VALUES (99, NULL, 0, 't', 'p')`); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := d.InsertAIJobRun(ctx, 99, AIJobRun{Status: "running", TargetType: "ai", PipelineRunID: "p1"})
+	if err != nil || runID == 0 {
+		t.Fatalf("insert running = (%d, %v)", runID, err)
+	}
+	runs, err := d.ListAIJobRuns(ctx, 99, 10)
+	if err != nil || len(runs) != 1 || runs[0].Status != "running" || runs[0].PipelineRunID != "p1" {
+		t.Fatalf("after insert: %+v, %v", runs, err)
+	}
+	if err := d.UpdateAIJobRun(ctx, runID, AIJobRun{
+		Status: "ok", Output: "done", TargetType: "ai", PipelineRunID: "p1",
+		DurationMs: 123, FinishedAt: "2026-11-26 18:00:00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runs, _ = d.ListAIJobRuns(ctx, 99, 10)
+	if runs[0].Status != "ok" || runs[0].Output != "done" || runs[0].DurationMs != 123 {
+		t.Fatalf("after update: %+v", runs[0])
+	}
+}
+
+func TestMarkInterruptedRuns(t *testing.T) {
+	d := newTestDB(t)
+	ctx := ctx()
+	if _, err := d.conn.ExecContext(ctx,
+		`INSERT INTO jobs (id, user_id, org_id, name, prompt) VALUES (101, NULL, 0, 't', 'p')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertAIJobRun(ctx, 101, AIJobRun{Status: "running", PipelineRunID: "p2"}); err != nil {
+		t.Fatal(err)
+	}
+	triggerID, err := d.CreateCronTrigger(ctx, 1, 2, "job", 101, "* * * * *", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.conn.ExecContext(ctx,
+		`UPDATE schedule_triggers SET last_status = 'running', lease_until = '2026-12-01 00:00' WHERE id = ?`, triggerID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.markInterruptedRuns(); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, _ := d.ListAIJobRuns(ctx, 101, 10)
+	if len(runs) != 1 || runs[0].Status != "error: interrupted" || runs[0].FinishedAt == "" {
+		t.Fatalf("job run = %+v", runs)
+	}
+	var status, lease string
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT last_status, lease_until FROM schedule_triggers WHERE id = ?`, triggerID).
+		Scan(&status, &lease); err != nil {
+		t.Fatal(err)
+	}
+	if status != "error: interrupted" || lease != "" {
+		t.Fatalf("trigger status=%q lease=%q", status, lease)
 	}
 }

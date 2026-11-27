@@ -30,7 +30,7 @@ type emailContent struct {
 var emailTmpl = template.Must(template.New("email").Parse(`<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0;padding:48px 16px;background:#f4f5f7;font-family:-apple-system,'PingFang SC','Microsoft YaHei','Helvetica Neue',Arial,sans-serif;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:10px;padding:32px 36px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:880px;margin:0 auto;background:#ffffff;border-radius:10px;padding:32px 36px;">
 <tr><td style="font-size:11px;color:#9aa1ab;letter-spacing:.8px;padding-bottom:20px;">{{.Kind}}</td></tr>
 <tr><td style="font-size:18px;font-weight:600;color:#1a1f27;line-height:1.5;padding-bottom:8px;">{{.Title}}</td></tr>
 {{if .Meta}}<tr><td style="font-size:13px;color:#6b7280;line-height:1.7;padding-bottom:20px;">{{.Meta}}</td></tr>{{end}}
@@ -90,6 +90,7 @@ func safeHref(raw, allowedHost string) (string, bool) {
 // mdToHTML 极简 markdown → HTML 转换（AI 定时任务输出用）：
 //
 //	#/##/### 与「一、」→ 分节标题；- / · / 1. → 列表项；
+//	|...| 管道表格（第二行为 |---| 分隔行）→ table；> 引用 → 灰底引文块；
 //	**text** 粗体、`code` 行内代码、[文字](url) 站内链接；空行分段。
 //
 // 每项独立成块 + 悬挂缩进：长句折行与首行文字对齐、条目间留白，
@@ -132,10 +133,77 @@ func mdToHTML(md, siteURL string) template.HTML {
 		}
 		return false
 	}
-	for _, line := range lines {
+	// 管道表格：表头行 + |---| 分隔行 + 数据行；分隔行只用于识别，不输出
+	isTableSep := func(s string) bool {
+		s = strings.TrimSpace(s)
+		if !strings.HasPrefix(s, "|") || !strings.HasSuffix(s, "|") {
+			return false
+		}
+		inner := strings.Trim(s[1:len(s)-1], " ")
+		if inner == "" || !strings.Contains(inner, "-") {
+			return false
+		}
+		for _, r := range inner {
+			if r != '-' && r != ':' && r != '|' && r != ' ' {
+				return false
+			}
+		}
+		return true
+	}
+	isTableRow := func(s string) bool {
+		s = strings.TrimSpace(s)
+		return strings.HasPrefix(s, "|") && strings.HasSuffix(s, "|") && len(s) > 1
+	}
+	splitCells := func(s string) []string {
+		s = strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(s), "|"), "|")
+		parts := strings.Split(s, "|")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 		t := strings.TrimSpace(line)
 		switch {
 		case t == "":
+		case isTableRow(t) && i+1 < len(lines) && isTableSep(lines[i+1]):
+			rows := []string{t, strings.TrimSpace(lines[i+1])}
+			i += 2
+			for i < len(lines) && isTableRow(lines[i]) {
+				rows = append(rows, strings.TrimSpace(lines[i]))
+				i++
+			}
+			i--
+			b.WriteString(`<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;margin:10px 0;font-size:13px;">`)
+			b.WriteString("<thead><tr>")
+			for _, c := range splitCells(rows[0]) {
+				b.WriteString(`<th style="border:1px solid #e5e7eb;background:#f8f9fa;padding:6px 10px;text-align:left;font-weight:600;color:#1a1f27;">` + inline(c) + "</th>")
+			}
+			b.WriteString("</tr></thead><tbody>")
+			for _, row := range rows[2:] {
+				b.WriteString("<tr>")
+				for _, c := range splitCells(row) {
+					b.WriteString(`<td style="border:1px solid #e5e7eb;padding:6px 10px;color:#374151;">` + inline(c) + "</td>")
+				}
+				b.WriteString("</tr>")
+			}
+			b.WriteString("</tbody></table>")
+		case strings.HasPrefix(t, "> ") || t == ">":
+			var quote []string
+			for i < len(lines) {
+				q := strings.TrimSpace(lines[i])
+				if strings.HasPrefix(q, "> ") {
+					quote = append(quote, strings.TrimPrefix(q, "> "))
+				} else if q == ">" {
+					quote = append(quote, "")
+				} else {
+					break
+				}
+				i++
+			}
+			i--
+			b.WriteString(`<div style="margin:12px 0;padding:8px 12px;background:#f8f9fa;border-left:3px solid #9aa1ab;color:#6b7280;font-size:13px;line-height:1.7;">` + inline(strings.Join(quote, " ")) + "</div>")
 		case strings.HasPrefix(t, "### ") || strings.HasPrefix(t, "## ") || strings.HasPrefix(t, "# "):
 			title := strings.TrimSpace(strings.TrimLeft(t, "# "))
 			b.WriteString(`<div style="font-weight:600;font-size:15px;color:#1a1f27;margin:20px 0 8px;padding-left:10px;border-left:3px solid #2563eb;">` + inline(title) + "</div>")

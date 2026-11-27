@@ -27,7 +27,10 @@ const router = useRouter()
 // header 状态由各侧栏组件注入后更新 badge（动态徽标）。
 const header = useSidebarHeader()
 
-// 侧栏标题：默认取自路由 meta.sidebarTitle；分享模式动态显示 SHARED: basename
+// 侧栏标题：默认取自路由 meta.sidebarTitle；分享模式动态显示 SHARED: basename；
+// /file 侧栏切到 MY SHARES Tab 时由 query 覆盖标题
+const isSharesTab = computed(() => route.path === '/file' && route.query.tab === 'shares')
+
 const sidebarTitle = computed(() => {
   if (dsMode.value === 'share') {
     const root = shareRootPath.value
@@ -35,6 +38,7 @@ const sidebarTitle = computed(() => {
     const basename = root.split('/').filter(Boolean).pop() || root
     return 'SHARED: ' + basename
   }
+  if (isSharesTab.value) return 'MY SHARES'
   return (route.meta.sidebarTitle as string) || ''
 })
 
@@ -42,7 +46,6 @@ const isHomeActive = computed(() => route.path === '/')
 const isExplorerActive = computed(() =>
   route.path === '/file' || route.path.startsWith('/s/')
 )
-const isSharesActive = computed(() => route.path === '/shares')
 const isTodoActive = computed(() => route.path === '/todo')
 const isJobsActive = computed(() => route.path === '/jobs')
 const isAdminActive = computed(() => route.path === '/admin')
@@ -101,7 +104,6 @@ function ensureMobileDrawer() {
 
 function handleHomeClick() { router.push('/') }
 function handleExplorerClick() { router.push('/file'); ensureMobileDrawer() }
-function handleShareClick() { router.push('/shares'); ensureMobileDrawer() }
 function handleTodoClick() { router.push('/todo'); ensureMobileDrawer() }
 function handleJobsClick() { router.push('/jobs'); ensureMobileDrawer() }
 function handleAdminClick() { router.push('/admin'); ensureMobileDrawer() }
@@ -147,11 +149,6 @@ async function onSwitchOrg(orgId: number) {
   <div v-if="hasFeature('file')" class="activity-item" :class="{ active: isExplorerActive }" title="文件浏览器" @click="handleExplorerClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
     <span class="activity-label">文件</span>
-  </div>
-  <div v-if="hasFeature('share')" class="activity-item" :class="{ active: isSharesActive }" title="分享管理" @click="handleShareClick">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>
-    <span class="activity-label">分享</span>
-    <span class="badge" id="shareBadge" style="display:none"></span>
   </div>
   <div v-if="hasFeature('todo')" class="activity-item" :class="{ active: isTodoActive }" title="Todo 看板" @click="handleTodoClick">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>

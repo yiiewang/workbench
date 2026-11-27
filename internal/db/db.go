@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/yiiewang/workbench/internal/sqlitevec"
@@ -83,9 +84,6 @@ type TaskItem struct {
 	// Files 关联的文件路径（相对用户根目录），todo ↔ file 联动用。
 	// omitempty + 读出归一为 nil：保证无关联任务的 md5 与旧版一致（recomputeVersion 兼容）
 	Files []string `json:"files,omitempty"`
-	// 向后兼容旧版字段
-	Text string `json:"text"`
-	Done bool   `json:"done"`
 }
 
 // sqliteBusyTimeoutMs SQLite busy 超时（毫秒）
@@ -113,7 +111,30 @@ func Open(dbPath string) (*DB, error) {
 		conn.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := d.markInterruptedRuns(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("recover running states: %w", err)
+	}
 	return d, nil
+}
+
+// markInterruptedRuns 服务启动时回收上一次进程遗留的 running 状态：
+// 进程被强杀时 job_runs 会永远停在 running，schedule_triggers 的租约
+// 也要等 15min 才过期；启动即标记为 interrupted 并释放租约。
+// 面向单实例部署：多实例同时启动时可能误标另一实例正在跑的任务。
+func (d *DB) markInterruptedRuns() error {
+	now := time.Now().Format("2006-01-02 15:04:05")
+	if _, err := d.conn.Exec(
+		`UPDATE job_runs
+		 SET status = 'error: interrupted', err_msg = 'service restarted', finished_at = ?
+		 WHERE status = 'running'`, now); err != nil {
+		return err
+	}
+	_, err := d.conn.Exec(
+		`UPDATE schedule_triggers
+		 SET last_status = 'error: interrupted', lease_until = ''
+		 WHERE last_status = 'running'`)
+	return err
 }
 
 // Close 关闭数据库连接

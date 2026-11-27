@@ -117,7 +117,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | 字段 | 取值 / 说明 |
 |---|---|
 | `id` | UUID，客户端生成 |
-| `title` / `content` | 正文为 Markdown；列表响应不含 `content`，只有 80 字 `contentPreview` |
+| `title` / `content` | 正文为 Markdown；列表响应不含 `content`，仅当正文 > 24 rune 时给截断的 `contentPreview`（24 字 + `…`）；短正文不下发预览，全文经 `GET /api/tasks/{id}` 拉取 |
 | `status` | `todo` / `progress` / `done`（待办/进行中/已完成）；进度 100 与 `done` 联动 |
 | `priority` | `high` / `medium` / `low`，默认 `medium` |
 | `scheduled` / `due` | `YYYY-MM-DD` |
@@ -129,7 +129,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 
 | 动作 | API | 输入 | 输出 |
 |---|---|---|---|
-| 拉全量 | `GET /api/tasks` | — | `{revision, tasks}`（仅本人任务） |
+| 拉列表（摘要） | `GET /api/tasks` | — | `{orgs.{orgId}.{userId}: {revision, tasks}}`（仅本人任务；`tasks` 无 `content` 全文、无旧版 `text`/`done`；外层无 `version`/`lastUpdated`） |
 | 拉详情 | `GET /api/tasks/{id}` | — | `{task（含 content 全文）, revision}` |
 | 轻量版本 | `GET /api/tasks/revision` | — | `{revision}`，30s 轮询对账 |
 | 增 / 改 / 删 | `POST` / `PATCH` / `DELETE /api/tasks/{id}` | `{task, baseRevision}`（DELETE 走 query） | 新 `{revision}`；落后返回 `40901` + 服务端副本 |
@@ -176,8 +176,8 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | 任务 | `list_tasks` | `includeDone` | 否 |
 | 任务 | `create_task` | `title`（必填）、`content`、`priority`、`scheduled`/`due`、`scheduledTime`/`dueTime` | 否 |
 | 任务 | `update_task` | `taskId` + 待改字段（先读后合并） | **是** |
-| 定时任务 | `list_ai_jobs` | 无 | 否 |
-| 定时任务 | `create_ai_job` / `update_ai_job` / `delete_ai_job` | `name`/`cronExpr` + `prompt` 或 `target`/`allowWrite` / `jobId` | **是** |
+| 定时任务 | `list_jobs` | 无 | 否 |
+| 定时任务 | `create_job` / `update_job` / `delete_job` | `name`/`cronExpr` + `prompt` 或 `target`/`allowWrite`（`ai` 类型下即工具白名单）/ `jobId` | **是** |
 | 事件 | `list_events` | 无（内省事件总线 topic 与订阅者数） | 否 |
 | 通知 | `notify_user` | `subject`, `body`（≤32 KB） | **是** |
 | 索引 | `reindex_files` | 无（触发本人文件全量重建，后台异步） | **是** |
@@ -221,7 +221,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 
 ## 9. 声明式编排（`/jobs`）
 
-**场景**：把多步任务串成一张流程图。Definition 是纯数据，**内联在定时任务 `ai_jobs.target_json` 里**，由 AI 对话生成或手动编辑；不设独立模板表、模板页与版本历史。三种入口：AI 对话内由模型构造 Definition 调 `run_pipeline`；`POST /api/pipeline/run` 直接提交 Definition（供任务详情页「立即执行」使用）；定时任务按 cron 到点执行内联 Definition。`/jobs` 任务详情页用 DAG 流程图展示，并查看每次运行的逐步结果。
+**场景**：把多步任务串成一张流程图。Definition 是纯数据，**内联在定时任务 `jobs.target_json` 里**，由 AI 对话生成或手动编辑；不设独立模板表、模板页与版本历史。三种入口：AI 对话内由模型构造 Definition 调 `run_pipeline`；`POST /api/pipeline/run` 直接提交 Definition（供任务详情页「立即执行」使用）；定时任务按 cron 到点执行内联 Definition。`/jobs` 任务详情页用 DAG 流程图展示，并查看每次运行的逐步结果。
 
 ### 9.1 Definition 与步骤
 
@@ -258,8 +258,8 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 
 | 能力 | 入口 / 接口 | 说明 |
 |---|---|---|
-| 定义存储 | `ai_jobs.target_json` 里 `{type:"pipeline", definition}` | Definition 与任务名称 / cron / 预授权一起存在同一行，无独立模板实体；按 org+user 隔离 |
-| 定时触发 | `GET|POST /api/ai/jobs`、`PUT|DELETE /api/ai/jobs/{id}` | 任务自带 `cronExpr` / `enabled`，后端映射为 `schedule_triggers` 中 `targetType="job"` 的规则；每分钟扫描、CAS 租约占用（同分钟不重跑、长任务跨分钟不重复），`lastRunAt` / `lastStatus` 回写 |
+| 定义存储 | `jobs.target_json` 里 `{type:"pipeline", definition}` | Definition 与任务名称 / cron / 预授权一起存在同一行，无独立模板实体；按 org+user 隔离 |
+| 定时触发 | `GET|POST /api/jobs`、`PUT|DELETE /api/jobs/{id}` | 任务自带 `cronExpr` / `enabled`，后端映射为 `schedule_triggers` 中 `targetType="job"` 的规则；每分钟扫描、CAS 租约占用（同分钟不重跑、长任务跨分钟不重复），`lastRunAt` / `lastStatus` 回写 |
 | 直接执行 | `POST /api/pipeline/run` | 提交 `{definition}` 后台异步执行，立即返回 `runId`；任务详情页「立即执行」用它跑当前编辑中的 Definition，不写任务执行历史。启动后前端自动建立 SSE 订阅实时刷新流程图，终态自动刷新执行记录 |
 | 编辑与可视化 | `/jobs` | 任务详情下方是 DAG 流程图 + 节点 Inspector（uses/needs/when/retry/with/输出），可切换 JSON 编辑；执行记录里带 `pipelineRunId` 的运行可把状态叠加到流程图；「立即执行」后节点状态随 DAG 层推进实时刷新（头部「运行中…」指示），断流自动降级为拉取最终结果 |
 
@@ -269,7 +269,7 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 
 1. 模型在对话中给出 Definition → 触发一次**整条流程的界面确认**（`run_pipeline` 是写类工具）；或在 `/jobs` 新建任务、选「编排流程」并保存内联 Definition。
 2. Runner 用 `Layers()` 分层执行：缺省 `needs` 保持顺序，显式依赖形成 DAG，同层并发上限 4；每步独立 5 分钟超时、可 `retry`；主流程失败即停，补偿步骤（`on_failure` / `always`）仍可执行；每层结束落一次 `pipeline_runs` 全量快照。
-3. 三类能力由服务端注入：`tool/<name>` 复用现有 AI 工具；`api/<path>` 仅限站内 `/api/*`（自签短期 token + `X-Org-Id`，经内部 `ServeHTTP` 调用）；`llm` 走非流式 `aiChatOnce`。
+3. 三类能力由服务端注入：`tool/<name>` 复用现有 AI 工具；`api/<path>` 仅限站内 `/api/*`（自签短期 token + `X-Org-Id`，经内部 `ServeHTTP` 调用）；`llm` 默认走非流式 `aiChatOnce`，步骤 `with.tools` 写了工具名白名单时改走非流式 Agent 循环（模型最多 5 轮自主调工具，结果回灌后再生成文本）。
 4. 定时规则由 `cron_triggers_runner` 每分钟扫描，命中后由 `triggerJob` 读任务的 `target_json` Definition 执行；执行与请求连接解耦，断连后仍会落库。
 
 ### 9.4 限制条件
@@ -292,20 +292,24 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | `enabled` | 增删改下一分钟生效，无需重启 |
 | `target` | 执行对象：`{type:"ai", prompt}` / `{type:"tool", tool, params?}` / `{type:"interface", method, path, query?, body?}` / `{type:"pipeline", definition}`（Definition 内联，无模板引用） |
 | `prompt` | 老字段兼容：只传 `prompt` 等价于 `target={type:"ai", prompt}`；`ai` 类型必填 |
-| `allowWrite` | 静态预授权清单：写类工具名（如 `notify_user`）或非 GET 的 `api/<path>`（如 `api/tasks`） |
-| `retry` | 失败重试次数 0-3；仅对无写步骤的执行生效，避免重跑写操作 |
+| `allowWrite` | 静态预授权清单：写类工具名（如 `notify_user`）或非 GET 的 `api/<path>`（如 `api/tasks`）。**`ai` 类型下含义不同**：这里是模型唯一可用的工具白名单，填写即视为提前审批通过，只读工具也可填（如 `list_tasks`）；留空则不调用任何工具 |
+| `retry` | 失败重试次数 0-3；仅对无写操作的执行生效（按 `allowWrite` / llm 白名单里是否真含写类工具或非 GET 接口判定），避免重跑写操作 |
 
-**四种执行对象**：`ai`（单 `llm` 步，自动附带本人任务数据与 RAG）、`tool`（单 `tool/<name>` 步）、`interface`（站内 `api/<path>` 单步）、`pipeline`（内联 Definition，支持 DAG / `when` / `retry`）。执行时统一归一化为编排 Definition，由同一个 `runPipeline` 核心运行；步骤结果写入 `pipeline_runs`，任务级结果写入 `ai_job_runs`（含 `targetType`、`pipelineRunId`、`stepsSummary`、`durationMs`）。
+**四种执行对象**：`ai`（单 `llm` 步，自动附带本人任务数据与 RAG；填了 `allowWrite` 则按白名单走 Agent 工具循环）、`tool`（单 `tool/<name>` 步）、`interface`（站内 `api/<path>` 单步）、`pipeline`（内联 Definition，支持 DAG / `when` / `retry`）。执行时统一归一化为编排 Definition，由同一个 `runPipeline` 核心运行；步骤结果写入 `pipeline_runs`，任务级结果写入 `job_runs`（含 `targetType`、`pipelineRunId`、`stepsSummary`、`durationMs`）。
 
-**安全**：定时执行没有界面审批，写操作必须在创建/更新时列入 `allowWrite`；`tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/ai/jobs`、`api/pipeline/*` 一律拒绝；外部 MCP 工具同样按 `allowWrite` 白名单执行。
+**AI 提示词任务的工具循环**：表单「静态预授权」框在 AI 提示词类型下就是工具白名单，模型只能看到清单里的工具，最多 5 轮自主调用（非流式 `tool_calls` → 工具执行 → 结果回灌 → 再生成），上限轮强制输出文本；清单里的写类工具无需再单独授权，工具执行仍走各自的路径沙箱与结果限长，每次调用写审计日志。留空则保持原行为：一次 `aiChatOnce` 生成，prelude 只注入任务数据与 RAG 片段（属于上下文注入，不是工具调用）。上游需支持非流式 function calling；不依赖 `ai.chat.tools` 全局开关。
 
-前端预设 `0 18 * * *`、`0 9 * * *`、`0 9 * * 1`、`0 18 * * 5`、`0 * * * *`。接口：`GET|POST /api/ai/jobs`、`PUT|DELETE /api/ai/jobs/{id}`、`GET /api/ai/jobs/{id}/runs?limit=`。
+**安全**：定时执行没有界面审批，写操作必须在创建/更新时列入 `allowWrite`（`ai` 类型下即工具白名单）；未知工具名、`api/<path>` 条目与 `tool/run_pipeline`、任务自修改工具、`api/ai/chat`、非 GET `api/jobs`、`api/pipeline/*` 一律拒绝；外部 MCP 工具同样按 `allowWrite` 白名单执行。
 
-**全局公共任务**：`ai_jobs.user_id IS NULL`（预置「每日工作总结」`0 18 * * *`）所有用户可见但只读，执行时对所有**已配置邮箱且关系 active** 的用户逐个以本人身份展开（各自任务数据、各自投递）；触发规则用 `org_id=0 / user_id=0` 标记；执行历史对全局任务所有用户可查，私有任务仅归属人可查；`ai_job_runs.output` 只留输出前 4 KB。
+前端预设 `0 18 * * *`、`0 9 * * *`、`0 9 * * 1`、`0 18 * * 5`、`0 * * * *`。接口：`GET|POST /api/jobs`、`PUT|DELETE /api/jobs/{id}`、`GET /api/jobs/{id}/runs?limit=`。
+
+**全局公共任务**：`jobs.user_id IS NULL`（预置「每日工作总结」`0 18 * * *`）所有用户可见但只读，执行时对所有**已配置邮箱且关系 active** 的用户逐个以本人身份展开（各自任务数据、各自投递）；触发规则用 `org_id=0 / user_id=0` 标记；执行历史对全局任务所有用户可查，私有任务仅归属人可查；`job_runs.output` 只留输出前 4 KB。
 
 **通知链路**：`schedule.enabled` 开启后 `cron_triggers_runner` 每分钟扫描 `schedule_triggers`；命中任务经事件总线 `user.notify`（成功/失败）或 `task.due` / `task.reminder` 分发，邮件订阅者用 SMTP 587 STARTTLS 投递给任务归属用户邮箱。收件邮箱在 `/admin` 填写，或移动端「我的」页自助修改（空串 = 不再接收）；`EMAIL_PASS` 提供授权码。
 
-**限制**：`notify.email.enabled` 必须配合 `schedule.enabled`，且 `host`/`user` 必填（缺失启动即失败）；未配置 `site_url` 时邮件不含跳转链接；去重发生在发布事件之前，`task.due`/`task.reminder` 当天只投一次且 **SMTP 失败不重投**；`user.notify` 不去重；定时任务总超时 15 分钟（单步 5 分钟），prompt 最多附带 50 条任务；`params` / `query` / `body` 支持 `{{run.date}}`、`{{run.datetime}}`、`{{params.*}}` 展开。
+**结果邮件排版**：定时任务结果（`user.notify` 且带 `JobName`）的正文可能是 HTML 片段、工具输出、JSON 或纯文本，投递前由 `aiChatCompletion` 按排版提示词整理成语义化 HTML 片段，经 `sanitizeAIHTML` 白名单消毒后嵌入**信件式模板**（品牌标识 / `{{.UserName}}` 问候 / 正文 / 落款 / 页脚）。信件外框与样式由代码固定，模型只负责正文版式；纯文本部分由 `htmlToPlainText` 从同一份 HTML 提取。`notify_user` 短通知、任务到期/时刻提醒，以及排版失败或未配置 AI 时的降级邮件，仍用卡片式模板 + `mdToHTML`。原型稿见 `docs/email-template-preview.html`。
+
+**限制**：`notify.email.enabled` 必须配合 `schedule.enabled`，且 `host`/`user` 必填（缺失启动即失败）；未配置 `site_url` 时邮件不含跳转链接，AI 也不会生成站内链接；去重发生在发布事件之前，`task.due`/`task.reminder` 当天只投一次且 **SMTP 失败不重投**；`user.notify` 不去重；定时任务总超时 15 分钟（单步 5 分钟），prompt 最多附带 50 条任务；`params` / `query` / `body` 支持 `{{run.date}}`、`{{run.datetime}}`、`{{params.*}}` 展开。AI 排版单次超时 60 秒，失败降级为卡片式模板（邮件照发）；消毒层只放行语义标签、丢弃 `style`/`class`/脚本/图片/表单，链接仅允许 `site_url` 同域（外链降级为纯文字）；定时任务结果邮件消耗 2 次 LLM 调用（内容生成 + 排版）。
 
 ## 11. 用户与组织管理（`/admin`）
 
@@ -371,13 +375,15 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | 关闭面板/断网后回答丢了 | 服务端后台 run 仍会跑完；刷新后会自动按 runId 恢复，也可查 `GET /api/ai/runs` |
 | 编排里写步骤失败 | 该工具名或非 GET 的 api 路径未写进 `allowWrite`；补上后重新执行 |
 | 编排结果太长看不到完整输出 | 工具只回步骤摘要，用 `GET /api/pipeline/runs/{id}` 查每步完整输出 |
-| 打开 `/jobs?id=6` 提示任务不存在 | 任务按 org+user 隔离，当前身份下不存在该 id（`40401`）。先看 `GET /api/ai/jobs` 列表，清掉地址栏残留的 `?id=` 再打开 |
+| 打开 `/jobs?id=6` 提示任务不存在 | 任务按 org+user 隔离，当前身份下不存在该 id（`40401`）。先看 `GET /api/jobs` 列表，清掉地址栏残留的 `?id=` 再打开 |
 | 编排型任务到点没执行 | 依次查 `schedule.enabled`、`cronExpr` 合法性、任务 `enabled`、`lastRunAt` / `lastStatus`、任务是否已被删除或改归属；任务增删改下一分钟生效 |
 | 刷新后 AI 回复停在半截或显示 `⚠ Error in input stream` | 现行实现按 runId 以 `offset` 游标增量续着输出；若是修复前已落库的占位消息，点「重新生成」或删除该条 |
 | 删掉的文件仍被 AI 检索/引用 | 多为绕过接口删除留下的孤儿索引；执行一次 `POST /api/ai/reindex` 即会按 owner 清掉，详见 [`05-operations.md`](05-operations.md#53-全量重建会清理孤儿索引) |
 | 上传成功但文件树看不到 | 命中 `server.hidden`，查看上传响应 `hiddenNames` |
 | 多设备编辑任务提示冲突 | `baseRevision` 落后（40901），在字段级对比卡选择保留本地或服务端值 |
 | 收不到提醒邮件 | 见 [`05-operations.md`](05-operations.md#9-常见运维问题) 的排查顺序 |
+| 定时任务邮件变成卡片式 / 正文排版乱 | AI 排版器未配置或超时降级：查 `ai.chat.api_key`/`base_url`、日志 `email notify: AI format failed` 与上游非流式生成；降级不影响投递 |
+| 邮件里的外链变成纯文字 | 消毒层只放行 `site_url` 同域链接（防钓鱼/编造），属预期行为 |
 | token 疑似泄漏 | 轮换 `app_secrets` 的 token 密钥并重启，全部用户重新登录 |
 | 移动端找不到上传/分享管理/用户管理 | 设计如此，复杂操作在 PC 端完成 |
 | 构建报 `no such module: fts5` | 见 [`04-build-and-release.md`](04-build-and-release.md#9-常见构建故障) |
@@ -395,12 +401,12 @@ Workbench 是个人开发工作台，交付形态为**一个 Go 二进制**：Vu
 | HITL 审批 | 写类工具执行前需用户在独立请求中确认 |
 | 后台 run / runId | 一次 `/api/ai/chat` 的后台执行实体与标识；断连后按此轮询恢复 |
 | Definition / Step | 编排的纯数据定义（`name`/`allowWrite`/`steps`）与单个步骤（`id`/`uses`/`needs`/`when`/`retry`/`with`） |
-| 内联 Definition | 编排流程的纯数据定义，存在 `ai_jobs.target_json` 里，与 cron / 启停 / 预授权同属一条任务 |
+| 内联 Definition | 编排流程的纯数据定义，存在 `jobs.target_json` 里，与 cron / 启停 / 预授权同属一条任务 |
 | 通用触发规则（`schedule_triggers`） | `target_type + target_id + cron` 的调度对象，定时任务由装配层写入 `target_type="job"` 的规则 |
 | DAG / `Layers()` | 按 `needs` 拓扑分层、同层并行的编排执行模型 |
 | `needs` / `when` / `retry` | 步骤依赖、执行条件（默认 `on_success`）与失败重试次数 |
 | `offset` / `delta` | 后台 run 详情接口的增量游标与本次新增正文 |
-| `allowWrite` | 编排与定时执行中对写类工具、非 GET api 步骤的显式预授权清单 |
+| `allowWrite` | 编排与定时执行中对写类工具、非 GET api 步骤的显式预授权清单；在 `ai` 类型的定时任务里是模型唯一可用的工具白名单（填写即预授权，留空不调工具） |
 | `target` | 定时任务的执行对象：`ai` / `tool` / `interface` / `pipeline`，执行时归一化为编排 Definition |
-| 全局公共任务 | `ai_jobs.user_id IS NULL` 的只读任务，执行时对所有有邮箱用户展开；触发规则用 org/user=0 标记 |
+| 全局公共任务 | `jobs.user_id IS NULL` 的只读任务，执行时对所有有邮箱用户展开；触发规则用 org/user=0 标记 |
 | `__spa__` | `routes` 配置值，表示该路径返回内嵌 SPA 入口 `index.html` |

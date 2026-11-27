@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"strconv"
-	"time"
 )
 
 // encodeTaskFiles 序列化任务关联文件列表为 JSON 数组字符串（SQLite TEXT 列）。
@@ -215,28 +214,22 @@ func (d *DB) GetTaskByID(ctx context.Context, orgID, userID int64, taskID string
 	return t, true, nil
 }
 
-// truncateRunes 按 rune 截断字符串（防止多字节中文被截出乱码），超长追加省略号
-func truncateRunes(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
+// makeContentPreview 生成列表摘要：正文不超过 n 个 rune 时返回空串（短正文原文
+// 不下发，避免列表响应携带详情内容），超长时按 rune 截断（防中文乱码）并追加省略号。
+func makeContentPreview(s string, n int) string {
 	runes := []rune(s)
 	if len(runes) <= n {
-		return s
+		return ""
 	}
 	return string(runes[:n]) + "…"
 }
 
 // taskPreviewLen 列表响应中正文预览的最大 rune 数
-const taskPreviewLen = 80
+const taskPreviewLen = 24
 
 // GetTasksJSONByOwner 获取指定用户的任务（供 /api/tasks GET 使用）。
 // 响应结构：orgs.{orgId}.{userId} = {revision, tasks}——revision 是乐观锁基准。
 func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[string]interface{}, error) {
-	result := map[string]interface{}{
-		"version":     "1.0",
-		"lastUpdated": time.Now().Format(time.RFC3339),
-	}
 	orgsMap := make(map[string]map[string]interface{})
 
 	rows, err := d.conn.QueryContext(ctx, `
@@ -276,12 +269,12 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 		}
 		if taskID.Valid {
 			// 列表瘦身：不传 content 全文（TaskItem.Content 已 omitempty，置空即省略），
-			// 用截断预览替代（看板卡片/列表项展示用）；编辑/详情场景走 GET /api/tasks/{id}
+			// 长正文只给截断预览，短正文不下发；编辑/详情场景走 GET /api/tasks/{id}
 			orgUsers[orgKey][userKey].tasks = append(orgUsers[orgKey][userKey].tasks, TaskItem{
 				ID:             FlexString(taskID.String),
 				Title:          taskTitle.String,
 				Content:        "",
-				ContentPreview: truncateRunes(taskContent.String, taskPreviewLen),
+				ContentPreview: makeContentPreview(taskContent.String, taskPreviewLen),
 				Status:         taskStatus.String,
 				Priority:       taskPriority.String,
 				Scheduled:      taskScheduled.String,
@@ -312,6 +305,5 @@ func (d *DB) GetTasksJSONByOwner(ctx context.Context, orgID, userID int64) (map[
 		}
 		orgsMap[orgKey] = usersMap
 	}
-	result["orgs"] = orgsMap
-	return result, nil
+	return map[string]interface{}{"orgs": orgsMap}, nil
 }

@@ -209,7 +209,7 @@ var aiTools = []aiTool{
 		Exec: execListEvents,
 	},
 	{
-		Name: "list_ai_jobs",
+		Name: "list_jobs",
 		Desc: "查看当前用户的 AI 定时任务列表（名称/cron/启用状态/最近执行，含系统公共任务）",
 		Params: map[string]any{
 			"type":       "object",
@@ -218,8 +218,8 @@ var aiTools = []aiTool{
 		Exec: execListAIJobs,
 	},
 	{
-		Name: "create_ai_job",
-		Desc: "创建一条定时任务：到点后执行 AI 提示词、单个工具、站内接口或编排流程，并邮件通知你（执行前需要用户在界面上确认）",
+		Name: "create_job",
+		Desc: "创建一条定时任务：到点后执行 AI 提示词、单个工具、站内接口或编排流程，并邮件通知你（创建动作需要用户在界面上确认；确认后即启用，cron 到点自动执行，没有单独的「批准执行」步骤，最小粒度分钟、增删改下一分钟生效）。AI 提示词类型（target.type=ai 或只传 prompt）把工具名填进 allowWrite，任务运行时模型即可自主调用这些工具（最多 5 轮），无需改成 pipeline 类型",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -233,20 +233,20 @@ var aiTools = []aiTool{
 				},
 				"prompt": map[string]any{
 					"type":        "string",
-					"description": "AI 提示词（target 缺省时必填；提供 target 时可省略）",
+					"description": "AI 提示词（target 缺省时必填；提供 target 时可省略）。配合 allowWrite 工具白名单，任务运行时模型可自主调用工具",
 				},
 				"target": map[string]any{
 					"type":        "object",
-					"description": "执行对象（可选，替代 prompt）：{type: ai|tool|interface|pipeline, prompt?, tool?, path?, method?, query?, body?, definition?, params?}",
+					"description": "执行对象（可选，替代 prompt）：{type: ai|tool|interface|pipeline, ...}；ai=AI 提示词（配 allowWrite 可自主调工具），tool=单个工具，interface=站内接口，pipeline=内联编排（definition 为 {name, steps}，写类工具仍由顶层 allowWrite 预授权）",
 				},
 				"allowWrite": map[string]any{
 					"type":        "array",
 					"items":       map[string]any{"type": "string"},
-					"description": "静态预授权：写类工具名（如 notify_user）或非 GET 的 api/<path>（如 api/tasks）",
+					"description": "ai 类型（含只传 prompt）下是模型唯一可用的工具白名单，填写即视为提前审批通过，只读工具也可填（如 list_tasks），留空则不调任何工具；tool/interface/pipeline 类型下仍是写类工具名（如 notify_user）或非 GET 的 api/<path>（如 api/tasks）的静态预授权",
 				},
 				"retry": map[string]any{
 					"type":        "integer",
-					"description": "失败重试次数 0-3（仅无写步骤时生效）",
+					"description": "失败重试次数 0-3（仅无写操作时生效；只填只读工具白名单仍可重试）",
 				},
 			},
 			"required": []string{"name", "cronExpr"},
@@ -255,12 +255,12 @@ var aiTools = []aiTool{
 		Exec:         execCreateAIJob,
 	},
 	{
-		Name: "update_ai_job",
-		Desc: "更新当前用户的 AI 定时任务（只更新提供的字段；执行前需要用户在界面上确认）",
+		Name: "update_job",
+		Desc: "更新当前用户的 AI 定时任务（只更新提供的字段；执行前需要用户在界面上确认）。修改 AI 提示词类型的 allowWrite 即修改该任务运行时可自主调用的工具白名单",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"jobId":    map[string]any{"type": "integer", "description": "任务 ID（可用 list_ai_jobs 查询），必填"},
+				"jobId":    map[string]any{"type": "integer", "description": "任务 ID（可用 list_jobs 查询），必填"},
 				"name":     map[string]any{"type": "string", "description": "新名称"},
 				"cronExpr": map[string]any{"type": "string", "description": "新 cron 表达式（分 时 日 月 周）"},
 				"prompt":   map[string]any{"type": "string", "description": "新 AI 提示词"},
@@ -271,9 +271,9 @@ var aiTools = []aiTool{
 				"allowWrite": map[string]any{
 					"type":        "array",
 					"items":       map[string]any{"type": "string"},
-					"description": "静态预授权清单（覆盖原值）",
+					"description": "静态预授权清单（覆盖原值）；ai 类型下同时是任务运行时模型唯一可用的工具白名单，填写即预授权，留空则不调工具",
 				},
-				"retry":   map[string]any{"type": "integer", "description": "失败重试次数 0-3（仅无写步骤时生效）"},
+				"retry":   map[string]any{"type": "integer", "description": "失败重试次数 0-3（仅无写操作时生效）"},
 				"enabled": map[string]any{"type": "boolean", "description": "启用/停用"},
 			},
 			"required": []string{"jobId"},
@@ -282,12 +282,12 @@ var aiTools = []aiTool{
 		Exec:         execUpdateAIJob,
 	},
 	{
-		Name: "delete_ai_job",
+		Name: "delete_job",
 		Desc: "删除当前用户的 AI 定时任务（执行前需要用户在界面上确认）",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"jobId": map[string]any{"type": "integer", "description": "任务 ID（可用 list_ai_jobs 查询），必填"},
+				"jobId": map[string]any{"type": "integer", "description": "任务 ID（可用 list_jobs 查询），必填"},
 			},
 			"required": []string{"jobId"},
 		},
@@ -341,7 +341,7 @@ var aiTools = []aiTool{
 func pipelineTool() aiTool {
 	return aiTool{
 		Name: "run_pipeline",
-		Desc: "按依赖编排执行一组能力：每步可以是现有 AI 工具、站内 API 或 LLM 生成。字符串参数支持 {{ steps.<id>.output }} 引用上一步输出；steps[].needs 声明依赖（缺省=依赖前一步即顺序执行，显式 []=无依赖可并行，填 id 列表组成 DAG），主流程失败即停；steps[].when 控制条件（on_success 默认 / on_failure / always，可写失败补偿步骤），steps[].retry 指定失败重试次数（0-5）。整条流程只需一次界面确认；写类工具与非 GET 的 api 步骤必须在 allowWrite 里显式授权。执行状态写入 pipeline_runs，可用 GET /api/pipeline/runs/{id} 查每步完整输出",
+		Desc: "按依赖编排执行一组能力：每步可以是现有 AI 工具、站内 API 或 LLM 生成。字符串参数支持 {{ steps.<id>.output }} 引用上一步输出；steps[].needs 声明依赖（缺省=依赖前一步即顺序执行，显式 []=无依赖可并行，填 id 列表组成 DAG），主流程失败即停；steps[].when 控制条件（on_success 默认 / on_failure / always，可写失败补偿步骤），steps[].retry 指定失败重试次数（0-5）。整条流程只需一次界面确认；写类工具与非 GET 的 api 步骤必须在 allowWrite 里显式授权。执行状态写入 pipeline_runs，可用 GET /api/pipeline/runs/{id} 查每步完整输出；传 jobId 可把本次执行同时写入该任务的运行历史（不读取任务 Definition）",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -350,6 +350,10 @@ func pipelineTool() aiTool {
 					"type":        "array",
 					"items":       map[string]any{"type": "string"},
 					"description": "显式授权：写类工具名（如 reindex_files），或非 GET 的 api 步骤（如 api/tasks）",
+				},
+				"jobId": map[string]any{
+					"type":        "integer",
+					"description": "可选：关联一个已有的定时任务（只能关联自己的），本次执行会写入该任务的运行历史；不读取任务本身的 Definition",
 				},
 				"steps": map[string]any{
 					"type": "array",
@@ -372,7 +376,7 @@ func pipelineTool() aiTool {
 								"description": "失败重试次数 0-5，按 200ms×次数退避",
 							},
 							"uses": map[string]any{"type": "string", "description": "tool/<工具名> | api/<站内 api 路径，如 ai/reindex/status> | llm"},
-							"with": map[string]any{"type": "object", "description": "步骤参数；llm 用 prompt，api 可用 method/body，字符串值支持 {{ steps.<id>.output }}"},
+							"with": map[string]any{"type": "object", "description": "步骤参数；llm 用 prompt，可选 tools 传工具名白名单让该步自主调工具（最多 5 轮）；api 可用 method/body，字符串值支持 {{ steps.<id>.output }}"},
 						},
 						"required": []string{"id", "uses"},
 					},
@@ -382,6 +386,25 @@ func pipelineTool() aiTool {
 		},
 		NeedApproval: true,
 		Exec:         execRunPipeline,
+	}
+}
+
+// runJobTool 运行时合成的任务触发工具。不能放进 aiTools 包级注册表：
+// aiTools → execRunJob → RunJobNow → ... → aiToolByName → allTools → aiTools
+// 会构成 Go 包级初始化循环（与 run_pipeline 同理）。
+func runJobTool() aiTool {
+	return aiTool{
+		Name: "run_job",
+		Desc: "立即执行一次已有的定时任务：按 jobId 读取其当前 Definition，执行并写入该任务的运行历史，同时按任务配置发送通知。只能触发自己的任务；全局公共任务按调用者身份执行一次，不会展开给其他用户",
+		Params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"jobId": map[string]any{"type": "integer", "description": "任务 ID（可用 list_jobs 查询），必填"},
+			},
+			"required": []string{"jobId"},
+		},
+		NeedApproval: true,
+		Exec:         execRunJob,
 	}
 }
 
@@ -399,6 +422,57 @@ func aiToolsPayload(tools []aiTool) []map[string]any {
 		})
 	}
 	return payloads
+}
+
+// summarizeToolArgs 日志用的参数摘要：只保留排障定位需要的短字段，
+// 正文类参数（notify_user 的 body、write_file 的 content）与编排 Definition
+// 一律只打字节数/步骤数，避免单条日志几 KB。
+func summarizeToolArgs(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(raw), &m) != nil {
+		return fmt.Sprintf("%d bytes", len(raw))
+	}
+	var parts []string
+	for _, k := range []string{"query", "path", "subject", "prompt"} {
+		if v, ok := m[k].(string); ok && v != "" {
+			parts = append(parts, fmt.Sprintf("%s=%q", k, truncateStr(v, 120)))
+		}
+	}
+	for _, k := range []string{"jobId", "taskId", "topK", "numResults"} {
+		if v, ok := m[k]; ok {
+			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+		}
+	}
+	for _, k := range []string{"body", "content"} {
+		if v, ok := m[k].(string); ok {
+			parts = append(parts, fmt.Sprintf("%s_bytes=%d", k, len(v)))
+		}
+	}
+	if arr, ok := m["steps"].([]any); ok {
+		ids := make([]string, 0, len(arr))
+		for _, it := range arr {
+			if step, ok := it.(map[string]any); ok {
+				if id, _ := step["id"].(string); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+		if len(ids) > 5 {
+			ids = append(ids[:5], "…")
+		}
+		if len(ids) > 0 {
+			parts = append(parts, fmt.Sprintf("steps=%d[%s]", len(arr), strings.Join(ids, ",")))
+		} else {
+			parts = append(parts, fmt.Sprintf("steps=%d", len(arr)))
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("%d bytes", len(raw))
+	}
+	return strings.Join(parts, " ")
 }
 
 // execAITool 分发执行一次工具调用：
@@ -423,7 +497,14 @@ func (s *Server) execAITool(ctx iris.Context, call aiToolCall) (result any) {
 		}
 	}
 
-	slog.Info("ai tool call", "user", currentUserID(ctx), "tool", tool.Name, "args", call.Function.Arguments)
+	// 读类/检索类调用高频且无副作用，降为 Debug；写操作与编排保留 Info，
+	// 避免定时任务每轮检索刷屏（一次补跑可产生数十条）。
+	level := slog.LevelDebug
+	if tool.NeedApproval && !strings.HasPrefix(tool.Name, "mcp_") {
+		level = slog.LevelInfo
+	}
+	slog.Log(ctx, level, "ai tool call", "org", currentOrgID(ctx), "user", currentUserID(ctx),
+		"tool", tool.Name, "args", summarizeToolArgs(call.Function.Arguments))
 
 	result = tool.Exec(s, ctx, args)
 	if b, err := json.Marshal(result); err == nil && len(b) > aiToolMaxResult {
@@ -512,7 +593,7 @@ func execReadFile(s *Server, ctx iris.Context, args map[string]any) any {
 
 // execSearchFiles 语义检索用户文件（RAG）：query → 向量 KNN → 片段列表
 // （含路径与起始行号）。片段自带原文，不会像 read_file 全文那样撞截断；
-// 命中为空提示模型换关键词重试。
+// 命中为空明确要求停止检索，避免模型换关键词反复试探。
 func execSearchFiles(s *Server, ctx iris.Context, args map[string]any) any {
 	if s.rag == nil {
 		return map[string]any{"error": "RAG not enabled (ai.embedding not configured)"}
@@ -531,7 +612,7 @@ func execSearchFiles(s *Server, ctx iris.Context, args map[string]any) any {
 		return map[string]any{"error": "search failed: " + err.Error()}
 	}
 	if len(hits) == 0 {
-		return map[string]any{"ok": true, "hits": []any{}, "hint": "无命中，换关键词重试"}
+		return map[string]any{"ok": true, "hits": []any{}, "hint": "无命中：停止检索，直接说明未找到"}
 	}
 	// 片段截断：topK=10 全中文长块会逼近 32KB 工具结果上限（截断=整个结果变错误提示）
 	const quoteMax = 500
@@ -661,6 +742,22 @@ func newAITaskID() string {
 // ============================================================
 
 // execListAIJobs 列出当前用户的定时任务（含全局公共任务，标注只读）
+// execRunJob 手动触发一次已有任务；审批由工具 NeedApproval 负责。
+func execRunJob(s *Server, ctx iris.Context, args map[string]any) any {
+	jobID := aiJobIDFromArgs(args["jobId"])
+	if jobID <= 0 {
+		return map[string]any{"error": "jobId is required"}
+	}
+	if err := s.RunJobNow(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), jobID); err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	return map[string]any{
+		"ok":    true,
+		"jobId": jobID,
+		"note":  "执行记录已写入任务运行历史，结果通知已投递",
+	}
+}
+
 func execListAIJobs(s *Server, ctx iris.Context, args map[string]any) any {
 	jobs, err := s.db.ListAIJobs(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx))
 	if err != nil {
@@ -728,7 +825,14 @@ func execCreateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if b == nil {
 		return map[string]any{"error": msg}
 	}
-	id, err := s.db.CreateAIJobWithSpec(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), aiJobSpecFromBody(b))
+	spec := aiJobSpecFromBody(b)
+	preview := aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))
+	if err := s.normalizeTargetToPipeline(aiToolRunCtx(ctx), &preview); err != nil {
+		return map[string]any{"error": "invalid target: " + err.Error()}
+	}
+	spec.TargetType = preview.TargetType
+	spec.TargetJSON = string(preview.Target)
+	id, err := s.db.CreateAIJobWithSpec(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), spec)
 	if err != nil {
 		return map[string]any{"error": "create ai job failed"}
 	}
@@ -799,7 +903,14 @@ func execUpdateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if msg := validateAIJobBody(merged); msg != "" {
 		return map[string]any{"error": msg}
 	}
-	if err := s.db.UpdateAIJobWithSpec(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), aiJobSpecFromBody(merged)); err != nil {
+	spec := aiJobSpecFromBody(merged)
+	preview := aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))
+	if err := s.normalizeTargetToPipeline(aiToolRunCtx(ctx), &preview); err != nil {
+		return map[string]any{"error": "invalid target: " + err.Error()}
+	}
+	spec.TargetType = preview.TargetType
+	spec.TargetJSON = string(preview.Target)
+	if err := s.db.UpdateAIJobWithSpec(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), spec); err != nil {
 		return map[string]any{"error": "update ai job failed"}
 	}
 	if err := s.upsertAIJobTrigger(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), merged.CronExpr, *merged.Enabled); err != nil {

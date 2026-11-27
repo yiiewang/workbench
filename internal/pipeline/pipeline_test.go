@@ -111,7 +111,7 @@ func TestRunnerSequenceAndFailure(t *testing.T) {
 	}}
 	var seen []string
 	var snapshots [][]StepResult
-	runner := NewRunner(func(_ context.Context, _, _ string, args map[string]any, _ *RunContext) (any, error) {
+	runner := NewRunner(func(_ context.Context, _, _, _ string, args map[string]any, _ *RunContext) (any, error) {
 		p, _ := args["prompt"].(string)
 		seen = append(seen, p)
 		if strings.Contains(p, "上一步") {
@@ -150,7 +150,7 @@ func TestRunnerParallelAndInterpolation(t *testing.T) {
 			With: map[string]any{"prompt": "{{ steps.a.output }} + {{ steps.b.output }}"}},
 	}}
 	var joinPrompt string
-	runner := NewRunner(func(_ context.Context, _, _ string, args map[string]any, _ *RunContext) (any, error) {
+	runner := NewRunner(func(_ context.Context, _, _, _ string, args map[string]any, _ *RunContext) (any, error) {
 		p, _ := args["prompt"].(string)
 		if strings.Contains(p, "+") {
 			joinPrompt = p
@@ -179,11 +179,12 @@ func TestRunnerParallelAndInterpolation(t *testing.T) {
 }
 
 func TestRunnerStepTimeout(t *testing.T) {
-	runner := NewRunner(func(ctx context.Context, _, _ string, _ map[string]any, _ *RunContext) (any, error) {
+	runner := NewRunner(func(ctx context.Context, _, _, _ string, _ map[string]any, _ *RunContext) (any, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}, nil)
 	runner.StepTimeout = 5 * time.Millisecond
+	runner.LLMStepTimeout = 5 * time.Millisecond
 	_, err := runner.Run(context.Background(), Definition{Steps: []Step{{ID: "slow", Uses: "llm"}}}, NewRunContext(1, 2))
 	if err == nil {
 		t.Fatal("want step timeout failure")
@@ -222,7 +223,7 @@ func TestRunnerWhenAndRetry(t *testing.T) {
 		{ID: "cleanup", Uses: "llm", Needs: []string{"main"}, When: "always", With: mk("cleanup")},
 		{ID: "flaky", Uses: "llm", Needs: []string{"main"}, When: "always", Retry: 2, With: mk("flaky")},
 	}}
-	exec := func(_ context.Context, _, _ string, args map[string]any, _ *RunContext) (any, error) {
+	exec := func(_ context.Context, _, _, _ string, args map[string]any, _ *RunContext) (any, error) {
 		tag, _ := args["tag"].(string)
 		if tag == "main" {
 			return nil, errors.New("boom")
@@ -255,7 +256,7 @@ func TestRunnerOnFailureSkippedWhenSuccess(t *testing.T) {
 		{ID: "notify", Uses: "llm", Needs: []string{"a"}, When: "on_failure"},
 		{ID: "always", Uses: "llm", Needs: []string{"a"}, When: "always"},
 	}}
-	results, err := NewRunner(func(_ context.Context, _, _ string, _ map[string]any, _ *RunContext) (any, error) {
+	results, err := NewRunner(func(_ context.Context, _, _, _ string, _ map[string]any, _ *RunContext) (any, error) {
 		return "ok", nil
 	}, nil).Run(context.Background(), def, NewRunContext(1, 2))
 	if err != nil {
@@ -263,5 +264,50 @@ func TestRunnerOnFailureSkippedWhenSuccess(t *testing.T) {
 	}
 	if results[0].Status != "ok" || results[1].Status != "skipped" || results[2].Status != "ok" {
 		t.Fatalf("unexpected results: %+v", results)
+	}
+}
+
+func TestRunnerOnAttemptPerRetry(t *testing.T) {
+	var attempts []string
+	runner := NewRunner(func(context.Context, string, string, string, map[string]any, *RunContext) (any, error) {
+		return nil, errors.New("boom")
+	}, nil)
+	runner.OnAttempt = func(sr StepResult) { attempts = append(attempts, sr.Error) }
+	_, err := runner.Run(context.Background(),
+		Definition{Steps: []Step{{ID: "s1", Uses: "llm", Retry: 2}}}, NewRunContext(1, 2))
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if len(attempts) != 3 || attempts[0] != "attempt 1/3" || attempts[2] != "attempt 3/3" {
+		t.Fatalf("attempts = %v", attempts)
+	}
+}
+
+func TestRunnerLLMStepTimeout(t *testing.T) {
+	var llmDeadline, toolDeadline time.Duration
+	runner := NewRunner(func(ctx context.Context, _, kind, _ string, _ map[string]any, _ *RunContext) (any, error) {
+		if d, ok := ctx.Deadline(); ok {
+			if kind == "llm" {
+				llmDeadline = time.Until(d)
+			} else {
+				toolDeadline = time.Until(d)
+			}
+		}
+		return "ok", nil
+	}, nil)
+	runner.StepTimeout = 100 * time.Millisecond
+	runner.LLMStepTimeout = time.Second
+	_, err := runner.Run(context.Background(), Definition{Steps: []Step{
+		{ID: "a", Uses: "llm"},
+		{ID: "b", Uses: "tool/x", Needs: []string{"a"}},
+	}}, NewRunContext(1, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if llmDeadline < 500*time.Millisecond {
+		t.Fatalf("llm deadline = %v, want ~1s", llmDeadline)
+	}
+	if toolDeadline >= 500*time.Millisecond {
+		t.Fatalf("tool deadline = %v, want ~100ms", toolDeadline)
 	}
 }

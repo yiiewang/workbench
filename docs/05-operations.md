@@ -42,7 +42,7 @@
 | `PORT` / `STATIC_DIR` / `DB_PATH` / `LOG_DIR` | 端口 / 用户文件目录 / 数据库路径 / 日志目录 |
 | `ALLOW_SYMLINK` | `server.allow_symlink`（`true` 或 `1`） |
 | `ADMIN_SETUP_TOKEN` | `auth.admin_setup_token` |
-| `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` / `AI_TOOLS` | `ai.chat.*` |
+| `AI_API_KEY` / `AI_DEFAULT_GATEWAY` / `AI_TOOLS` / `AI_THINKING` | `ai.chat.gateways[].api_key` / `ai.chat.default` / `ai.chat.tools` / `ai.chat.thinking` |
 | `AI_EMBEDDING_BASE_URL` / `AI_EMBEDDING_API_KEY` / `AI_EMBEDDING_MODEL` / `AI_EMBEDDING_DIM` / `AI_EMBEDDING_MAX_DISTANCE` / `AI_EMBEDDING_JUDGE_MODEL` / `AI_EMBEDDING_DIGEST_MODEL` | `ai.embedding.*` |
 | `WORKBENCH_SITE_URL` | `site_url` |
 | `EMAIL_PASS` | SMTP 授权码（不经过配置结构） |

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 定时任务侧栏：任务列表（名称 + cron + 启用状态点），点击在主区域打开。
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listAIJobs, type AIJob } from '../../api/aiJobs'
 
@@ -35,7 +35,9 @@ async function load() {
 // 主区域增删改后刷新列表
 function onChanged() { load() }
 window.addEventListener('aijobs:changed', onChanged)
-onMounted(() => { syncFromRoute(); load() })
+// 路由 query 变化时同步高亮（点击列表项只改 query，不重新挂载组件）
+watch(() => route.query.id, syncFromRoute, { immediate: true })
+onMounted(load)
 onUnmounted(() => window.removeEventListener('aijobs:changed', onChanged))
 </script>
 
@@ -80,9 +82,12 @@ onUnmounted(() => window.removeEventListener('aijobs:changed', onChanged))
 .aijobs-s-item {
   display: flex; align-items: flex-start; gap: 8px; padding: 8px;
   border-radius: 8px; cursor: pointer;
+  transition: background .15s, box-shadow .15s;
 }
 .aijobs-s-item:hover { background: var(--code-bg); }
-.aijobs-s-item.active { background: var(--code-bg); }
+/* 选中态与 AI 会话列表（.ai-session-item.current）保持一致：
+   浅底 + 1px accent 描边；用 inset 阴影画描边，避免加 border 造成尺寸抖动 */
+.aijobs-s-item.active { background: var(--active, #e4e6f1); box-shadow: inset 0 0 0 1px var(--accent); }
 .aijobs-s-item.off { opacity: .5; }
 .aijobs-s-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
 .aijobs-s-dot.on { background: #2e7d32; }

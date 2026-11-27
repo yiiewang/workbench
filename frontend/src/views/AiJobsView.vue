@@ -1,55 +1,41 @@
 <script setup lang="ts">
 // AI 定时任务主区域：选中任务（route query id）的详情编辑 + 执行历史。
 // 任务列表在侧栏（AiJobsSidebar），选中经 route query ?id= 同步。
+// 表单校验/提交体与执行记录轮询分别在 composables/useAIJobForm、useJobRuns。
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { listAIJobs, listAIJobRuns, createAIJob, updateAIJob, deleteAIJob, type AIJob, type AIJobRun } from '../api/aiJobs'
+import {
+  listAIJobs, createAIJob, updateAIJob, deleteAIJob, runAIJob, type AIJob,
+} from '../api/aiJobs'
 import {
   runPipeline, getPipelineRun, streamPipelineRun,
   type PipelineStepResult, type PipelineGraphStep,
 } from '../api/pipelines'
-import { showToast } from '../lib/common'
+import { showToast, errMsg, prettyJson } from '../lib/common'
+import { useAIJobForm, emptyAIJobForm, CRON_PRESETS } from '../composables/useAIJobForm'
+import { useJobRuns } from '../composables/useJobRuns'
 import PipelineGraph from '../components/pipeline/PipelineGraph.vue'
 
 const route = useRoute()
 const router = useRouter()
 
 const jobs = ref<AIJob[]>([])
-const runs = ref<AIJobRun[]>([])
-const runsLoading = ref(false)
 const saving = ref(false)
 
-type TargetType = 'ai' | 'tool' | 'interface' | 'pipeline'
-
-const form = ref({
-  name: '',
-  cronExpr: '',
-  prompt: '',
-  enabled: true,
-  targetType: 'ai' as TargetType,
-  tool: '',
-  toolParams: '',
-  method: 'GET',
-  path: '',
-  query: '',
-  body: '',
-  definition: '',
-  allowWrite: '',
-  retry: 0,
+// 当前选中：'new' = 新建 | 数字 = 编辑 | null = 未选择
+const selected = computed<number | 'new' | null>(() => {
+  const q = route.query.id
+  if (q === 'new') return 'new'
+  const n = Number(q)
+  return q && Number.isFinite(n) && n > 0 ? n : null
 })
-const runsOpen = ref(new Set<number>())
-// 运行中任务的逐步快照：job_runs 先落 running，前端用 pipelineRunId 轮询 pipeline_runs.steps
-const runLiveSteps = ref<Record<number, PipelineStepResult[] | undefined>>({})
-const runPollTimers: Record<number, number> = {}
 
-const DEFAULT_DEF = JSON.stringify({
-  name: '索引巡检',
-  allowWrite: [],
-  steps: [
-    { id: 'check', uses: 'tool/reindex_status' },
-    { id: 'summary', uses: 'llm', with: { prompt: '根据 {{ steps.check.output }} 用一句话总结索引状态' } },
-  ],
-}, null, 2)
+const selectedJob = computed(() => (typeof selected.value === 'number' ? jobs.value.find(j => j.id === selected.value) : undefined))
+
+const { form, fillForm, validateForm, buildBody } = useAIJobForm()
+const { runs, runsLoading, runsOpen, loadRuns, runStepList, toggleRun, resetRuns } = useJobRuns(
+  () => (typeof selected.value === 'number' ? selected.value : null),
+)
 
 // 编排可视化：JSON / 流程图切换、节点 Inspector、运行状态叠加
 const showJson = ref(false)
@@ -68,15 +54,12 @@ function stopRunStream() {
   streaming.value = false
 }
 
-onBeforeUnmount(() => {
-  stopRunStream()
-  stopAllRunPolls()
-})
+onBeforeUnmount(stopRunStream)
 
 function pretty(v: unknown): string {
   if (v === undefined || v === null) return '—'
   if (typeof v === 'string') return v
-  return JSON.stringify(v, null, 2)
+  return prettyJson(v)
 }
 const inspectedOutput = computed(() => {
   const r = inspected.value?.result
@@ -109,9 +92,24 @@ async function overlayRun(runId: string) {
 }
 
 async function runNow() {
+  // 已存任务：走 job_runs 记录的执行路径，详情页可轮询到 running/步骤
+  if (typeof selected.value === 'number') {
+    running.value = true
+    try {
+      await runAIJob(selected.value)
+      showToast('已触发，执行状态见下方执行记录')
+      await loadRuns(selected.value)
+    } catch (e: any) {
+      showToast('触发失败：' + (errMsg(e, '')))
+    } finally {
+      running.value = false
+    }
+    return
+  }
+  // 新建任务：用当前表单 Definition 试跑（不写任务历史）
   let def: unknown
   try {
-    def = JSON.parse(form.value.definition || DEFAULT_DEF)
+    def = JSON.parse(form.value.definition || '')
   } catch {
     showToast('Definition 不是合法 JSON')
     return
@@ -144,7 +142,7 @@ async function runNow() {
           runSteps.value = detail.steps
           if (detail.status !== 'running') showToast('实时连接中断，已拉取最终结果')
         } catch {
-          showToast('实时连接中断：' + (e?.message || ''))
+          showToast('实时连接中断：' + (errMsg(e, '')))
         }
       })
       .finally(() => {
@@ -158,138 +156,11 @@ async function runNow() {
         }
       })
   } catch (e: any) {
-    showToast('触发失败：' + (e?.msg || e?.message || ''))
+    showToast('触发失败：' + (errMsg(e, '')))
   } finally {
     running.value = false
   }
 }
-
-function validateForm(): string {
-  if (!form.value.name.trim()) return '任务名称必填'
-  if (!form.value.cronExpr.trim()) return 'cron 表达式必填'
-  switch (form.value.targetType) {
-    case 'ai':
-      if (!form.value.prompt.trim()) return 'AI 提示词必填'
-      break
-    case 'tool':
-      if (!form.value.tool.trim()) return '工具名必填'
-      break
-    case 'interface':
-      if (!form.value.path.trim()) return '接口路径必填'
-      break
-    case 'pipeline':
-      if (!form.value.definition.trim()) return '编排 Definition 必填'
-      break
-  }
-  return ''
-}
-
-function parseJSONField(raw: string, label: string): unknown {
-  const s = raw.trim()
-  if (!s) return undefined
-  try {
-    return JSON.parse(s)
-  } catch {
-    throw new Error(label + ' 不是合法 JSON')
-  }
-}
-
-function buildBody(): any {
-  const allowWrite = form.value.allowWrite.split(',').map(x => x.trim()).filter(Boolean)
-  const common: any = { name: form.value.name.trim(), cronExpr: form.value.cronExpr.trim(), enabled: form.value.enabled, allowWrite, retry: form.value.retry }
-  if (form.value.targetType === 'ai') {
-    const prompt = form.value.prompt.trim()
-    return { ...common, prompt, target: { type: 'ai', prompt } }
-  }
-  switch (form.value.targetType) {
-    case 'tool':
-      return { ...common, target: { type: 'tool', tool: form.value.tool.trim(), params: parseJSONField(form.value.toolParams, '工具参数') } }
-    case 'interface':
-      return {
-        ...common,
-        target: {
-          type: 'interface',
-          method: form.value.method,
-          path: form.value.path.trim(),
-          query: parseJSONField(form.value.query, 'query'),
-          body: parseJSONField(form.value.body, 'body'),
-        },
-      }
-    case 'pipeline':
-      return { ...common, target: { type: 'pipeline', definition: parseJSONField(form.value.definition, 'Definition') } }
-  }
-}
-
-function fillForm(j: AIJob) {
-  const t = j.target
-  const storedType = (j.targetType || t?.type || 'ai') as TargetType
-  const def = t?.definition as any
-  let formType: TargetType = storedType
-  let prompt = t?.prompt || j.prompt || ''
-  let tool = t?.tool || ''
-  let toolParams = t?.params ? JSON.stringify(t.params, null, 2) : ''
-  let method = t?.method || 'GET'
-  let path = t?.path || ''
-  let query = t?.query ? JSON.stringify(t.query, null, 2) : ''
-  let body = t?.body ? JSON.stringify(t.body, null, 2) : ''
-  const definition = t?.definition ? JSON.stringify(t.definition, null, 2) : DEFAULT_DEF
-
-  // 新建/更新统一存 pipeline；单步 Definition 回显成原来的快捷表单，
-  // 编辑体验不变（ai 的 render 元数据随 Definition 保留）。
-  if (storedType === 'pipeline' && Array.isArray(def?.steps) && def.steps.length === 1) {
-    const step = def.steps[0] as any
-    const w = step.with || {}
-    if (step.uses === 'llm' && typeof w.prompt === 'string') {
-      formType = 'ai'
-      prompt = w.prompt
-    } else if (typeof step.uses === 'string' && step.uses.startsWith('tool/')) {
-      formType = 'tool'
-      tool = step.uses.slice(5)
-      toolParams = Object.keys(w).length ? JSON.stringify(w, null, 2) : ''
-    } else if (typeof step.uses === 'string' && step.uses.startsWith('api/')) {
-      formType = 'interface'
-      path = step.uses.slice(4)
-      method = w.method || 'GET'
-      query = w.query ? JSON.stringify(w.query, null, 2) : ''
-      body = w.body ? JSON.stringify(w.body, null, 2) : ''
-    }
-  }
-
-  form.value = {
-    name: j.name,
-    cronExpr: j.cronExpr,
-    prompt,
-    enabled: j.enabled,
-    targetType: formType,
-    tool,
-    toolParams,
-    method,
-    path,
-    query,
-    body,
-    definition,
-    allowWrite: (j.allowWrite || []).join(', '),
-    retry: j.retry || 0,
-  }
-}
-
-const CRON_PRESETS: { label: string; expr: string }[] = [
-  { label: '每天 18:00', expr: '0 18 * * *' },
-  { label: '每天 09:00', expr: '0 9 * * *' },
-  { label: '每周一 09:00', expr: '0 9 * * 1' },
-  { label: '每周五 18:00', expr: '0 18 * * 5' },
-  { label: '每小时整点', expr: '0 * * * *' },
-]
-
-// 当前选中：'new' = 新建 | 数字 = 编辑 | null = 未选择
-const selected = computed<number | 'new' | null>(() => {
-  const q = route.query.id
-  if (q === 'new') return 'new'
-  const n = Number(q)
-  return q && Number.isFinite(n) && n > 0 ? n : null
-})
-
-const selectedJob = computed(() => (typeof selected.value === 'number' ? jobs.value.find(j => j.id === selected.value) : undefined))
 
 async function loadJobs() {
   try {
@@ -298,31 +169,15 @@ async function loadJobs() {
   } catch { /* 静默 */ }
 }
 
-async function loadRuns(id: number) {
-  runsLoading.value = true
-  try {
-    const data = await listAIJobRuns(id)
-    runs.value = data?.runs || []
-  } catch {
-    runs.value = []
-  } finally {
-    runsLoading.value = false
-  }
-}
-
 // 选中变化：new → 空表单；数字 → 填表单 + 拉执行历史
 watch(selected, async (sel) => {
-  runs.value = []
+  resetRuns()
   showJson.value = false
   activeRunId.value = null
   runSteps.value = undefined
   inspected.value = null
   if (sel === 'new') {
-    form.value = {
-      name: '', cronExpr: '0 18 * * *', prompt: '', enabled: true,
-      targetType: 'ai', tool: '', toolParams: '', method: 'GET', path: '',
-      query: '', body: '', definition: DEFAULT_DEF, allowWrite: '', retry: 0,
-    }
+    form.value = emptyAIJobForm()
     return
   }
   if (typeof sel === 'number') {
@@ -362,7 +217,7 @@ async function save() {
     }
     notifyChanged()
   } catch (e: any) {
-    showToast('保存失败：' + (e?.msg || e?.message || ''))
+    showToast('保存失败：' + (errMsg(e, '')))
   } finally {
     saving.value = false
   }
@@ -377,7 +232,7 @@ async function toggle() {
     await loadJobs()
     notifyChanged()
   } catch (e: any) {
-    showToast('操作失败：' + (e?.msg || e?.message || ''))
+    showToast('操作失败：' + (errMsg(e, '')))
   }
 }
 
@@ -392,69 +247,8 @@ async function remove() {
     router.replace({ query: {} })
     await loadJobs()
   } catch (e: any) {
-    showToast('删除失败：' + (e?.msg || e?.message || ''))
+    showToast('删除失败：' + (errMsg(e, '')))
   }
-}
-
-function parseRunSteps(raw?: string): PipelineStepResult[] {
-  if (!raw) return []
-  try {
-    const v = JSON.parse(raw)
-    return Array.isArray(v) ? (v as PipelineStepResult[]) : []
-  } catch {
-    return []
-  }
-}
-
-function runStepList(r: AIJobRun): PipelineStepResult[] {
-  if (r.status === 'running') {
-    const live = runLiveSteps.value[r.id]
-    if (live && live.length) return live
-  }
-  return parseRunSteps(r.stepsSummary)
-}
-
-function stopRunPoll(id: number) {
-  const t = runPollTimers[id]
-  if (t) {
-    clearInterval(t)
-    delete runPollTimers[id]
-  }
-}
-
-function stopAllRunPolls() {
-  for (const id of Object.keys(runPollTimers)) stopRunPoll(Number(id))
-}
-
-async function refreshLiveRun(r: AIJobRun) {
-  if (!r.pipelineRunId) return
-  try {
-    const detail = await getPipelineRun(r.pipelineRunId)
-    runLiveSteps.value = { ...runLiveSteps.value, [r.id]: detail.steps }
-    if (detail.status !== 'running') {
-      stopRunPoll(r.id)
-      if (typeof selected.value === 'number') loadRuns(selected.value)
-    }
-  } catch { /* 轮询失败静默，下一轮再试 */ }
-}
-
-function startRunPoll(r: AIJobRun) {
-  if (!r.pipelineRunId || runPollTimers[r.id]) return
-  refreshLiveRun(r)
-  runPollTimers[r.id] = window.setInterval(() => refreshLiveRun(r), 3000)
-}
-
-function toggleRun(i: number) {
-  const s = new Set(runsOpen.value)
-  const opening = !s.has(i)
-  const r = runs.value[i]
-  if (opening) s.add(i)
-  else {
-    s.delete(i)
-    if (r) stopRunPoll(r.id)
-  }
-  runsOpen.value = s
-  if (opening && r?.status === 'running') startRunPoll(r)
 }
 
 function statusText(j: AIJob): string {
@@ -480,10 +274,11 @@ function statusText(j: AIJob): string {
     <div class="aijobs-head">
       <div class="aijobs-head-main">
         <h2>{{ selected === 'new' ? '新建定时任务' : (form.name || '定时任务') }}</h2>
-        <p v-if="selectedJob" class="aijobs-status">{{ statusText(selectedJob) }}</p>
+        <p v-if="running" class="aijobs-status">正在执行…</p>
+        <p v-else-if="selectedJob" class="aijobs-status">{{ statusText(selectedJob) }}</p>
       </div>
       <div class="aijobs-head-actions">
-        <button v-if="form.targetType === 'pipeline'" class="btn" :disabled="running" @click="runNow">
+        <button class="btn" :disabled="running" @click="runNow">
           {{ running ? '启动中…' : '立即执行' }}
         </button>
         <button
@@ -519,68 +314,14 @@ function statusText(j: AIJob): string {
             </div>
           </div>
           <div class="form-row">
-            <label>任务类型</label>
-            <select v-model="form.targetType" class="form-input" :disabled="selectedJob?.isGlobal">
-              <option value="ai">AI 提示词</option>
-              <option value="tool">单个工具</option>
-              <option value="interface">站内接口</option>
-              <option value="pipeline">编排流程</option>
-            </select>
+            <label>Definition（编排流程，由 AI 生成或手动编辑）</label>
+            <p class="form-hint">流程内联在本任务里；可以切换 JSON 编辑或流程图查看节点依赖与运行状态。</p>
           </div>
 
-          <template v-if="form.targetType === 'ai'">
-            <div class="form-row">
-              <label>执行内容（到点后 AI 收到的指令）</label>
-              <textarea v-model="form.prompt" class="form-input" rows="8"
-                placeholder="如：总结我今天完成的任务和进展，生成一份简短的工作日报，指出明天应优先处理的事项。"></textarea>
-              <p class="form-hint">执行时 AI 会自动附带你的任务列表，结果作为邮件正文发送到你的邮箱。</p>
-            </div>
-          </template>
-
-          <template v-else-if="form.targetType === 'tool'">
-            <div class="form-row">
-              <label>工具名</label>
-              <input v-model="form.tool" class="form-input mono" placeholder="如：list_tasks" />
-            </div>
-            <div class="form-row">
-              <label>工具参数（JSON，可选）</label>
-              <textarea v-model="form.toolParams" class="form-input mono" rows="4" placeholder='{"limit": 20}'></textarea>
-            </div>
-          </template>
-
-          <template v-else-if="form.targetType === 'interface'">
-            <div class="form-row">
-              <label>请求方法与路径（站内 /api/*）</label>
-              <div class="target-inline">
-                <select v-model="form.method" class="form-input" style="max-width: 110px">
-                  <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option>
-                </select>
-                <input v-model="form.path" class="form-input mono" placeholder="tasks/open" />
-              </div>
-            </div>
-            <div class="form-row">
-              <label>query（JSON，可选）</label>
-              <textarea v-model="form.query" class="form-input mono" rows="3" placeholder='{"date": "2026-11-25"}'></textarea>
-            </div>
-            <div class="form-row">
-              <label>body（JSON，可选）</label>
-              <textarea v-model="form.body" class="form-input mono" rows="3" placeholder='{"status": "done"}'></textarea>
-            </div>
-          </template>
-
-          <template v-else>
-            <div class="form-row">
-              <label>Definition（编排流程，由 AI 生成或手动编辑）</label>
-              <p class="form-hint">流程内联在本任务里；下方流程图可查看节点依赖与运行状态，也可切换回 JSON 编辑。</p>
-            </div>
-          </template>
-
           <div class="form-row">
-            <label v-if="form.targetType === 'ai'">可用工具（逗号分隔，填写即预授权）</label>
-            <label v-else>静态预授权（逗号分隔，写类工具或非 GET 接口）</label>
-            <input v-model="form.allowWrite" class="form-input mono" :placeholder="form.targetType === 'ai' ? 'list_tasks, notify_user' : 'notify_user, api/tasks'" />
-            <p v-if="form.targetType === 'ai'" class="form-hint">这里是模型唯一可用的工具清单，填写即视为提前审批通过（含写类工具，无需重复填写）；留空则只做一次文本生成，不调用任何工具。</p>
-            <p v-else class="form-hint">定时执行无人审批，写操作必须在创建时显式列出；未列出的步骤会失败。</p>
+            <label>静态预授权（逗号分隔，写类工具或非 GET 接口）</label>
+            <input v-model="form.allowWrite" class="form-input mono" placeholder="notify_user, api/tasks" />
+            <p class="form-hint">定时执行无人审批，写操作必须在创建时显式列出；未列出的步骤会失败。</p>
           </div>
           <div class="form-row">
             <label>失败重试次数（0-3，仅无写操作时生效）</label>
@@ -596,7 +337,7 @@ function statusText(j: AIJob): string {
       </section>
 
       <!-- 编排流程图 + 节点 Inspector -->
-      <div v-if="form.targetType === 'pipeline'" class="pipe-main">
+      <div class="pipe-main">
         <section class="pipe-board">
           <div class="pipe-board-head">
             <span class="aijobs-card-title">流程图</span>

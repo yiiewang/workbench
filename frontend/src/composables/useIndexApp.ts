@@ -7,12 +7,12 @@ import { getHashPath, clearHash } from './useHashRouting'
 import { showToast, API_CODE } from '../lib/common'
 import { showSharePasswordModal } from './useShare'
 import {
-  authToken as storeAuthToken,
   dsMode, dsToken, dsPathPrefix, shareRootPath,
   openTabs, activeTabPath,
   setOpenTabFn,
-  checkAuth, openFileFromHash,
 } from '../stores/indexStore'
+import { openFileFromHash } from './openByHash'
+import { authToken as storeAuthToken, checkAuth } from '../stores/auth'
 import { treeStore } from './useTreeStore'
 
 /**

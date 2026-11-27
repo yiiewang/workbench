@@ -48,9 +48,8 @@ func (s *Server) handleAdminListRoles(ctx iris.Context) {
 // GET /api/admin/users/{id}/dashboard — 用户看板统计（任务数/完成数/分享数）
 func (s *Server) handleAdminUserDashboard(ctx iris.Context) {
 	rctx := ctx.Request().Context()
-	userID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid user id")
+	userID, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 
@@ -147,7 +146,7 @@ func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 	}
 	userID, err := s.db.CreateUser(rctx, orgID, req.Name, req.Mobile, req.Email, hash, req.RoleID)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if isUniqueViolation(err) {
 			writeFail(ctx, iris.StatusBadRequest, CodeUserNameExists)
 			return
 		}
@@ -166,9 +165,8 @@ func (s *Server) handleAdminCreateUser(ctx iris.Context) {
 // PATCH /api/admin/users/{id} — 更新用户（role/name/mobile/password 可选字段，传哪个改哪个）
 func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 	rctx := ctx.Request().Context()
-	userID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid user id")
+	userID, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 
@@ -251,7 +249,7 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 			return
 		}
 		if err := s.db.UpdateUserNameByID(rctx, userID, name); err != nil {
-			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			if isUniqueViolation(err) {
 				writeFail(ctx, iris.StatusBadRequest, CodeUserNameExists)
 				return
 			}
@@ -264,7 +262,7 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 	if req.Mobile != nil {
 		mobile := strings.TrimSpace(*req.Mobile)
 		if err := s.db.UpdateUserMobileByID(rctx, userID, mobile); err != nil {
-			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			if isUniqueViolation(err) {
 				writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "mobile already used")
 				return
 			}
@@ -314,9 +312,8 @@ func (s *Server) handleAdminUpdateUser(ctx iris.Context) {
 // DELETE /api/admin/users/{id} — 删除用户（禁止删除自己、禁止删除最后一个 admin）
 func (s *Server) handleAdminDeleteUser(ctx iris.Context) {
 	rctx := ctx.Request().Context()
-	userID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid user id")
+	userID, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 
@@ -379,9 +376,8 @@ func (s *Server) requireSameOrg(ctx iris.Context, targetUserID int64) bool {
 // GET /api/admin/users/{id}/features — 列出某成员在当前组织的全部功能及启用状态
 func (s *Server) handleAdminListUserFeatures(ctx iris.Context) {
 	rctx := ctx.Request().Context()
-	userID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid user id")
+	userID, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	orgID := currentOrgID(ctx)
@@ -403,9 +399,8 @@ func (s *Server) handleAdminListUserFeatures(ctx iris.Context) {
 // PATCH /api/admin/users/{id}/features/{code} — 更新某成员在当前组织的某功能启用状态
 func (s *Server) handleAdminUpdateUserFeature(ctx iris.Context) {
 	rctx := ctx.Request().Context()
-	userID, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "invalid user id")
+	userID, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	orgID := currentOrgID(ctx)

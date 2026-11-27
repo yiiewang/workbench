@@ -38,7 +38,7 @@ func TestRenderAIJobPromptHTMLContract(t *testing.T) {
 		Name:    "每日工作总结",
 		Context: json.RawMessage(`{"tasks":false,"ragTopK":0}`),
 	}}
-	prompt, err := s.renderAIJobPrompt(context.Background(), job, aiJobTarget{Prompt: "写日报"})
+	prompt, err := s.renderTaskContext(context.Background(), 0, 0, job.Name, job.Context, "写日报", true)
 	if err != nil {
 		t.Fatalf("render prompt: %v", err)
 	}

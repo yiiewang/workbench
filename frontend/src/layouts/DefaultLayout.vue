@@ -3,7 +3,8 @@
 // 仅包裹需要应用界面的路由；/login 等独立页面不走此布局。
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { dsMode, shareRootPath, activeTabPath, resetIdentityScopedState } from '../stores/indexStore'
+import { dsMode, shareRootPath, activeTabPath } from '../stores/indexStore'
+import { resetIdentityScopedState } from '../stores/identityReset'
 import {
   loggedIn, currentUser, canManageUsers, clearAuth,
   orgs, currentOrgId, switchOrg, hasFeature,

@@ -3,7 +3,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { injectSidebarHeader } from '../../composables/useSidebarHeader'
 import { sharesRevision } from '../../composables/useShare'
-import { authToken } from '../../stores/indexStore'
+import { authToken } from '../../stores/auth'
 import { showToast, copyToClipboard } from '../../lib/common'
 import * as shareApi from '../../api/share'
 import type { ShareItem } from '../../api/share'

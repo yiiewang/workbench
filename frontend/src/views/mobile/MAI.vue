@@ -1,37 +1,15 @@
 <script setup lang="ts">
 // 移动端 AI 对话页：全屏形态，核心逻辑复用 composables/useAIChat（与 PC 面板共用），
 // 消息区样式复用全局 styles/ai-chat.css（类名与 PC 一致）。
-import { ref, nextTick, onMounted, provide } from 'vue'
+import { ref, onMounted, provide } from 'vue'
 import { useAIChat, aiChatKey } from '../../composables/useAIChat'
+import { useStickyScroll } from '../../composables/useStickyScroll'
 import FilePickerModal from '../../components/modal/FilePickerModal.vue'
 import AiMessage from '../../components/ai/AiMessage.vue'
 import RagRefTooltip from '../../components/ai/RagRefTooltip.vue'
 
 const listEl = ref<HTMLElement | null>(null)
-
-// scrollToBottom(force?) force=true 无条件拉底（发消息/载入会话/流结束）。
-// 流式增量遵循 stick-to-bottom：用户上滚（scroll 事件距底 >40px）即暂停跟随，
-// 滚回底部自动恢复。不能用纯距离阈值判定——高频增量拉底下用户单次滚轮
-// 滚不出逃逸距离，表现为"完全滚不动"。
-const stickBottom = ref(true)
-let lastProgScroll = 0
-
-function onStickScroll() {
-  if (Date.now() - lastProgScroll < 120) return
-  const el = listEl.value
-  if (!el) return
-  stickBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-}
-
-async function scrollToBottom(force = false) {
-  await nextTick()
-  const el = listEl.value
-  if (!el) return
-  if (!force && !stickBottom.value) return
-  stickBottom.value = true // 强制拉底场景（发消息等）恢复跟随
-  lastProgScroll = Date.now()
-  el.scrollTop = el.scrollHeight
-}
+const { onStickScroll, scrollToBottom } = useStickyScroll(listEl)
 
 const chat = useAIChat(scrollToBottom)
 provide(aiChatKey, chat)

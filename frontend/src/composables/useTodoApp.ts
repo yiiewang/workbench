@@ -4,11 +4,11 @@
 import { watch, onMounted, onActivated, onDeactivated } from 'vue'
 import {
     tasks, showModal, isCreating, editingTask, editingDateRange,
-    currentUser, authToken,
     viewingMember, orgMembers, syncStatus, lastSyncError,
     activeTaskId, conflictCard,
 } from '../stores/todoStore'
-import { checkAuth, registerTodoAppReset } from '../stores/indexStore'
+import { authToken, currentUser, checkAuth } from '../stores/auth'
+import { registerTodoAppReset } from '../stores/identityReset'
 import * as taskApi from '../api/tasks'
 import { ElNotification } from 'element-plus'
 import {

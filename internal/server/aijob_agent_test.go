@@ -31,9 +31,9 @@ func agentTestServer(t *testing.T, reply func(round int, payload map[string]any)
 		_ = json.NewEncoder(w).Encode(out)
 	}))
 	cfg := &config.Config{}
-	cfg.AI.Chat.BaseURL = srv.URL + "/v1"
-	cfg.AI.Chat.APIKey = "test-key"
-	cfg.AI.Chat.Model = "test-model"
+	cfg.AI.Chat.Gateways = []config.ChatGateway{{
+		ID: "test", BaseURL: srv.URL + "/v1", APIKey: "test-key", Model: "test-model",
+	}}
 	s := &Server{
 		cfg: cfg,
 		app: iris.New(),
@@ -138,9 +138,9 @@ func TestBuildAIJobDefinitionAITools(t *testing.T) {
 	withAllow := db.AIJobWithOwner{AIJob: db.AIJob{
 		Name: "日报", TargetType: aiJobTypeAI, Prompt: "总结", AllowWrite: []string{"list_tasks", "notify_user"},
 	}}
-	def, err := s.buildAIJobDefinition(context.Background(), withAllow, false)
+	def, err := s.legacyTargetToDefinition(context.Background(), withAllow)
 	if err != nil {
-		t.Fatalf("build with allowWrite: %v", err)
+		t.Fatalf("legacy ai with allowWrite: %v", err)
 	}
 	names, err := stepToolNames(def.Steps[0].With)
 	if err != nil || strings.Join(names, ",") != "list_tasks,notify_user" {
@@ -148,9 +148,9 @@ func TestBuildAIJobDefinitionAITools(t *testing.T) {
 	}
 
 	plain := db.AIJobWithOwner{AIJob: db.AIJob{Name: "日报", TargetType: aiJobTypeAI, Prompt: "总结"}}
-	def, err = s.buildAIJobDefinition(context.Background(), plain, false)
+	def, err = s.legacyTargetToDefinition(context.Background(), plain)
 	if err != nil {
-		t.Fatalf("build without allowWrite: %v", err)
+		t.Fatalf("legacy ai without allowWrite: %v", err)
 	}
 	if _, ok := def.Steps[0].With["tools"]; ok {
 		t.Fatal("empty allowWrite should not add tools to llm step")
@@ -332,6 +332,24 @@ func TestStripToolMarkers(t *testing.T) {
 		if got := stripToolMarkers(c.in); got != c.want {
 			t.Fatalf("stripToolMarkers(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestAIThinkingPayload(t *testing.T) {
+	var got map[string]any
+	s, closeSrv := agentTestServer(t, func(_ int, payload map[string]any) map[string]any {
+		got = payload
+		return chatReply("ok")
+	})
+	defer closeSrv()
+	s.cfg.AI.Chat.Thinking = true
+	if _, _, err := s.aiChatCompletion(context.Background(), map[string]any{
+		"model": "x", "messages": []any{},
+	}); err != nil {
+		t.Fatalf("chat completion: %v", err)
+	}
+	if _, ok := got["chat_template_kwargs"]; !ok {
+		t.Fatal("thinking param missing from upstream payload")
 	}
 }
 

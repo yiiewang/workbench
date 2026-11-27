@@ -17,7 +17,7 @@ import (
 
 func TestAIRunWriter_DisconnectKeepsLoopAlive(t *testing.T) {
 	run := &aiRunState{}
-	w := &aiRunWriter{w: errWriter{}, state: run, alive: true}
+	w := &sseStreamWriter{w: errWriter{}, state: run, alive: true}
 
 	first := "data: hi\n\n"
 	if n, err := io.WriteString(w, first); err != nil || n != len(first) {
@@ -36,7 +36,7 @@ func TestAIRunWriter_DisconnectKeepsLoopAlive(t *testing.T) {
 func TestAIRunWriter_Normal(t *testing.T) {
 	var buf bytes.Buffer
 	run := &aiRunState{}
-	w := &aiRunWriter{w: &buf, state: run, alive: true}
+	w := &sseStreamWriter{w: &buf, state: run, alive: true}
 	if _, err := io.WriteString(w, "hello"); err != nil || buf.String() != "hello" {
 		t.Fatalf("normal write failed: buf=%q err=%v", buf.String(), err)
 	}

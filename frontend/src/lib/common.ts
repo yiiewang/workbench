@@ -111,24 +111,36 @@ export const API_CODE = {
   INVALID_SHARE_PWD:  40305, // 分享密码错误
 };
 
+/** 401 全局处理：清除登录态并跳转登录页（保留当前路径作为 redirect） */
+export function handleUnauthorized() {
+  clearAuthState();
+  const current = window.location.pathname + window.location.search;
+  if (!current.startsWith('/login')) {
+    window.location.href = '/login?redirect=' + encodeURIComponent(current);
+  }
+}
+
 /**
  * 统一 JSON API 调用：自动带 token、解包 {code,msg,data} 信封。
  * 成功返回 data（裸载荷）；失败抛 Error（附带 code/msg/status/data 字段）。
  * 仅用于返回 JSON 信封的 API 端点；原始文件流（text/blob）仍用 authFetch。
  *
+ * opts.json 传对象时自动设置 POST + JSON 请求头 + 序列化请求体。
  * 401 全局拦截：token 过期/无效时自动清除认证并跳转登录页，
  * 各调用方无需重复处理 401。
  */
 export async function apiCall(url: string, opts: any = {}) {
-  const resp = await authFetch(url, opts);
+  const { json, ...init } = opts;
+  if (json !== undefined) {
+    init.method = init.method || 'POST';
+    init.headers = { 'Content-Type': 'application/json', ...(init.headers || {}) };
+    init.body = JSON.stringify(json);
+  }
+  const resp = await authFetch(url, init);
   // 401 全局拦截：跳转登录页（排除 /api/login、/api/me 自身，避免循环；
   // 排除 /api/share——分享需要密码/密码错误时后端也返回 401，应走下方业务码分支弹密码框而非跳登录）
   if (resp.status === 401 && !url.startsWith('/api/login') && !url.startsWith('/api/me') && !url.startsWith('/api/share')) {
-    clearAuthState();
-    const current = window.location.pathname + window.location.search;
-    if (!current.startsWith('/login')) {
-      window.location.href = '/login?redirect=' + encodeURIComponent(current);
-    }
+    handleUnauthorized();
     const err: any = new Error('Unauthorized');
     err.status = 401;
     throw err;
@@ -197,6 +209,16 @@ export function showToast(msg: string) {
   toast.classList.add('show');
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
+}
+
+/** 从错误对象提取可展示消息：优先业务码 msg，其次 Error.message，最后兜底文案 */
+export function errMsg(e: any, fallback = '操作失败'): string {
+  return e?.msg || e?.message || fallback;
+}
+
+/** JSON 美化输出（对象/数组展示用） */
+export function prettyJson(v: any): string {
+  return JSON.stringify(v, null, 2);
 }
 
 /** base64 → Uint8Array */

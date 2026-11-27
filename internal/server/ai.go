@@ -13,7 +13,6 @@ package server
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -27,7 +26,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/kataras/iris/v12"
 	"github.com/yiiewang/workbench/internal/db"
 	"github.com/yiiewang/workbench/internal/rag"
@@ -90,34 +88,6 @@ func (r *aiRunState) maybeFlush(s *Server) {
 	}
 	r.lastFlush = time.Now()
 	r.flush(s, "running", "")
-}
-
-// aiRunWriter SSE 镜像输出：写失败即标记断连并静默丢弃后续写入，
-// 让 Agent 循环在客户端离开后继续跑完（事件同时落库到 ai_runs）。
-type aiRunWriter struct {
-	w     io.Writer
-	state *aiRunState
-	alive bool
-}
-
-func (w *aiRunWriter) Write(p []byte) (int, error) {
-	if !w.alive {
-		return len(p), nil
-	}
-	if _, err := w.w.Write(p); err != nil {
-		w.alive = false
-		w.state.disconnected = true
-	}
-	return len(p), nil
-}
-
-func (w *aiRunWriter) Flush() {
-	if !w.alive {
-		return
-	}
-	if f, ok := w.w.(http.Flusher); ok {
-		f.Flush()
-	}
 }
 
 // aiToolRunCtx 工具执行用的 context：后台 run 与请求连接解耦，客户端断开后
@@ -234,6 +204,12 @@ type aiChatRequest struct {
 	QAId string `json:"qaId,omitempty"`
 	// SessionId 会话 ID：一个会话（面板打开/清空为一个周期）内多次提问复用（透传为 X-Session-Id）
 	SessionId string `json:"sessionId,omitempty"`
+	// MaxTokens 单次回答的输出上限（0 = 用网关默认）
+	MaxTokens int `json:"maxTokens,omitempty"`
+	// ReasoningEffort 推理强度（low/medium/high/max）；上游不支持时忽略
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+	// Gateway 模型网关 id；空 = 默认网关
+	Gateway string `json:"gateway,omitempty"`
 }
 
 // ============================================================
@@ -241,10 +217,22 @@ type aiChatRequest struct {
 // ============================================================
 
 func (s *Server) handleAIStatus(ctx iris.Context) {
+	gateways := make([]map[string]any, 0, len(s.cfg.AI.Chat.Gateways))
+	for _, g := range s.cfg.AI.Chat.Gateways {
+		if !g.Enabled() {
+			continue
+		}
+		gateways = append(gateways, map[string]any{
+			"id": g.ID, "name": g.Name, "model": g.Model,
+		})
+	}
+	def, _ := s.cfg.AI.Chat.DefaultGateway()
 	writeOK(ctx, map[string]any{
-		"enabled": s.cfg.AI.Enabled(),
-		"model":   s.cfg.AI.Chat.Model,
-		"tools":   s.cfg.AI.Chat.Tools,
+		"enabled":  s.cfg.AI.Enabled(),
+		"model":    def.Model,
+		"default":  def.ID,
+		"gateways": gateways,
+		"tools":    s.cfg.AI.Chat.Tools,
 	})
 }
 
@@ -309,9 +297,8 @@ func (s *Server) handleAISessionCreate(ctx iris.Context) {
 }
 
 func (s *Server) handleAISessionGet(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	sess, exists, err := s.db.GetAISession(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id)
@@ -381,9 +368,8 @@ func validateAISessionMessagesBody(b *aiSessionMessagesBody) string {
 // handleAISessionMessagesUpsert 只提交变动的那几条消息；truncateAfter 用于
 // regenerate：保留锚点消息，删掉它之后的旧回复，再写入新回复。
 func (s *Server) handleAISessionMessagesUpsert(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	var req aiSessionMessagesBody
@@ -395,7 +381,7 @@ func (s *Server) handleAISessionMessagesUpsert(ctx iris.Context) {
 		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, msg)
 		return
 	}
-	err = s.db.UpsertAISessionMessages(ctx.Request().Context(),
+	err := s.db.UpsertAISessionMessages(ctx.Request().Context(),
 		currentOrgID(ctx), currentUserID(ctx), id, string(req.Messages), req.TruncateAfter)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 会话不存在，或 truncateAfter 指向的锚点消息不在该会话里
@@ -410,9 +396,8 @@ func (s *Server) handleAISessionMessagesUpsert(ctx iris.Context) {
 }
 
 func (s *Server) handleAISessionDelete(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	if err := s.db.DeleteAISession(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id); err != nil {
@@ -519,7 +504,7 @@ func (s *Server) handleAIIndexStatus(ctx iris.Context) {
 // ============================================================
 
 func (s *Server) handleAIRunsList(ctx iris.Context) {
-	limit, _ := strconv.Atoi(ctx.URLParam("limit"))
+	limit := queryLimit(ctx)
 	runs, err := s.db.ListAIRuns(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), limit)
 	if err != nil {
 		serverError(ctx, "list ai runs failed", err)
@@ -605,6 +590,20 @@ func aiSystemPrompt(now time.Time) string {
 		"5. 回答只给结论与依据，不复述已排除的方案，不编造。\n"
 }
 
+// sanitizeToolCalls 把无法解析的 arguments 置为 {}：模型输出被 max_tokens
+// 截断时，原样回传会让上游解析请求体失败（400 unexpected end of data），
+// 模型连工具错误都看不到。工具执行仍用原始 call，回灌的消息只保留合法占位。
+func sanitizeToolCalls(calls []aiToolCall) []aiToolCall {
+	out := make([]aiToolCall, len(calls))
+	copy(out, calls)
+	for i := range out {
+		if !json.Valid([]byte(out[i].Function.Arguments)) {
+			out[i].Function.Arguments = "{}"
+		}
+	}
+	return out
+}
+
 // oneLine 把多行用户消息压成单行，避免日志出现换行与连续空白。
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
@@ -671,261 +670,6 @@ func summarizeToolResult(name string, raw []byte) string {
 	return line + fmt.Sprintf(" | %d bytes\n", len(raw))
 }
 
-func (s *Server) handleAIChat(ctx iris.Context) {
-	if !s.cfg.AI.Enabled() {
-		writeFail(ctx, http.StatusServiceUnavailable, CodeAINotConfigured)
-		return
-	}
-
-	var req aiChatRequest
-	if err := readJSON(ctx, &req); err != nil {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
-		return
-	}
-	if err := validateAIMessages(req.Messages); err != "" {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err)
-		return
-	}
-	// QAId/SessionId 会写入上游 header：限长 + 禁控制字符，防 header 注入
-	if !validTraceID(req.QAId) || !validTraceID(req.SessionId) {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "qaId/sessionId must be plain identifiers (max 64 chars)")
-		return
-	}
-
-	// 后台运行上下文与请求连接解耦：客户端断开后循环继续跑完，
-	// 工具执行器经 aiRunCtxKey 取用同一个 context（见 aitools.go）。
-	runCtx, runCancel := context.WithTimeout(context.Background(), aiRunTimeout)
-	defer runCancel()
-	ctx.Values().Set(aiRunCtxKey, runCtx)
-
-	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
-	run := &aiRunState{id: uuid.NewString(), orgID: orgID, userID: userID, events: []any{}}
-	ctx.Values().Set(aiRunStateKey, run)
-	if err := s.db.CreateAIRun(runCtx, orgID, userID, run.id, req.QAId, req.SessionId); err != nil {
-		serverError(ctx, "create ai run failed", err)
-		return
-	}
-	// 任一路径退出都落库最终状态；正常结束时在 [DONE] 前改为 done。
-	runStatus, runErrMsg := "failed", ""
-	defer func() {
-		if runStatus == "failed" && runErrMsg == "" {
-			runErrMsg = "对话未完成（上游错误或运行中断）"
-		}
-		run.flush(s, runStatus, runErrMsg)
-	}()
-
-	// 组装上游请求（OpenAI 兼容 /chat/completions，stream=true）。
-	// base_url 兼容两种写法：网关根（…/v1，自动追加 /chat/completions）
-	// 或完整端点（…/v1/chat/completions，原样使用），避免配置歧义导致 404。
-	upstreamURL := normalizeAIEndpoint(s.cfg.AI.Chat.BaseURL)
-	toolsOn := s.cfg.AI.Chat.Tools
-	msgs := req.Messages
-	// Agent 模式注入系统提示：平台角色 + 当前时间（模型无时间感知，
-	// 此前任务日期全靠猜）+ 写操作前置说明要求（先解释计划再请求确认）
-	if toolsOn {
-		msgs = append([]aiMessage{{Role: "system", Content: aiSystemPrompt(time.Now())}}, msgs...)
-	}
-	// RAG 前置检索：用最新一条 user 消息在其个人文件中做语义检索。
-	// 完整片段只在首轮注入；后续轮换成摘要（编号与行号不变），因为每轮请求
-	// 都是无状态的完整 messages，直接移除会让模型丢失已注入的内容。
-	// 检索失败/超时静默降级——对话可用性优先于检索完整性。
-	var ragHits []rag.Hit
-	var ragPromptHits []rag.Hit // SSE 推送后 ragHits 会置 nil，摘要轮单独留一份
-	var ragMsg *aiMessage
-	if s.rag != nil {
-		if q := ragQueryFrom(req.Messages); q != "" {
-			hits, err := s.rag.Search(runCtx, orgID, userID, q, ragSearchTopK)
-			switch {
-			case err != nil:
-				slog.Warn("rag: search failed, fallback to no context", "err", err)
-			case len(hits) > 0:
-				// 可观测性：哪些回答参考了哪些文件 + 实际距离
-				// （distance 观测值是 max_distance 阈值调参的唯一依据）
-				files := make([]string, len(hits))
-				for i, h := range hits {
-					files[i] = fmt.Sprintf("%s(%.3f)", h.Path, h.Distance)
-				}
-				slog.Info("rag: context injected", "user", currentUserID(ctx),
-					"query", truncateStr(q, 100), "hits", len(hits), "files", files)
-				ragHits = hits
-				ragPromptHits = hits
-				msg := aiMessage{Role: "system", Content: rag.ContextPrompt(hits)}
-				ragMsg = &msg
-			}
-		}
-	}
-
-	// 上游请求绑定后台 run 上下文：客户端断开不再取消上游流
-	upCtx, cancel := context.WithTimeout(runCtx, aiStreamTimeout)
-	defer cancel()
-
-	// SSE 仅为镜像输出：断连后 writer 静默吞掉写入，循环继续跑完并落库
-	w := &aiRunWriter{w: ctx.ResponseWriter(), state: run, alive: true}
-	wroteHeader := false
-	usageSum := aiUsage{} // Agent 多轮 token 消耗累加
-	toolCallsUsed := 0    // 已执行的工具调用数（用于每轮预算提示）
-
-	for round := 0; ; round++ {
-		// 工具轮次用尽后不再携带 tools：模型只能文本回答。
-		// 否则上限轮模型仍可能请求调工具被掐断，表现为"只有工具卡片没有回答"。
-		forceAnswer := round >= aiMaxToolRounds
-		// 每轮按需组装 messages，不改动 msgs 本身：
-		// 1) 检索片段首轮给全文、后续轮给摘要，避免整段原文随每轮重发；
-		// 2) 工具轮显式告知剩余轮次，避免预算隐到最后一轮才收敛
-		//    （实测 6 轮 thinking 逐轮膨胀到 29070 字）。
-		payloadMsgs := make([]aiMessage, len(msgs), len(msgs)+2)
-		copy(payloadMsgs, msgs)
-		if ragMsg != nil {
-			if round == 0 {
-				payloadMsgs = append(payloadMsgs, *ragMsg)
-			} else {
-				payloadMsgs = append(payloadMsgs, aiMessage{Role: "system", Content: ragBriefPrompt(ragPromptHits)})
-			}
-		}
-		if toolsOn && !forceAnswer && round > 0 {
-			payloadMsgs = append(payloadMsgs, aiMessage{Role: "system", Content: fmt.Sprintf(
-				"工具轮次预算：剩余 %d 轮（已调用 %d 次工具）。信息足够时直接给出最终回答。",
-				aiMaxToolRounds-round, toolCallsUsed)})
-		}
-		payload := map[string]any{
-			"model":    s.cfg.AI.Chat.Model,
-			"messages": payloadMsgs,
-			"stream":   true,
-			// 流式响应末尾带 usage 分片（token 消耗统计）；网关不支持时
-			// 分片缺失，前端不显示消耗（无害降级）
-			"stream_options": map[string]any{"include_usage": true},
-		}
-		if toolsOn && !forceAnswer {
-			payload["tools"] = aiToolsPayload(s.allTools())
-			payload["tool_choice"] = "auto"
-		}
-		body, err := json.Marshal(payload)
-		if err != nil {
-			serverError(ctx, "marshal ai payload failed", err)
-			return
-		}
-
-		upReq, err := http.NewRequestWithContext(upCtx, http.MethodPost, upstreamURL, bytes.NewReader(body))
-		if err != nil {
-			serverError(ctx, "build ai upstream request failed", err)
-			return
-		}
-		upReq.Header.Set("Content-Type", "application/json")
-		upReq.Header.Set("Authorization", "Bearer "+s.cfg.AI.Chat.APIKey)
-		upReq.Header.Set("Accept", "text/event-stream")
-		// 链路排障三件套：每次模型调用新生成 Request-Id；QA/Session 由前端传入后透传
-		upReq.Header.Set("X-Model-Request-Id", uuid.NewString())
-		if req.QAId != "" {
-			upReq.Header.Set("X-QA-Id", req.QAId)
-		}
-		if req.SessionId != "" {
-			upReq.Header.Set("X-Session-Id", req.SessionId)
-		}
-
-		resp, err := aiClient.Do(upReq)
-		if err != nil {
-			// 流已开（Agent 前几轮已推给前端）时只能走 SSE 错误事件，
-			// HTTP 状态码已发出无法再改
-			if wroteHeader {
-				sseWriteEvent(w, "error", map[string]string{"msg": "ai upstream request failed"})
-				return
-			}
-			serverError(ctx, "ai upstream request failed", err, "model", s.cfg.AI.Chat.Model)
-			return
-		}
-
-		// 上游非 200：读有限字节拼进错误消息；未开流时按标准信封返回
-		if resp.StatusCode != http.StatusOK {
-			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			resp.Body.Close()
-			msg := fmt.Sprintf("upstream %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
-			slog.Error("ai upstream error", "status", resp.StatusCode, "model", s.cfg.AI.Chat.Model)
-			if wroteHeader {
-				sseWriteEvent(w, "error", map[string]string{"msg": msg})
-				return
-			}
-			writeFailMsg(ctx, iris.StatusBadGateway, CodeInternalError, msg)
-			return
-		}
-
-		if !wroteHeader {
-			ctx.ContentType("text/event-stream; charset=utf-8")
-			ctx.Header("Cache-Control", "no-cache")
-			ctx.Header("X-Accel-Buffering", "no")
-			ctx.StatusCode(iris.StatusOK)
-			wroteHeader = true
-			// runId 先告知前端：断连/刷新后据此轮询 /api/ai/runs/{id} 恢复
-			sseWriteEvent(w, "run_id", map[string]string{"id": run.id})
-			run.addEvent("run_id", map[string]string{"id": run.id})
-			// RAG 引用卡片数据（编号/路径/起始行/原文）：SSE header 就绪后
-			// 立刻推给前端（一次性），前端挂在当前回答气泡上
-			if ragHits != nil {
-				data := map[string]any{"hits": ragHits}
-				sseWriteEvent(w, "rag_hits", data)
-				run.addEvent("rag_hits", data)
-				ragHits = nil
-			}
-		}
-
-		// 转发 + 解析本轮流式响应（writer 断连后仍继续解析，只是不再输出）。
-		// 每个正文分片即时并入后台 run 并节流落库，供刷新后按游标持续续读；
-		// 原先只在整轮结束后 WriteString(res.Content)，断连期间库里看不到增量。
-		reader := bufio.NewReaderSize(resp.Body, 16*1024)
-		res, alive := forwardAIStream(w, reader, func(delta string) {
-			run.content.WriteString(delta)
-			run.maybeFlush(s)
-		})
-		resp.Body.Close()
-		if !alive {
-			return // 非镜像 writer 的断连兜底
-		}
-		// 聚合本轮 token 消耗（Agent 多轮累加）
-		if res.Usage != nil {
-			usageSum.PromptTokens += res.Usage.PromptTokens
-			usageSum.CompletionTokens += res.Usage.CompletionTokens
-			usageSum.TotalTokens += res.Usage.TotalTokens
-		}
-
-		// 工具轮：模型请求调工具 → SSE 通知前端 → 后端执行 → 结果回传 → 下一轮
-		if toolsOn && !forceAnswer && res.FinishReason == "tool_calls" && len(res.ToolCalls) > 0 {
-			msgs = append(msgs, aiMessage{Role: "assistant", Content: res.Content, ToolCalls: res.ToolCalls})
-			for _, call := range res.ToolCalls {
-				sseWriteEvent(w, "tool_call", call)
-				run.addEvent("tool_call", call)
-				result := s.runToolWithApproval(ctx, w, call)
-				data := map[string]any{
-					"id":     call.ID,
-					"name":   call.Function.Name,
-					"result": result,
-				}
-				sseWriteEvent(w, "tool_result", data)
-				run.addEvent("tool_result", data)
-				resultJSON, _ := json.Marshal(result)
-				msgs = append(msgs, aiMessage{Role: "tool", ToolCallID: call.ID, Content: string(resultJSON)})
-			}
-			// 每个工具轮落一次快照：断连期间也能看到已完成到哪一步
-			run.flush(s, "running", "")
-			// 下一轮即上限轮：提醒模型收尾，避免轮次耗尽仍无文本输出
-			if round+1 >= aiMaxToolRounds {
-				msgs = append(msgs, aiMessage{Role: "system", Content: "工具调用轮次已达上限。请停止调用工具，基于以上已获得的工具结果直接回答用户问题；信息不足的部分明确说明，不要编造。"})
-			}
-			continue
-		}
-
-		// 最终轮（stop / 无工具请求 / 达到轮数上限）：usage 事件 + 统一结束标记
-		if usageSum.TotalTokens > 0 {
-			sseWriteEvent(w, "usage", usageSum)
-			run.addEvent("usage", usageSum)
-		}
-		if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr != nil {
-			return
-		}
-		w.Flush()
-		runStatus = "done"
-		return
-	}
-}
-
 // ============================================================
 // 非流式单次调用（编排 llm 步骤等后台场景用）
 // ============================================================
@@ -934,7 +678,6 @@ func (s *Server) handleAIChat(ctx iris.Context) {
 // 不带工具；带工具白名单的 llm 步走 aiChatAgent。
 func (s *Server) aiChatOnce(ctx context.Context, prompt string) (string, error) {
 	msg, _, err := s.aiChatCompletion(ctx, map[string]any{
-		"model": s.cfg.AI.Chat.Model,
 		"messages": []aiMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -1093,23 +836,12 @@ func (s *Server) handleAIJobCreate(ctx iris.Context) {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
 		return
 	}
-	if msg := validateAIJobBody(&req); msg != "" {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, msg)
-		return
-	}
-	spec := aiJobSpecFromBody(&req)
-	if err := s.validateAIJobTarget(ctx.Request().Context(), aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))); err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
-		return
-	}
-	id, err := s.db.CreateAIJobWithSpec(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), spec)
+	rctx := ctx.Request().Context()
+	id, err := s.saveAIJob(rctx, currentOrgID(ctx), currentUserID(ctx), &req, 0, func(j db.AIJobWithOwner) error {
+		return s.validateAIJobTarget(rctx, j)
+	})
 	if err != nil {
-		serverError(ctx, "create ai job failed", err)
-		return
-	}
-	if err := s.upsertAIJobTrigger(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, req.CronExpr, *req.Enabled); err != nil {
-		_ = s.db.DeleteAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id)
-		serverError(ctx, "create ai job trigger failed", err)
+		writeAIJobSaveError(ctx, err)
 		return
 	}
 	slog.Info("ai job created", "user", currentUserID(ctx), "job", req.Name, "cron", req.CronExpr)
@@ -1117,9 +849,8 @@ func (s *Server) handleAIJobCreate(ctx iris.Context) {
 }
 
 func (s *Server) handleAIJobUpdate(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	var req aiJobBody
@@ -1127,38 +858,11 @@ func (s *Server) handleAIJobUpdate(ctx iris.Context) {
 		writeFail(ctx, iris.StatusBadRequest, CodeInvalidJSON)
 		return
 	}
-	if msg := validateAIJobBody(&req); msg != "" {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, msg)
-		return
-	}
-	// 存在性 + 归属校验
-	cur, err := s.db.GetAIJob(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id)
-	if err != nil {
-		serverError(ctx, "get ai job failed", err)
-		return
-	}
-	if cur == nil {
-		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
-		return
-	}
-	spec := aiJobSpecFromBody(&req)
-	preview := aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))
-	if err := s.normalizeTargetToPipeline(ctx.Request().Context(), &preview); err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
-		return
-	}
-	if err := s.validateAIJobTarget(ctx.Request().Context(), preview); err != nil {
-		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, err.Error())
-		return
-	}
-	spec.TargetType = preview.TargetType
-	spec.TargetJSON = string(preview.Target)
-	if err := s.db.UpdateAIJobWithSpec(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, spec); err != nil {
-		serverError(ctx, "update ai job failed", err)
-		return
-	}
-	if err := s.upsertAIJobTrigger(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id, req.CronExpr, *req.Enabled); err != nil {
-		serverError(ctx, "update ai job trigger failed", err)
+	rctx := ctx.Request().Context()
+	if _, err := s.saveAIJob(rctx, currentOrgID(ctx), currentUserID(ctx), &req, id, func(j db.AIJobWithOwner) error {
+		return s.validateAIJobTarget(rctx, j)
+	}); err != nil {
+		writeAIJobSaveError(ctx, err)
 		return
 	}
 	slog.Info("ai job updated", "user", currentUserID(ctx), "job", req.Name)
@@ -1166,9 +870,8 @@ func (s *Server) handleAIJobUpdate(ctx iris.Context) {
 }
 
 func (s *Server) handleAIJobDelete(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	if err := s.deleteAIJobTriggers(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id); err != nil {
@@ -1183,15 +886,30 @@ func (s *Server) handleAIJobDelete(ctx iris.Context) {
 	writeOK(ctx, map[string]any{"status": "ok"})
 }
 
+// handleAIJobRun 手动触发一次任务（POST /api/jobs/{id}/run）：异步执行并立即返回，
+// 任务详情页通过 job_runs 的 running 记录轮询进度。
+func (s *Server) handleAIJobRun(ctx iris.Context) {
+	id, ok := pathID(ctx)
+	if !ok {
+		return
+	}
+	orgID, userID := currentOrgID(ctx), currentUserID(ctx)
+	go func() {
+		if err := s.RunJobNow(context.Background(), orgID, userID, id); err != nil {
+			slog.Warn("manual run job failed", "job", id, "err", err)
+		}
+	}()
+	writeOK(ctx, map[string]any{"ok": true, "jobId": id})
+}
+
 // handleAIJobRuns 任务执行历史（GET /api/jobs/{id}/runs?limit=20）。
 // 归属：全局任务（user_id IS NULL）所有用户可查；私有任务仅归属人。
 func (s *Server) handleAIJobRuns(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(ctx.URLParam("limit"))
+	limit := queryLimit(ctx)
 	job, err := s.db.GetAIJobAny(ctx.Request().Context(), id)
 	if err != nil {
 		serverError(ctx, "get ai job failed", err)
@@ -1339,12 +1057,6 @@ type aiStreamChunk struct {
 	Usage *aiUsage `json:"usage"`
 }
 
-// aiStreamWriter SSE 输出流：写增量 + 立即 flush（iris 的 ResponseWriter 满足此接口）
-type aiStreamWriter interface {
-	io.Writer
-	Flush()
-}
-
 // forwardAIStream 逐行转发上游 SSE 给前端并同步解析增量：
 //   - data: [DONE] 不转发（Agent 中间轮的结束标记不能提前终止前端读取，
 //     由调用方在最终轮后统一补发）；其余行原样透传 + flush；
@@ -1426,16 +1138,6 @@ func parseAIDataLine(line string, res *aiRoundResult, acc map[int]*aiToolCall) s
 		}
 	}
 	return text.String()
-}
-
-// sseWriteEvent 向 SSE 流写一个自定义事件（event + data 两行 + 空行）
-func sseWriteEvent(w aiStreamWriter, event string, v any) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return
-	}
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-	w.Flush()
 }
 
 // normalizeAIEndpoint 归一化上游端点：

@@ -2,7 +2,7 @@
 // Admin 用户管理主区：右侧用户看板（信息概览 + 统计卡片）
 // 创建/编辑/重置密码/删除均通过弹窗操作
 import { ref, computed, watch } from 'vue'
-import { showToast } from '../lib/common'
+import { showToast, errMsg } from '../lib/common'
 import * as adminApi from '../api/admin'
 import type { UserOrgFeature } from '../api/admin'
 import {
@@ -64,7 +64,7 @@ async function toggleFeature(code: string, enabled: boolean) {
       await refreshFeatures()
     }
   } catch (err: any) {
-    showToast('Update failed: ' + (err.msg || err.message))
+    showToast('Update failed: ' + errMsg(err))
     await loadUserFeatures(u.id) // 回滚本地状态
   }
 }
@@ -134,7 +134,7 @@ async function submitCreate() {
     await loadAdminData()
     selectUser(created.id)
   } catch (err: any) {
-    showToast('Create failed: ' + (err.msg || err.message))
+    showToast('Create failed: ' + errMsg(err))
   } finally {
     saving.value = false
   }
@@ -167,7 +167,7 @@ async function submitEdit() {
     editVisible.value = false
     await loadAdminData()
   } catch (err: any) {
-    showToast('Update failed: ' + (err.msg || err.message))
+    showToast('Update failed: ' + errMsg(err))
   } finally {
     saving.value = false
   }
@@ -193,7 +193,7 @@ async function submitPwd() {
     showToast('Password reset')
     pwdVisible.value = false
   } catch (err: any) {
-    showToast('Reset failed: ' + (err.msg || err.message))
+    showToast('Reset failed: ' + errMsg(err))
   } finally {
     saving.value = false
   }
@@ -211,7 +211,7 @@ async function onDelete() {
     clearSelectionIfDeleted(u.id)
     await loadAdminData()
   } catch (err: any) {
-    showToast('Delete failed: ' + (err.msg || err.message))
+    showToast('Delete failed: ' + errMsg(err))
   } finally {
     deleting.value = false
   }

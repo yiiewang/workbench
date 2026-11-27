@@ -7,6 +7,18 @@
 
 ### Fixed
 
+- **工具轮预算提示里的「已调用次数」恒为 0**：`handleAIChat` 的 `toolCallsUsed` 声明后从未递增，每轮注入的系统提示固定是「已调用 0 次工具」，模型无法据此判断预算消耗。改为在工具轮分支按 `len(res.ToolCalls)` 累加
+  - 校验：`go test -tags sqlite_fts5 ./internal/server/ -run TestHandleAIChat -count=1`
+
+- **`update_job` 丢弃/清零任务级 `retry`**：`execUpdateAIJob` 的合并体没有继承 `cur.Retry`，也没处理 `args["retry"]`，导致每次 update 都把 `jobs.retry` 写成 0（实测 id 6/9/12 传 `retry:2` 后仍为 0）。改为继承现值并支持覆盖。`retry` 是任务顶层字段，不在 pipeline Definition 内；`list_jobs` 返回顶层 `retry`，Definition 里的 `retry` 是步骤级重试
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **工具参数被截断时回灌 messages 导致上游 400**：模型生成 `update_job` 的 `target`（完整 Definition）时被 max_tokens 截断，`arguments` 不完整，工具返回 `invalid arguments JSON: unexpected end of JSON input`；下一轮把截断的 `assistant.tool_calls.arguments` 原样回传上游，上游解析请求体报 `unexpected end of data: ... (char 1567)` 400，模型只看到 400、看不到工具错误。新增 `sanitizeToolCalls`：回灌前把非法 arguments 置为 `{}`（工具执行仍用原始 call），对话与定时任务两条路径统一处理。新增 `TestSanitizeToolCalls`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **`update_job` 的 `prompt` 对 pipeline 任务静默无效**：pipeline 的 prompt 嵌在 `target.definition.steps[].with.prompt`，此前只更新 `jobs.prompt` 列，API 返回 `ok:true` 但执行仍用旧 prompt（实测 id=12 前 4 次更新均未生效）。新增 `applyPromptToDefinition`：传 `prompt` 时自动写入第一个 llm 步；同时更新 `update_job` 描述，说明无需再手拼完整 target。新增 `TestApplyPromptToDefinition`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
 - **启动时回收遗留的 `running` 状态**：进程在执行中被强杀时，`job_runs` 会永远停在 `running`（任务详情页一直显示运行中），`schedule_triggers` 的租约也要等 15min 过期。`db.Open` 在迁移后执行 `markInterruptedRuns`：`job_runs.status='running'` → `error: interrupted` 并写 `finished_at`，`schedule_triggers.last_status='running'` → `error: interrupted` 且清空 `lease_until`。新增 `TestMarkInterruptedRuns`
   - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/db/ ./internal/server/ -count=1`
 
@@ -51,6 +63,83 @@
 - **AI 对话面板左缘拖拽调宽失效**：消息目录刻度容器 `.ai-toc`（z-index:2，left:0 宽 48px）盖住了拖拽条 `.ai-resizer`（z-index:1，宽 8px），面板中部拖拽条不可点击、仅头尾狭窄区域可触发；将 `.ai-resizer` 提到 z-index:3 恢复整条可拖拽
 
 ### Changed
+
+- **定时任务侧栏选中态与 AI 会话列表统一**：`.aijobs-s-item.active` 原为左侧 3px accent 竖条 + `--code-bg` 底色 + 标题变 accent 色，改为与 `.ai-session-item.current` 一致（`--active` 浅底 + 1px accent 描边）；描边用 `inset 0 0 0 1px` 绘制，避免加 border 造成 1px 尺寸抖动，标题不再变色
+  - 校验：`npx vite build`
+- **重构：断开 `indexStore ↔ useTreeStore` 循环依赖，auth 收敛为单一入口**：
+  - `useTreeStore` 依赖 `indexStore` 的 `dsListDir`，而 `indexStore` 为做身份重置反向 import `treeStore`（`resetIdentityScopedState`）与 `openFileFromHash` 里的 `treeStore.expandTo`，形成双向依赖。新增 `stores/identityReset.ts`（聚合 indexStore/treeStore/todoStore 的重置逻辑与新位置的 `registerTodoAppReset`）与 `composables/openByHash.ts`（`openFileFromHash`），`indexStore` 现在除 API 与类型外不再 import 任何项目内模块
+  - 移除 `stores/indexStore.ts` 与 `stores/todoStore.ts` 的 auth 转发（`authToken`/`currentUser`/`checkAuth` 等），8 个消费方改为直接从 `stores/auth` 导入；`stores/auth` 成为唯一状态入口，`lib/common.ts` 只保留 localStorage 持久化助手
+  - 校验：`npx vue-tsc --noEmit`、`npx vite build`（改动涉及登录/登出、组织切换、分享页打开文件、RAG 引用跳转，建议手工回归这四条路径）
+- **重构：`streamReply` 与 `AiJobsView` 逻辑外移为 composable**：
+  - `useAIChat.ts`：`streamReply` 从 151 行降到 39 行，拆出 `buildStreamPayload`（引用文件并入 + 历史裁剪）、`buildStreamHandlers`（SSE 事件 → 展示态，47 行）、`applyStreamFailure`（停止/错误两类用户可见收尾）、`finishStream`（可恢复则交给 `pollRun` 补齐，否则落定流式态并清 pending）；`keepReasoningTail` / `appendStep` / `classifyStreamFailure` 提到模块级
+  - 新增 `composables/useAIJobForm.ts`：表单状态、`fillForm`、`validateForm`、`buildBody`、`CRON_PRESETS`/`DEFAULT_DEF`
+  - 新增 `composables/useJobRuns.ts`：执行记录加载、展开、运行中 `pipelineRunId` 轮询、卸载清理
+  - `AiJobsView.vue` 脚本从 466 行降到 259 行；删除已无模板引用的 `ai/tool/interface` 快捷表单残留状态（`targetType`/`tool`/`toolParams`/`method`/`path`/`query`/`body`/`prompt`），`validateForm` 原先按 4 种 targetType 校验、`buildBody` 只提交 pipeline 的分叉随之消失
+  - 顺带修正：`validateForm` 增加 Definition JSON 校验（此前 JSON 非法要等保存时由 `buildBody` 抛错，提示为「保存失败」）；切换任务时停掉上一任务遗留的运行轮询并清空实时步骤快照
+  - 校验：`npx vue-tsc --noEmit`、`npx vite build`
+- **重构：`AiChat.vue` 模板拆分为 3 个组件 + 滚动逻辑提取**：
+  - 新增 `components/ai/AiSettingsPopover.vue`（模型设置弹层）、`AiRailPanel.vue`（会话 / 索引 / 消息目录左栏）、`AiComposer.vue`（输入卡片），`AiChat.vue` 从 1166 行降到 590 行；各组件样式随模板一起迁入自身 scoped 块，容器类（`.ai-panel` / `.ai-rail` / `.ai-settings` / `.ai-input`）的布局样式留在父级——子组件根元素共享父作用域，容器查询与移动端抽屉样式不受影响
+  - `AiRailPanel` 通过 `inject(aiChatKey)` 读取会话数据与操作（与 `AiMessage` 同一约定），索引面板的数据加载/分组仍由 `AiChat` 持有，经 props/emits 传递；tab 定义与索引分组类型抽到 `components/ai/rail.ts`
+  - 新增 `composables/useStickyScroll.ts`：`AiChat.vue` 与 `views/mobile/MAI.vue` 各自一份的 stick-to-bottom 逻辑（40px 阈值 + 120ms 程序滚动忽略窗口）收敛为一处
+  - 校验：`npx vue-tsc --noEmit`、`npx vite build`（CSS/布局改动建议再手工过一遍对话面板：设置弹层、左栏三个 tab、输入卡片、@ 引用 chips）
+- **重构：分享子路径沙箱复用 `safeJoin`、时间窗解析合并、目录列举收敛**：
+  - `handleShareData` 的子路径拼接改为 `safeJoin(shareRoot, rel)`：此前手写 `filepath.Abs + strings.HasPrefix` 判断越界，且 `shareRoot` 被重复解析两次（拼接前 + 计算 `relPath` 时）；现在一次解析、`safeJoin` 统一做 `..` 逃逸校验。同时修正 `?path=` 传完整分享根路径时会把分享根再拼一遍（`/docs` + `/docs/x` → `/docs/docs/x`）的问题
+  - 新增 `parseShareWindow`：创建分享的格式校验（原 11 行双段 parse）与访问时的生效/过期判断（原 13 行）共用同一份 RFC3339 解析；历史脏数据解析失败时按该侧不限制降级，与原来「parse 失败跳过该侧检查」等价
+  - 新增 `listTreeItems`（`pathfs.go`）：`/api/tree` 与分享目录视图的「隐藏过滤 + 符号链接跟随后归类 + 自然排序」列表逻辑此前两份逐行重复，现收敛为一处
+  - 新增 `share_test.go`：分享目录子路径（相对/完整路径两种写法）、子路径文件读取、三种 `..` 越界均 404
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go vet`、`go test -tags sqlite_fts5 ./internal/server/ ./internal/db/ -count=1`
+- **重构：`handleAIChat` 按职责拆分为 5 段**：
+  - 函数迁到 `internal/server/aichat.go`，原 272 行降到 144 行：`prepareAIChat`（端点归一化 / 网关工具开关 / Agent 系统提示 / RAG 前置检索）、`buildAIChatPayload`（按轮次组装 messages：首轮 RAG 全文、后续摘要、工具轮预算提示、轮次用尽后移除 tools）、`newAIUpstreamRequest`（鉴权与链路排障 header）、`openAIChatStream`（首帧 SSE 头 + `run_id` + `rag_hits`）、`runAIChatToolRound`（工具调用轮：SSE 通知 → 执行/审批 → 结果回灌）
+  - 行为不变：SSE 帧顺序、错误分支（已开流走 `event: error`、未开流走标准信封）、断连后循环继续跑完并落库
+  - 新增 `aichat_test.go` 回归基线：`TestHandleAIChat_SingleRound`（payload 无 tools、usage/[DONE]、run 落库 done）、`TestHandleAIChat_ToolRound`（system 提示注入、assistant tool_calls + tool 结果回灌、两轮上游调用）
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ ./internal/db/ -count=1`
+- **重构：SSE 写出器统一为 `sseStreamWriter`**：
+  - 新增 `internal/server/sse.go`：`sseStreamWriter` 写入即 flush，写失败标记 `alive=false` 后静默吞掉后续写入（底层 error 不向上传播，SSE 推送方无法有意义地处理）；`newSSEStreamWriter(w, state)` 构造，`aiStreamWriter` 接口与 `sseWriteEvent` 一并迁入
+  - 删除 `ai.go` 的 `aiRunWriter` 与 `pipeline_http.go` 的 `pipelineStreamWriter`：AI 对话传 `state`（断连置 `aiRunState.disconnected`，Agent 循环继续跑完并落库），pipeline 订阅传 `nil`（只保留断连静默语义）
+  - `captureWriter` 保留：它是进程内 `app.ServeHTTP` 用的 `http.ResponseWriter`（`Header`/`WriteHeader`），与 SSE 写出器不是同一类
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go vet -tags sqlite_fts5 ./internal/server/`、`go test -tags sqlite_fts5 ./internal/server/ ./internal/db/ -count=1`
+- **重构：定时任务创建/更新四份实现收敛为 `saveAIJob`**：
+  - 新增 `internal/server/aijob_save.go`：`saveAIJob(..., jobID, preflight)` 统一「校验请求体 → 归属校验（jobID>0）→ target 归一化为 pipeline → 调度预检 → 落库 + 同步 cron trigger」；`ai.go` 的 `handleAIJobCreate/Update` 与 `aitools.go` 的 `execCreateAIJob/execUpdateAIJob` 各保留 5~15 行适配
+  - 错误统一为 `aiJobSaveError{status, code, msg}`：HTTP 侧按 400/404/500 写响应，AI 工具侧转 `map{"error": msg}`；内部错误在 `saveAIJob` 内一次性记日志并带上 org/user/job 字段
+  - 顺带修正：创建任务时 trigger 写失败的回滚此前只删 job，现同时删 trigger；`aiJobArgsToBody` 不再重复调用 `validateAIJobBody`
+  - `preflight` 为可空回调：HTTP 路径传 `validateAIJobTarget`（保持原有 fail-fast 预检），工具路径传 nil——工具执行器被包级 `aiTools` 表静态引用，直接静态引用 `validateAIJobTarget` 会形成 `aiTools → execCreateAIJob → … → aiTools` 的初始化环
+  - 新增 `aijob_save_test.go`：创建+更新（trigger 不重复）、4 类非法输入、预检失败不落库
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ ./internal/db/ -count=1`
+- **重构：后端 `server.go` 按职责拆分 + 重复样板收敛（零行为变更）**：
+  - 1609 行的 `internal/server/server.go` 拆为 `routes.go`（`App` 装配中间件后按域注册：公开/用户文件任务/AI/Admin/CORS/页面兜底）、`middleware.go`（压缩、访问日志、安全响应头 + 登录限流与 `clientIP`）、`static.go`（embed UI 资源、静态文件、`/api/file`、目录列表、MIME 表）、`pathfs.go`（用户根目录解析、`safeJoin` 沙箱、`isHidden`）；`server.go` 只保留 Server 装配、登录/设密与任务增量接口
+  - 新增 `ctxutil.go`：`pathID` 收敛 15 处 `strconv.ParseInt(ctx.Params().Get("id"))` + 400 响应样板；`queryLimit` 收敛 3 处 `?limit=` 解析；`isUniqueViolation` 收敛 3 处 `strings.Contains(err, "UNIQUE constraint failed")`。`admin.go` 的 id 非法提示由手写 "invalid user id" 统一为字典文案 "Invalid parameter"
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ ./internal/db/ -count=1` 全绿
+- **重构：前端 SSE 解析与错误提取收敛**：
+  - 新增 `lib/sse.ts`（`openSSE` / `readSSE`），合并 `api/ai.ts` 与 `api/pipelines.ts` 两份逐行 SSE 解析：统一 401 跳登录、开流前 `{code,msg}` 信封转 Error、`[DONE]` 终态、心跳注释行跳过、跨 chunk 半截 JSON 丢弃；`chatStream` 与 `streamPipelineRun` 缩为事件处理表
+  - `handleUnauthorized` 从 `api/ai.ts` 迁至 `lib/common.ts`，供 `apiCall` 与 SSE 共用（消除 `api/pipelines.ts → api/ai.ts` 的反向依赖）
+  - `apiCall` 新增 `json` 选项（自动 POST + JSON 头 + 序列化），19 处 `headers: {...} + body: JSON.stringify(...)` 样板改为一处；新增 `errMsg(e, fallback)` 统一 22 处 `e?.msg || e?.message || '...'`，新增 `prettyJson` 替代 9 处 `JSON.stringify(v, null, 2)`
+  - 校验：`npx vue-tsc --noEmit`、`npx vite build`
+
+- **支持多模型网关并在对话中切换**：
+  - `ai.chat` 由单网关改为 `gateways` 列表 + `default`；每项含 `id/name/base_url/api_key/model`，可选 `tools`/`thinking` 覆盖全局；网关 `api_key` 留空时回落到 `AI_API_KEY`
+  - `GET /api/ai/status` 返回可用 `gateways`（仅 id/name/model，不含 key）；默认模型取 `default` 网关
+  - `POST /api/ai/chat` 新增 `gateway`；未知/不可用网关返回 400；定时任务与邮件排版固定用默认网关
+  - 前端对话设置面板新增「模型网关」切换，选中项随其他模型设置存 `localStorage`；顶部模型名显示当前网关
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ ./internal/config/ -count=1`、`pnpm build`
+
+- **对话支持模型参数设置**：AI 助手面板头部新增齿轮入口（此前只有全局 `thinking` 开关）。
+  - 上下文长度 64K/128K/256K：前端 `buildPayloadHistory` 按 token 预算裁剪历史（约 4 字符/token，留 25% 给输出），与原有 28 条上限取小；不依赖上游参数
+  - 输出上限 默认/4096/8192：透传 `max_tokens`，缓解长 `target`/长文被截断
+  - 推理强度 默认/low/medium/high/max：透传 `reasoning_effort`，上游不支持时忽略
+  - 设置存 `localStorage`（`ai.chat.model-settings`），刷新后保留；每次请求随 payload 带上；后端 `aiChatRequest` 增加 `maxTokens`/`reasoningEffort` 并按枚举校验
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`、`pnpm build`
+
+- **工具描述统一为结构化说明**：`list_dir`/`read_file`/`search_files`/`list_tasks`/`create_task`/`list_events`/`list_jobs`/`create_job`/`update_job`/`delete_job`/`reindex_files` 等描述去掉「建议/优先/不要/无需/据此…」这类操作指令与过时类型枚举，只保留「工具做什么、参数结构、返回什么、是否需审批」；由模型根据 schema 自行推理该用哪个工具、怎么传参。行为不变，仅提示词层
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ -count=1`
+
+- **新增模型思考模式开关**：`ai.chat.thinking`（Env `AI_THINKING=true`），默认关闭。开启后对话流式与定时任务非流式请求都会带 `chat_template_kwargs: {"thinking": true}`；上游不支持时忽略。非流式 `aiMessage` 已能接收 `reasoning_content`，定时任务会把它落到 `StepResult.reasoning`
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./internal/server/ ./internal/config/ -count=1`；新增 `TestAIThinkingPayload`
+
+- **定时任务只支持 pipeline（收口）**：`buildAIJobDefinition` 删除 `ai`/`tool`/`interface` 执行分支，只接受内联 Definition；旧类型仅在创建/启动迁移时由新增的 `legacyTargetToDefinition` 转换一次，转换后库里不再保留旧类型。
+  - 前端 `AiJobsView` 删除「任务类型」选择器与三套快捷表单，统一为 Definition 编辑器 + 流程图/JSON 切换；`fillForm`/`buildBody`/`validateForm` 同步简化，「立即执行」不再按类型判断
+  - `normalizeTargetToPipeline` 改用 `legacyTargetToDefinition`；删除 `renderAIJobPrompt`（迁移后由 `execPipelineLLM` 的 `render` 元数据渲染任务数据与 RAG）
+  - 测试同步：`TestBuildAIJobDefinitionAITools` 改测 legacy 转换，`TestValidateAIJobTargetPreview` 先归一化再校验
+  - 校验：`go build -tags sqlite_fts5 ./...`、`go test -tags sqlite_fts5 ./... -count=1`、`pnpm build`
 
 - **存量定时任务启动时统一转 pipeline**：阶段 2 数据迁移。`Server.New` 在装配调度前调用 `normalizeLegacyTargets`，把 `target_type != 'pipeline'` 的存量任务逐个归一化并写回 `target_type/target_json`；幂等，单个失败只记日志、不影响启动，旧类型读取分支保留作回退。新增 `db.ListAllAIJobs`、`db.UpdateAIJobTarget`
   - 效果：id=9 等 `ai` 任务启动后 `target_type='pipeline'`，`target_json` 为单步 `llm` Definition（带 `render` 元数据），执行行为不变

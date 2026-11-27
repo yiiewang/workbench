@@ -6,8 +6,7 @@ import { apiCall } from '../lib/common'
 export async function login(userId: string, password: string, orgId?: string) {
   return apiCall('/api/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ orgId: orgId || '', userId, password }),
+    json: { orgId: orgId || '', userId, password },
   })
 }
 
@@ -16,8 +15,7 @@ export async function login(userId: string, password: string, orgId?: string) {
 export async function setPassword(userId: string, password: string, orgId?: string) {
   return apiCall('/api/set-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ orgId: orgId || '', userId, newPassword: password }),
+    json: { orgId: orgId || '', userId, newPassword: password },
   })
 }
 
@@ -58,8 +56,7 @@ export async function fetchUserInfo(): Promise<UserInfo> {
 export async function updateMyEmail(email: string): Promise<void> {
   return apiCall('/api/profile/email', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email }),
+    json: { email },
   })
 }
 
@@ -67,8 +64,7 @@ export async function updateMyEmail(email: string): Promise<void> {
 export async function switchOrg(orgId: number) {
   return apiCall('/api/org/switch', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ orgId }),
+    json: { orgId },
   })
 }
 

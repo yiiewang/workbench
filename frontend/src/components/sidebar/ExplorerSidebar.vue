@@ -6,7 +6,8 @@
 //     （避免在 dsMode 切换前误用浏览器模式请求暴露完整目录）
 import { onMounted, watch, computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { activeTabPath, authToken, dsMode, shareRootPath } from '../../stores/indexStore'
+import { activeTabPath, dsMode, shareRootPath } from '../../stores/indexStore'
+import { authToken } from '../../stores/auth'
 import { treeStore } from '../../composables/useTreeStore'
 import { openFileContextMenu } from '../../composables/useContextMenu'
 import { showToast } from '../../lib/common'

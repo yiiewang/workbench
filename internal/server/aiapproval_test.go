@@ -97,10 +97,11 @@ func TestAIWriteToolApprovalFlow(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Server.StaticDir = staticDir
 	cfg.AI.Chat = config.ChatConfig{
-		BaseURL: upstream.URL + "/v1",
-		APIKey:  "test-key",
-		Model:   "mock-model",
-		Tools:   true,
+		Gateways: []config.ChatGateway{{
+			ID: "test", BaseURL: upstream.URL + "/v1",
+			APIKey: "test-key", Model: "mock-model",
+		}},
+		Tools: true,
 	}
 	secret := []byte("test-secret-key")
 	srv, err := New(d, cfg, secret, filepath.Join(t.TempDir(), "access.log"))

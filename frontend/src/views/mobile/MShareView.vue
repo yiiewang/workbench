@@ -6,7 +6,7 @@ import { ref, computed, watch, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getShareData } from '../../api/share'
 import { showSharePasswordModal } from '../../composables/useShare'
-import { API_CODE, formatSize } from '../../lib/common'
+import { API_CODE, formatSize, errMsg } from '../../lib/common'
 import { dataSource } from '../../composables/useEditor'
 import { dsMode, shareRootPath } from '../../stores/indexStore'
 import FileViewer from '../../components/editor/FileViewer.vue'
@@ -72,7 +72,7 @@ async function load() {
         try { sessionStorage.setItem('workbench-share-pwd', pwd) } catch { /* 忽略 */ }
         continue
       }
-      loadError.value = e?.msg || e?.message || '加载失败'
+      loadError.value = errMsg(e, '加载失败')
       break
     }
   }

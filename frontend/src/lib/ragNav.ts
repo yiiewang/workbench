@@ -2,7 +2,7 @@
 // 移动端 → /m/file?path=&line=；PC → /file + #路径#L行号 hash
 //（活页 hash watcher 消费：展开目录树 + 开 tab + CodePreview 行定位）。
 import type { Router, RouteLocationNormalizedLoaded } from 'vue-router'
-import { openFileFromHash } from '../stores/indexStore'
+import { openFileFromHash } from '../composables/openByHash'
 
 export async function openRagFile(
   router: Router,

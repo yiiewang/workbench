@@ -72,9 +72,8 @@ func (s *Server) handleScheduleTriggersList(ctx iris.Context) {
 }
 
 func (s *Server) handleScheduleTriggerGet(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	t, ok, err := s.db.GetCronTrigger(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id)
@@ -124,9 +123,8 @@ func (s *Server) handleScheduleTriggerCreate(ctx iris.Context) {
 
 // handleScheduleTriggerUpdate 只改 cron 与启用状态；目标绑定创建后不可变。
 func (s *Server) handleScheduleTriggerUpdate(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	var body scheduleTriggerBody
@@ -154,9 +152,8 @@ func (s *Server) handleScheduleTriggerUpdate(ctx iris.Context) {
 }
 
 func (s *Server) handleScheduleTriggerDelete(ctx iris.Context) {
-	id, err := strconv.ParseInt(ctx.Params().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeFail(ctx, iris.StatusBadRequest, CodeInvalidParam)
+	id, ok := pathID(ctx)
+	if !ok {
 		return
 	}
 	if err := s.db.DeleteCronTrigger(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), id); err != nil {

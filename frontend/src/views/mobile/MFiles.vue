@@ -4,7 +4,7 @@
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getTree } from '../../api/files'
-import { formatSize } from '../../lib/common'
+import { formatSize, errMsg } from '../../lib/common'
 
 interface TreeItem { name: string; isDir: boolean; size?: number }
 
@@ -32,7 +32,7 @@ async function load() {
     dirs.value = (data.dirs || []) as TreeItem[]
     files.value = (data.files || []) as TreeItem[]
   } catch (e: any) {
-    loadError.value = e?.message || '加载失败'
+    loadError.value = errMsg(e, '加载失败')
   } finally {
     loading.value = false
   }

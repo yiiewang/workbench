@@ -4,7 +4,7 @@
 // 分享管理、用户管理等复杂功能在移动端不提供（PC 访问）。
 import { useRouter } from 'vue-router'
 import { loggedIn, clearAuth } from '../../stores/auth'
-import { resetIdentityScopedState } from '../../stores/indexStore'
+import { resetIdentityScopedState } from '../../stores/identityReset'
 
 const router = useRouter()
 

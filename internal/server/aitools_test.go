@@ -216,6 +216,20 @@ func TestReindexToolsWhenRAGDisabled(t *testing.T) {
 	}
 }
 
+func TestSanitizeToolCalls(t *testing.T) {
+	calls := []aiToolCall{
+		{ID: "a", Function: aiToolCallFunction{Name: "x", Arguments: `{"a":1}`}},
+		{ID: "b", Function: aiToolCallFunction{Name: "y", Arguments: `{"a":`}},
+	}
+	out := sanitizeToolCalls(calls)
+	if out[0].Function.Arguments != `{"a":1}` || out[1].Function.Arguments != "{}" {
+		t.Fatalf("sanitize = %+v", out)
+	}
+	if calls[1].Function.Arguments != `{"a":` {
+		t.Fatal("original call should not be mutated")
+	}
+}
+
 func TestSummarizeToolArgsSteps(t *testing.T) {
 	raw := `{"name":"x","steps":[{"id":"gen","uses":"llm"},{"id":"send","uses":"tool/notify_user"}]}`
 	if got := summarizeToolArgs(raw); !strings.Contains(got, "steps=2[gen,send]") {

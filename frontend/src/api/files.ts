@@ -40,8 +40,7 @@ export async function uploadFiles(dirPath: string, files: File[]) {
 export function createDir(path: string) {
   return apiCall('/api/mkdir', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path }),
+    json: { path },
   })
 }
 
@@ -54,8 +53,7 @@ export function deletePath(path: string) {
 export function renamePath(path: string, newName: string) {
   return apiCall('/api/rename', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, newName }),
+    json: { path, newName },
   })
 }
 
@@ -63,7 +61,6 @@ export function renamePath(path: string, newName: string) {
 export function movePath(path: string, destDir: string) {
   return apiCall('/api/move', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, destDir }),
+    json: { path, destDir },
   })
 }

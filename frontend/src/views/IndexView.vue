@@ -3,10 +3,8 @@ import { watch } from 'vue'
 import { useRoute } from 'vue-router'
 import TabBar from '../components/tab/TabBar.vue'
 import EditorArea from '../components/editor/EditorArea.vue'
-import {
-  authToken as storeAuthToken,
-  dsMode,
-} from '../stores/indexStore'
+import { dsMode } from '../stores/indexStore'
+import { authToken as storeAuthToken } from '../stores/auth'
 import { treeStore } from '../composables/useTreeStore'
 import { setupIndexApp, exitShareMode } from '../composables/useIndexApp'
 

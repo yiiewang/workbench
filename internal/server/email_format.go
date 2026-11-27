@@ -31,7 +31,6 @@ func notifyFormatPrompt(subject, body, siteURL string) string {
 // notify 包通过注入调用本方法，不反向依赖 Server 与 AI 配置。
 func (s *Server) formatNotifyBody(ctx context.Context, subject, body, siteURL string) (string, error) {
 	msg, _, err := s.aiChatCompletion(ctx, map[string]any{
-		"model": s.cfg.AI.Chat.Model,
 		"messages": []aiMessage{
 			{Role: "user", Content: notifyFormatPrompt(subject, body, siteURL)},
 		},

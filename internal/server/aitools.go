@@ -116,7 +116,7 @@ var aiTools = []aiTool{
 	},
 	{
 		Name: "create_task",
-		Desc: "为当前用户创建一条新的 Todo 任务（状态为待办）。时间范围建议给全：scheduled（计划开始日）与 due（截止日）至少给 due",
+		Desc: "为当前用户创建一条 Todo 任务（状态为待办）；scheduled 为计划开始日，due 为截止日，均可省略",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -135,11 +135,11 @@ var aiTools = []aiTool{
 				},
 				"scheduled": map[string]any{
 					"type":        "string",
-					"description": "计划开始日期 YYYY-MM-DD；用户未指定时默认与 due 相同",
+					"description": "计划开始日期 YYYY-MM-DD（默认与 due 相同）",
 				},
 				"due": map[string]any{
 					"type":        "string",
-					"description": "截止日期 YYYY-MM-DD；用户未指定时默认当天",
+					"description": "截止日期 YYYY-MM-DD（默认当天）",
 				},
 				"scheduledTime": map[string]any{
 					"type":        "string",
@@ -210,7 +210,7 @@ var aiTools = []aiTool{
 	},
 	{
 		Name: "list_jobs",
-		Desc: "查看当前用户的 AI 定时任务列表（名称/cron/启用状态/最近执行，含系统公共任务）",
+		Desc: "列出当前用户的定时任务（含系统公共任务）：返回 id、名称、cron、启用状态、retry、最近执行；target 为任务定义（pipeline）",
 		Params: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -219,7 +219,7 @@ var aiTools = []aiTool{
 	},
 	{
 		Name: "create_job",
-		Desc: "创建一条定时任务：到点后执行 AI 提示词、单个工具、站内接口或编排流程，并邮件通知你（创建动作需要用户在界面上确认；确认后即启用，cron 到点自动执行，没有单独的「批准执行」步骤，最小粒度分钟、增删改下一分钟生效）。AI 提示词类型（target.type=ai 或只传 prompt）把工具名填进 allowWrite，任务运行时模型即可自主调用这些工具（最多 5 轮），无需改成 pipeline 类型",
+		Desc: "创建一条定时任务：提交 pipeline Definition（steps 支持 llm / tool/<name> / api/<path>），到点执行并邮件通知（创建动作需要用户在界面上确认；确认后即启用，cron 到点自动执行，没有单独的「批准执行」步骤，最小粒度分钟、增删改下一分钟生效）。写类工具与站内非 GET 接口需在 allowWrite 预授权",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -237,7 +237,7 @@ var aiTools = []aiTool{
 				},
 				"target": map[string]any{
 					"type":        "object",
-					"description": "执行对象（可选，替代 prompt）：{type: ai|tool|interface|pipeline, ...}；ai=AI 提示词（配 allowWrite 可自主调工具），tool=单个工具，interface=站内接口，pipeline=内联编排（definition 为 {name, steps}，写类工具仍由顶层 allowWrite 预授权）",
+					"description": "任务定义（可选，替代 prompt）：{type:\"pipeline\", definition:{name, steps}}；steps 每项为 {id, uses, needs?, when?, retry?, with}；完整 Definition 较长时建议拆分",
 				},
 				"allowWrite": map[string]any{
 					"type":        "array",
@@ -256,7 +256,7 @@ var aiTools = []aiTool{
 	},
 	{
 		Name: "update_job",
-		Desc: "更新当前用户的 AI 定时任务（只更新提供的字段；执行前需要用户在界面上确认）。修改 AI 提示词类型的 allowWrite 即修改该任务运行时可自主调用的工具白名单",
+		Desc: "更新当前用户的定时任务（只更新提供的字段；执行前需要用户在界面上确认）。任务定义是 pipeline：prompt 对应 definition 中第一个 llm 步的 with.prompt，写类工具授权在 allowWrite",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -266,7 +266,7 @@ var aiTools = []aiTool{
 				"prompt":   map[string]any{"type": "string", "description": "新 AI 提示词"},
 				"target": map[string]any{
 					"type":        "object",
-					"description": "新执行对象：{type: ai|tool|interface|pipeline, ...}",
+					"description": "新任务定义：{type:\"pipeline\", definition:{name, steps}}（整段覆盖）；完整 Definition 较长时建议拆分或只传 prompt/retry",
 				},
 				"allowWrite": map[string]any{
 					"type":        "array",
@@ -283,7 +283,7 @@ var aiTools = []aiTool{
 	},
 	{
 		Name: "delete_job",
-		Desc: "删除当前用户的 AI 定时任务（执行前需要用户在界面上确认）",
+		Desc: "删除当前用户的定时任务（执行前需要用户在界面上确认）",
 		Params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -316,7 +316,7 @@ var aiTools = []aiTool{
 	},
 	{
 		Name: "reindex_files",
-		Desc: "触发当前用户文件的全量向量索引重建（后台异步执行，耗时取决于文件数量，执行前需要用户在界面上确认）。适用于刚写入/上传的文件搜不到、或改过 embedding 配置后索引失效的场景；启动后用 reindex_status 查询进度",
+		Desc: "触发当前用户文件的全量向量索引重建（后台异步，耗时取决于文件数量，执行前需要用户在界面上确认）；进度用 reindex_status 查询",
 		Params: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -769,6 +769,7 @@ func execListAIJobs(s *Server, ctx iris.Context, args map[string]any) any {
 			"id": j.ID, "name": j.Name, "cron": j.CronExpr,
 			"enabled": j.Enabled, "isGlobal": j.IsGlobal,
 			"targetType": j.TargetType, "target": j.Target, "allowWrite": j.AllowWrite,
+			"retry":     j.Retry,
 			"lastRunAt": j.LastRunAt, "lastStatus": j.LastStatus,
 		})
 	}
@@ -779,8 +780,8 @@ func execListAIJobs(s *Server, ctx iris.Context, args map[string]any) any {
 // 事件总线工具执行器
 // ============================================================
 
-// aiJobArgsToBody 模型参数 → aiJobBody（复用 REST 校验），ok=false 时返回错误
-func aiJobArgsToBody(args map[string]any) (*aiJobBody, string) {
+// aiJobArgsToBody 模型参数 → aiJobBody（校验统一在 saveAIJob 内做）
+func aiJobArgsToBody(args map[string]any) *aiJobBody {
 	b := &aiJobBody{}
 	b.Name, _ = args["name"].(string)
 	b.CronExpr, _ = args["cronExpr"].(string)
@@ -813,32 +814,15 @@ func aiJobArgsToBody(args map[string]any) (*aiJobBody, string) {
 			b.Notify = raw
 		}
 	}
-	if msg := validateAIJobBody(b); msg != "" {
-		return nil, msg
-	}
-	return b, ""
+	return b
 }
 
 // execCreateAIJob 创建定时任务（写类，审批后执行）
 func execCreateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
-	b, msg := aiJobArgsToBody(args)
-	if b == nil {
-		return map[string]any{"error": msg}
-	}
-	spec := aiJobSpecFromBody(b)
-	preview := aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))
-	if err := s.normalizeTargetToPipeline(aiToolRunCtx(ctx), &preview); err != nil {
-		return map[string]any{"error": "invalid target: " + err.Error()}
-	}
-	spec.TargetType = preview.TargetType
-	spec.TargetJSON = string(preview.Target)
-	id, err := s.db.CreateAIJobWithSpec(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), spec)
+	b := aiJobArgsToBody(args)
+	id, err := s.saveAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), b, 0, nil)
 	if err != nil {
-		return map[string]any{"error": "create ai job failed"}
-	}
-	if err := s.upsertAIJobTrigger(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), id, b.CronExpr, *b.Enabled); err != nil {
-		_ = s.db.DeleteAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), id)
-		return map[string]any{"error": "create ai job trigger failed"}
+		return map[string]any{"error": aiJobSaveErrMsg(err)}
 	}
 	slog.Info("ai tool create ai job", "user", currentUserID(ctx), "job", b.Name, "cron", b.CronExpr)
 	return map[string]any{"ok": true, "jobId": id, "name": b.Name, "cron": b.CronExpr, "note": "下一分钟生效"}
@@ -870,8 +854,18 @@ func execUpdateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 	if v, ok := args["cronExpr"].(string); ok && strings.TrimSpace(v) != "" {
 		merged.CronExpr = v
 	}
+	if v, ok := args["retry"].(float64); ok {
+		merged.Retry = int(v)
+	}
 	if v, ok := args["prompt"].(string); ok && strings.TrimSpace(v) != "" {
 		merged.Prompt = v
+		// pipeline 的 prompt 在 Definition 的 llm 步里：只改顶层字段会静默无效，
+		// 这里穿透到第一个 llm 步，工具调用不需要再手拼完整 target。
+		if updated, err := applyPromptToDefinition(merged.Target, v); err != nil {
+			return map[string]any{"error": err.Error()}
+		} else if updated != nil {
+			merged.Target = updated
+		}
 	}
 	if v, ok := args["enabled"].(bool); ok {
 		merged.Enabled = &v
@@ -900,21 +894,8 @@ func execUpdateAIJob(s *Server, ctx iris.Context, args map[string]any) any {
 			merged.Notify = raw
 		}
 	}
-	if msg := validateAIJobBody(merged); msg != "" {
-		return map[string]any{"error": msg}
-	}
-	spec := aiJobSpecFromBody(merged)
-	preview := aiJobPreview(spec, currentOrgID(ctx), currentUserID(ctx))
-	if err := s.normalizeTargetToPipeline(aiToolRunCtx(ctx), &preview); err != nil {
-		return map[string]any{"error": "invalid target: " + err.Error()}
-	}
-	spec.TargetType = preview.TargetType
-	spec.TargetJSON = string(preview.Target)
-	if err := s.db.UpdateAIJobWithSpec(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), spec); err != nil {
-		return map[string]any{"error": "update ai job failed"}
-	}
-	if err := s.upsertAIJobTrigger(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), int64(jobID), merged.CronExpr, *merged.Enabled); err != nil {
-		return map[string]any{"error": "update ai job trigger failed"}
+	if _, err := s.saveAIJob(aiToolRunCtx(ctx), currentOrgID(ctx), currentUserID(ctx), merged, int64(jobID), nil); err != nil {
+		return map[string]any{"error": aiJobSaveErrMsg(err)}
 	}
 	return map[string]any{"ok": true, "jobId": int64(jobID), "name": merged.Name, "cron": merged.CronExpr}
 }

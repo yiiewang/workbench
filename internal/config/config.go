@@ -100,20 +100,76 @@ type MCPServerConfig struct {
 	Headers map[string]string `yaml:"headers"`
 }
 
-// ChatConfig 聊天模型配置（OpenAI 兼容 /chat/completions 协议）
-type ChatConfig struct {
-	BaseURL string `yaml:"base_url"` // 兼容端点，如 https://api.openai.com/v1
-	APIKey  string `yaml:"api_key"`  // 后端持有，不下发前端
-	Model   string `yaml:"model"`    // 模型名，如 gpt-4o-mini
-	// Tools 开启 AI 工具调用（Agent 模式）：模型可调用 list_dir / read_file /
-	// list_tasks / create_task 四个内置工具，由后端执行并回传工具结果。
-	// 要求上游模型支持 function calling。Env: AI_TOOLS=true 开启
-	Tools bool `yaml:"tools"`
+// ChatGateway 单个模型网关（OpenAI 兼容 /chat/completions 协议）
+type ChatGateway struct {
+	ID      string `yaml:"id"`
+	Name    string `yaml:"name"`
+	BaseURL string `yaml:"base_url"`
+	APIKey  string `yaml:"api_key"` // 后端持有，不下发前端
+	Model   string `yaml:"model"`
+	// Tools/Thinking 可选覆盖全局设置
+	Tools    *bool `yaml:"tools,omitempty"`
+	Thinking *bool `yaml:"thinking,omitempty"`
 }
 
-// Enabled 聊天功能是否可用（key + base_url 均已配置才视为开启）
+// Enabled 该网关是否可用（key + base_url 均已配置）
+func (g ChatGateway) Enabled() bool {
+	return g.APIKey != "" && g.BaseURL != ""
+}
+
+// ChatConfig 聊天模型配置：多网关 + 默认网关
+type ChatConfig struct {
+	// Default 默认网关 id；空则取第一个可用网关
+	Default  string        `yaml:"default"`
+	Gateways []ChatGateway `yaml:"gateways"`
+	// Tools 开启 AI 工具调用（Agent 模式）。Env: AI_TOOLS=true 开启
+	Tools bool `yaml:"tools"`
+	// Thinking 开启模型思考模式（chat_template_kwargs.thinking=true）。
+	// 上游不支持时会被忽略。Env: AI_THINKING=true
+	Thinking bool `yaml:"thinking"`
+}
+
+// Enabled 任一网关可用即视为开启
 func (c ChatConfig) Enabled() bool {
-	return c.APIKey != "" && c.BaseURL != ""
+	for _, g := range c.Gateways {
+		if g.Enabled() {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultGateway 返回默认网关：Default 指定且可用优先，否则第一个可用。
+func (c ChatConfig) DefaultGateway() (ChatGateway, bool) {
+	if c.Default != "" {
+		for _, g := range c.Gateways {
+			if g.ID == c.Default && g.Enabled() {
+				return g, true
+			}
+		}
+	}
+	for _, g := range c.Gateways {
+		if g.Enabled() {
+			return g, true
+		}
+	}
+	if len(c.Gateways) > 0 {
+		return c.Gateways[0], false
+	}
+	return ChatGateway{}, false
+}
+
+// Gateway 按 id 取网关；空 id 返回默认网关。
+func (c ChatConfig) Gateway(id string) (ChatGateway, bool) {
+	if id == "" {
+		return c.DefaultGateway()
+	}
+	for _, g := range c.Gateways {
+		if g.ID == id && g.Enabled() {
+			return g, true
+		}
+	}
+	return ChatGateway{}, false
 }
 
 // Enabled AI 对话功能是否可用（委托 Chat 子段）
@@ -182,8 +238,11 @@ func DefaultConfig() *Config {
 		},
 		AI: AIConfig{
 			Chat: ChatConfig{
-				BaseURL: "https://api.openai.com/v1",
-				Model:   "gpt-4o-mini",
+				Gateways: []ChatGateway{{
+					ID: "default", Name: "Default",
+					BaseURL: "https://api.openai.com/v1",
+					Model:   "gpt-4o-mini",
+				}},
 			},
 			Embedding: EmbeddingConfig{
 				Dim:         1024,
@@ -254,17 +313,17 @@ func mergeConfig(dst, src *Config) {
 	if src.Logging.Level != "" {
 		dst.Logging.Level = src.Logging.Level
 	}
-	if src.AI.Chat.BaseURL != "" {
-		dst.AI.Chat.BaseURL = src.AI.Chat.BaseURL
+	if src.AI.Chat.Gateways != nil {
+		dst.AI.Chat.Gateways = src.AI.Chat.Gateways
 	}
-	if src.AI.Chat.APIKey != "" {
-		dst.AI.Chat.APIKey = src.AI.Chat.APIKey
-	}
-	if src.AI.Chat.Model != "" {
-		dst.AI.Chat.Model = src.AI.Chat.Model
+	if src.AI.Chat.Default != "" {
+		dst.AI.Chat.Default = src.AI.Chat.Default
 	}
 	if src.AI.Chat.Tools {
 		dst.AI.Chat.Tools = true
+	}
+	if src.AI.Chat.Thinking {
+		dst.AI.Chat.Thinking = true
 	}
 	if src.AI.MCP.Servers != nil {
 		dst.AI.MCP.Servers = src.AI.MCP.Servers
@@ -361,18 +420,24 @@ func ApplyEnv(cfg *Config) {
 	if v := os.Getenv("WORKBENCH_SITE_URL"); v != "" {
 		cfg.SiteURL = v
 	}
-	if v := os.Getenv("AI_BASE_URL"); v != "" {
-		cfg.AI.Chat.BaseURL = v
+	if v := os.Getenv("AI_DEFAULT_GATEWAY"); v != "" {
+		cfg.AI.Chat.Default = v
 	}
+	// AI_API_KEY 填充所有未配置 key 的网关（同一网关下切不同 model 时共用一把 key）
 	if v := os.Getenv("AI_API_KEY"); v != "" {
-		cfg.AI.Chat.APIKey = v
-	}
-	if v := os.Getenv("AI_MODEL"); v != "" {
-		cfg.AI.Chat.Model = v
+		for i := range cfg.AI.Chat.Gateways {
+			if cfg.AI.Chat.Gateways[i].APIKey == "" {
+				cfg.AI.Chat.Gateways[i].APIKey = v
+			}
+		}
 	}
 	// AI_TOOLS=true 开启工具调用（Agent 模式），默认关闭保持纯对话行为
 	if v := os.Getenv("AI_TOOLS"); v == "true" || v == "1" {
 		cfg.AI.Chat.Tools = true
+	}
+	// AI_THINKING=true 开启模型思考模式（chat_template_kwargs.thinking）
+	if v := os.Getenv("AI_THINKING"); v == "true" || v == "1" {
+		cfg.AI.Chat.Thinking = true
 	}
 	// 向量模型（RAG）配置，独立于聊天网关：AI_EMBEDDING_BASE_URL / AI_EMBEDDING_API_KEY /
 	// AI_EMBEDDING_MODEL / AI_EMBEDDING_DIM

@@ -2,7 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { setAuth, checkAuth, loggedIn } from '../stores/auth'
-import { resetIdentityScopedState } from '../stores/indexStore'
+import { resetIdentityScopedState } from '../stores/identityReset'
 import * as authApi from '../api/auth'
 
 const router = useRouter()

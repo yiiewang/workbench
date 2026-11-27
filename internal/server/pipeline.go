@@ -330,7 +330,7 @@ func execRunPipeline(s *Server, ctx iris.Context, args map[string]any) any {
 // ============================================================
 
 func (s *Server) handlePipelineRunsList(ctx iris.Context) {
-	limit, _ := strconv.Atoi(ctx.URLParam("limit"))
+	limit := queryLimit(ctx)
 	runs, err := s.db.ListPipelineRuns(ctx.Request().Context(), currentOrgID(ctx), currentUserID(ctx), limit)
 	if err != nil {
 		serverError(ctx, "list pipeline runs failed", err)

@@ -7,9 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,18 +24,6 @@ const pipelineStreamPoll = time.Second
 // pipelineStreamHeartbeat SSE 心跳间隔：慢步骤（llm 单步最长 5min）期间
 // 无事件可推，定期发一条注释行防止代理/浏览器按空闲连接掐断
 const pipelineStreamHeartbeat = 15 * time.Second
-
-// pipelineStreamWriter 最小 SSE 写出器：http.Flusher 断言刷新。
-// ai.go 的 aiRunWriter 自带镜像落库逻辑，这里只需要裸写。
-type pipelineStreamWriter struct{ w io.Writer }
-
-func (s pipelineStreamWriter) Write(p []byte) (int, error) { return s.w.Write(p) }
-
-func (s pipelineStreamWriter) Flush() {
-	if f, ok := s.w.(http.Flusher); ok {
-		f.Flush()
-	}
-}
 
 func parsePipelineDefinition(raw string) (pipeline.Definition, error) {
 	var def pipeline.Definition
@@ -104,7 +90,7 @@ func (s *Server) handlePipelineRunStream(ctx iris.Context) {
 	ctx.Header("Cache-Control", "no-cache")
 	ctx.Header("X-Accel-Buffering", "no")
 	ctx.StatusCode(iris.StatusOK)
-	w := pipelineStreamWriter{w: ctx.ResponseWriter()}
+	w := newSSEStreamWriter(ctx.ResponseWriter(), nil)
 	// 连接建立先推一份当前快照（叠加历史 run 时立即有状态可显示）
 	sseWriteEvent(w, "progress", run)
 	if run.Status != "running" {

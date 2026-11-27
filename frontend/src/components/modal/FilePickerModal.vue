@@ -5,7 +5,7 @@
 import { computed, reactive, ref, onMounted } from 'vue'
 import ModalShell from '../ui/ModalShell.vue'
 import { getTree, uploadFiles } from '../../api/files'
-import { showToast } from '../../lib/common'
+import { showToast, errMsg } from '../../lib/common'
 
 interface PickerItem {
   name: string
@@ -129,7 +129,7 @@ async function onFilesChosen(e: Event) {
       ? `已上传 ${uploaded.length} 个文件${skipped ? `，跳过 ${skipped} 个` : ''}`
       : '上传失败或全部跳过')
   } catch (err: any) {
-    showToast('上传失败：' + (err?.msg || err?.message || ''))
+    showToast('上传失败：' + (errMsg(err, '')))
   } finally {
     uploading.value = false
   }

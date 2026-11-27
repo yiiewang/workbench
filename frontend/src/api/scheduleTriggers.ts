@@ -37,16 +37,14 @@ export async function listScheduleTriggers(params: { targetType?: string; target
 export async function createScheduleTrigger(body: CronTriggerCreateBody): Promise<{ id: number }> {
   return apiCall('/api/schedule/triggers', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 
 export async function updateScheduleTrigger(id: number, body: CronTriggerUpdateBody): Promise<void> {
   return apiCall(`/api/schedule/triggers/${id}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 

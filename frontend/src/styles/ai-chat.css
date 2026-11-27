@@ -185,6 +185,20 @@
   white-space: pre-wrap;
   word-break: break-all;
 }
+/* 参数块：与结果区分底色，完整展示 AI 传入的 arguments */
+.ai-tool-args-full {
+  margin: 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+  background: rgba(127, 127, 127, 0.06);
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 /* 审批徽标（写类工具状态） */
 .ai-tool-approval { flex: none; font-size: 10px; padding: 1px 6px; border-radius: 8px; }

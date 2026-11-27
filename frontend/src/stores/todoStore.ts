@@ -4,11 +4,6 @@ import { ref } from 'vue'
 import type { Member } from '../api/tasks'
 
 // ============================================================
-// Auth — re-export from stores/auth.ts (Single Source of Truth)
-// ============================================================
-export { authToken, currentUser } from './auth'
-
-// ============================================================
 // Core Task Data
 // ============================================================
 export const tasks = ref<any[]>([])

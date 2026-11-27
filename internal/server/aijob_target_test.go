@@ -162,12 +162,18 @@ func TestValidateAIJobTargetPreview(t *testing.T) {
 	blocked := db.AIJobWithOwner{AIJob: db.AIJob{
 		Target: json.RawMessage(`{"type":"tool","tool":"run_pipeline"}`),
 	}}
+	if err := s.normalizeTargetToPipeline(context.Background(), &blocked); err != nil {
+		t.Fatalf("normalize blocked: %v", err)
+	}
 	if err := s.validateAIJobTarget(context.Background(), blocked); err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("recursive tool should be rejected at create time, got %v", err)
 	}
 	ok := db.AIJobWithOwner{AIJob: db.AIJob{
 		Target: json.RawMessage(`{"type":"tool","tool":"list_tasks"}`),
 	}}
+	if err := s.normalizeTargetToPipeline(context.Background(), &ok); err != nil {
+		t.Fatalf("normalize ok: %v", err)
+	}
 	if err := s.validateAIJobTarget(context.Background(), ok); err != nil {
 		t.Fatalf("read tool should pass preview: %v", err)
 	}
@@ -257,6 +263,21 @@ func TestNormalizeTargetToPipeline(t *testing.T) {
 				t.Fatal("ai target should keep render metadata for task/RAG injection")
 			}
 		})
+	}
+}
+
+func TestApplyPromptToDefinition(t *testing.T) {
+	raw := json.RawMessage(`{"type":"pipeline","definition":{"steps":[{"id":"run","uses":"llm","with":{"prompt":"旧"}}]}}`)
+	out, err := applyPromptToDefinition(raw, "新")
+	if err != nil {
+		t.Fatalf("apply prompt: %v", err)
+	}
+	var tgt aiJobTarget
+	if err := json.Unmarshal(out, &tgt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if tgt.Definition == nil || tgt.Definition.Steps[0].With["prompt"] != "新" {
+		t.Fatalf("prompt not applied: %+v", tgt.Definition)
 	}
 }
 

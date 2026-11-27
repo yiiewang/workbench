@@ -5,7 +5,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getTasks, getTaskDetail, updateTask, type Task } from '../../api/tasks'
 import { currentUser } from '../../stores/auth'
-import { showToast } from '../../lib/common'
+import { showToast, errMsg } from '../../lib/common'
 import { renderMarkdown } from '../../lib/markdownRenderer'
 import ModalShell from '../../components/ui/ModalShell.vue'
 
@@ -29,7 +29,7 @@ async function load() {
     tasks.value = (u?.tasks || []) as Task[]
     lastRevision = Number(u?.revision) || 0
   } catch (e: any) {
-    loadError.value = e?.message || '加载失败'
+    loadError.value = errMsg(e, '加载失败')
   } finally {
     loading.value = false
   }

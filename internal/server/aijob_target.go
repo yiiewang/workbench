@@ -133,43 +133,54 @@ func (s *Server) validateAIJobTarget(ctx context.Context, job db.AIJobWithOwner)
 	return s.validateAIJobDefinition(def)
 }
 
-// buildAIJobDefinition 归一化四类 target；renderPrompt=false 时 ai 直接用原始 prompt。
-func (s *Server) buildAIJobDefinition(ctx context.Context, job db.AIJobWithOwner, renderPrompt bool) (pipeline.Definition, error) {
+// buildAIJobDefinition 只接受 pipeline target；ai/tool/interface 只允许在
+// 创建/启动迁移时通过 legacyTargetToDefinition 转换一次。
+func (s *Server) buildAIJobDefinition(ctx context.Context, job db.AIJobWithOwner, _ bool) (pipeline.Definition, error) {
 	t, err := parseAIJobTarget(job.AIJob)
 	if err != nil {
 		return pipeline.Definition{}, err
 	}
-	var def pipeline.Definition
+	if t.Type != aiJobTypePipeline || t.Definition == nil {
+		return pipeline.Definition{}, fmt.Errorf("target type %q is no longer supported; expected pipeline", t.Type)
+	}
+	def := *t.Definition
+	if def.Name == "" {
+		def.Name = job.Name
+	}
+	if len(t.Params) > 0 {
+		def = expandJobParams(def, t.Params)
+	}
+	injectOutputRule(&def)
+	// 定时执行的授权以任务创建时的静态清单为准；Definition 自带的 allowWrite 不参与。
+	def.AllowWrite = job.AllowWrite
+	return def, nil
+}
+
+// legacyTargetToDefinition 仅用于创建/启动迁移：把 ai/tool/interface 旧 target
+// 转成 pipeline Definition，转换后库里不再保留旧类型。
+func (s *Server) legacyTargetToDefinition(ctx context.Context, job db.AIJobWithOwner) (pipeline.Definition, error) {
+	t, err := parseAIJobTarget(job.AIJob)
+	if err != nil {
+		return pipeline.Definition{}, err
+	}
 	switch t.Type {
 	case aiJobTypeAI:
-		prompt := t.Prompt
-		if renderPrompt {
-			rendered, rerr := s.renderAIJobPrompt(ctx, job, t)
-			if rerr != nil {
-				return pipeline.Definition{}, rerr
-			}
-			prompt = rendered
-		}
-		with := map[string]any{"prompt": prompt}
-		// AI 提示词类型的 allowWrite 即模型可用工具白名单：填写即提前审批通过，
-		// 归一化后由 llm 步的 Agent 循环消费；为空时仍是单次 aiChatOnce。
+		with := map[string]any{"prompt": t.Prompt}
+		// allowWrite 在 ai 类型下是模型可用工具白名单，转 pipeline 后落到 llm 步。
 		if len(job.AllowWrite) > 0 {
 			with["tools"] = job.AllowWrite
 		}
-		// 新建/更新统一存 pipeline 时，把「任务数据 + RAG」的渲染配置固化到
-		// llm 步上；执行时由 execPipelineLLM 重新渲染，避免把当天任务数据写死。
-		if !renderPrompt {
-			with["render"] = map[string]any{"name": job.Name, "context": string(job.Context)}
-		}
-		def = pipeline.Definition{
+		// 任务数据 + RAG 在执行时重新渲染，避免把当天数据写死。
+		with["render"] = map[string]any{"name": job.Name, "context": string(job.Context)}
+		return pipeline.Definition{
 			Name:  job.Name,
 			Steps: []pipeline.Step{{ID: "run", Uses: "llm", With: with}},
-		}
+		}, nil
 	case aiJobTypeTool:
-		def = pipeline.Definition{
+		return pipeline.Definition{
 			Name:  job.Name,
 			Steps: []pipeline.Step{{ID: "run", Uses: "tool/" + t.Tool, With: t.Params}},
-		}
+		}, nil
 	case aiJobTypeInterface:
 		method := strings.ToUpper(strings.TrimSpace(t.Method))
 		if method == "" {
@@ -182,23 +193,13 @@ func (s *Server) buildAIJobDefinition(ctx context.Context, job db.AIJobWithOwner
 		if t.Body != nil {
 			with["body"] = t.Body
 		}
-		def = pipeline.Definition{
+		return pipeline.Definition{
 			Name:  job.Name,
 			Steps: []pipeline.Step{{ID: "run", Uses: "api/" + strings.TrimPrefix(t.Path, "/"), With: with}},
-		}
-	case aiJobTypePipeline:
-		def = *t.Definition
-		if def.Name == "" {
-			def.Name = job.Name
-		}
-		if len(t.Params) > 0 {
-			def = expandJobParams(def, t.Params)
-		}
-		injectOutputRule(&def)
+		}, nil
+	default:
+		return pipeline.Definition{}, fmt.Errorf("target type %q is not legacy", t.Type)
 	}
-	// 定时执行的授权以任务创建时的静态清单为准；Definition 自带的 allowWrite 不参与。
-	def.AllowWrite = job.AllowWrite
-	return def, nil
 }
 
 // injectOutputRule 给 pipeline 的 llm 步补统一输出格式要求：
@@ -311,9 +312,37 @@ func (s *Server) renderTaskContext(ctx context.Context, orgID, userID int64, nam
 	return out, nil
 }
 
-// renderAIJobPrompt 旧 ai target 的执行入口：兼容存量记录。
-func (s *Server) renderAIJobPrompt(ctx context.Context, job db.AIJobWithOwner, t aiJobTarget) (string, error) {
-	return s.renderTaskContext(ctx, job.OrgID, job.UserID, job.Name, job.Context, t.Prompt, true)
+// renderTaskContext 是 ai target 迁移后 llm 步的统一渲染入口；旧 ai 记录
+// 在启动迁移时已转成 pipeline，不再需要独立的 renderAIJobPrompt。
+
+// applyPromptToDefinition 把顶层 prompt 写入 pipeline Definition 的第一个 llm 步。
+// pipeline 的 prompt 嵌在 steps[].with.prompt，只改 jobs.prompt 列不会生效。
+func applyPromptToDefinition(raw json.RawMessage, prompt string) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return raw, nil
+	}
+	var tgt aiJobTarget
+	if err := json.Unmarshal(raw, &tgt); err != nil {
+		return nil, fmt.Errorf("parse target: %w", err)
+	}
+	if tgt.Type != aiJobTypePipeline || tgt.Definition == nil {
+		return raw, nil
+	}
+	for i := range tgt.Definition.Steps {
+		if tgt.Definition.Steps[i].Uses != "llm" {
+			continue
+		}
+		if tgt.Definition.Steps[i].With == nil {
+			tgt.Definition.Steps[i].With = map[string]any{}
+		}
+		tgt.Definition.Steps[i].With["prompt"] = prompt
+		out, err := json.Marshal(tgt)
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("pipeline has no llm step to apply prompt")
 }
 
 // normalizeTargetToPipeline 新建/更新时把非 pipeline target 归一化为内联 Definition：
@@ -322,7 +351,7 @@ func (s *Server) normalizeTargetToPipeline(ctx context.Context, job *db.AIJobWit
 	if job.TargetType == aiJobTypePipeline {
 		return nil
 	}
-	def, err := s.buildAIJobDefinition(ctx, *job, false)
+	def, err := s.legacyTargetToDefinition(ctx, *job)
 	if err != nil {
 		return err
 	}

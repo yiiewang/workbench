@@ -1,7 +1,8 @@
 // 分享功能统一入口：创建弹窗 / 密码弹窗开合 + 列表刷新通知。
 // ShareModal / SharePasswordModal / SharesSidebar 只读这里的响应式状态，不再互相注册全局函数或回调。
 import { ref } from 'vue'
-import { authToken, activeTabPath } from '../stores/indexStore'
+import { activeTabPath } from '../stores/indexStore'
+import { authToken } from '../stores/auth'
 import { showToast } from '../lib/common'
 
 export type ShareResourceType = 'file' | 'dir'

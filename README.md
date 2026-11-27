@@ -67,11 +67,16 @@ logging:
   level: info                    # Operational log level: debug | info | warn | error (structured JSON to stdout)
 
 ai:                            # AI config: chat & embedding are independent sub-sections (often different services)
-  chat:                        # chat model (OpenAI-compatible), disabled unless api_key + base_url are set
-    base_url: https://api.openai.com/v1
-    api_key: ""                # keep empty in the file — inject via AI_API_KEY env instead; never commit real keys
-    model: gpt-4o-mini
+  chat:                        # chat model gateways (OpenAI-compatible)
+    default: openai            # default gateway id; the UI can switch per conversation
     tools: false               # enable Agent tool calling (requires function-calling capable model); env: AI_TOOLS=true
+    thinking: false            # include chat_template_kwargs.thinking=true; env: AI_THINKING=true
+    gateways:
+      - id: openai
+        name: GPT-4o mini
+        base_url: https://api.openai.com/v1
+        api_key: ""            # keep empty in the file — inject via AI_API_KEY env instead; never commit real keys
+        model: gpt-4o-mini
   embedding:                   # vector model (RAG semantic search over your files), enabled when base_url + model are set
     base_url: ""               # e.g. http://localhost:8000/v1 (vLLM); OpenAI-compatible /embeddings
     api_key: ""                # inject via AI_EMBEDDING_API_KEY env; may stay empty for local deployments
@@ -109,9 +114,8 @@ notify:                        # notification channels (subscribe to the event b
 | `DB_PATH` | `database.path` | SQLite database path |
 | `LOG_DIR` | `logging.dir` | Access log directory |
 | `ALLOW_SYMLINK` | `server.allow_symlink` | Set `true` or `1` to allow symlink access outside static_dir |
-| `AI_BASE_URL` | `ai.chat.base_url` | OpenAI-compatible endpoint base URL |
-| `AI_API_KEY` | `ai.chat.api_key` | AI provider API key (server-side only; prefer env over config file) |
-| `AI_MODEL` | `ai.chat.model` | Chat model name |
+| `AI_API_KEY` | `ai.chat.gateways[].api_key` | Default gateway key (gateway-level key wins; prefer env over config file) |
+| `AI_DEFAULT_GATEWAY` | `ai.chat.default` | Default gateway id |
 | `AI_EMBEDDING_BASE_URL` | `ai.embedding.base_url` | Vector model endpoint (RAG; OpenAI-compatible /embeddings) |
 | `AI_EMBEDDING_API_KEY` | `ai.embedding.api_key` | Vector model API key |
 | `AI_EMBEDDING_MODEL` | `ai.embedding.model` | Vector model name (e.g. Qwen3-Embedding-8B) |

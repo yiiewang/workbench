@@ -6,6 +6,7 @@
 // 由 PC 面板（AiChat.vue）与移动端（MAI.vue）共用，样式在全局 ai-chat.css。
 import { ref, watch } from 'vue'
 import type { ToolCallView } from '../../api/ai'
+import { prettyJson } from '../../lib/common'
 
 const props = defineProps<{ calls: ToolCallView[] }>()
 // 审批决定回调（useAIChat 注入）
@@ -43,6 +44,16 @@ function argSummary(args: string): string {
   } catch { /* 保留原文 */ }
   if (!s) s = '(无参数)'
   return s.length > 120 ? s.slice(0, 120) + '…' : s
+}
+
+// 参数完整 JSON：AI 真实传入的 arguments，展开后原样展示（不截断）
+function argsText(args: string): string {
+  if (!args) return '(无参数)'
+  try {
+    return prettyJson(JSON.parse(args))
+  } catch {
+    return args
+  }
 }
 
 // 结果文本：对象美化缩进，超长截断
@@ -89,6 +100,8 @@ function approvalBadge(a?: ToolCallView['approval']): string {
         <button class="ai-tool-btn is-ok" @click="emit('approve', c.id, true)">批准</button>
         <button class="ai-tool-btn is-no" @click="emit('approve', c.id, false)">拒绝</button>
       </div>
+      <!-- 参数：AI 真实传入的完整 arguments，展开后原样展示 -->
+      <pre v-show="open.has(i)" class="ai-tool-args-full">{{ argsText(c.arguments) }}</pre>
       <pre v-show="open.has(i) && c.result !== undefined" class="ai-tool-result">{{ resultText(c.result) }}</pre>
     </div>
   </div>

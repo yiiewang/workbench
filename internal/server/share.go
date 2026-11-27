@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -70,6 +69,37 @@ func (s *Server) clearSharePasswordFailures(ctx context.Context, key string) {
 }
 
 // ============================================================
+// 有效时间窗（RFC3339 字符串，空 = 不限制）
+// ============================================================
+
+// shareWindow 解析后的时间窗；零值字段表示该侧不限制。
+type shareWindow struct {
+	effective time.Time // 生效时间（零值 = 立即生效）
+	expires   time.Time // 过期时间（零值 = 永不过期）
+}
+
+// parseShareWindow 解析时间窗：创建时用于格式校验（msg 非空即非法），
+// 访问时忽略 msg——历史脏数据按「该侧不限制」降级，不阻断已存在的分享。
+func parseShareWindow(effectiveAt, expiresAt string) (shareWindow, string) {
+	var w shareWindow
+	if effectiveAt != "" {
+		t, err := time.Parse(time.RFC3339, effectiveAt)
+		if err != nil {
+			return w, "Invalid effectiveAt format, use RFC3339"
+		}
+		w.effective = t
+	}
+	if expiresAt != "" {
+		t, err := time.Parse(time.RFC3339, expiresAt)
+		if err != nil {
+			return w, "Invalid expiresAt format, use RFC3339"
+		}
+		w.expires = t
+	}
+	return w, ""
+}
+
+// ============================================================
 // POST /api/share — 创建分享（需登录）
 // ============================================================
 
@@ -122,17 +152,9 @@ func (s *Server) handleCreateShare(ctx iris.Context) {
 		resourceType = "dir"
 	}
 
-	if req.EffectiveAt != "" {
-		if _, err := time.Parse(time.RFC3339, req.EffectiveAt); err != nil {
-			writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "Invalid effectiveAt format, use RFC3339")
-			return
-		}
-	}
-	if req.ExpiresAt != "" {
-		if _, err := time.Parse(time.RFC3339, req.ExpiresAt); err != nil {
-			writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, "Invalid expiresAt format, use RFC3339")
-			return
-		}
+	if _, msg := parseShareWindow(req.EffectiveAt, req.ExpiresAt); msg != "" {
+		writeFailMsg(ctx, iris.StatusBadRequest, CodeInvalidParam, msg)
+		return
 	}
 
 	passwordHash := ""
@@ -299,21 +321,16 @@ func (s *Server) handleShareData(ctx iris.Context) {
 		return
 	}
 
-	// 校验时间窗口
+	// 校验时间窗口（解析失败的历史数据按该侧不限制处理）
 	now := time.Now()
-	if share.EffectiveAt != "" {
-		effective, err := time.Parse(time.RFC3339, share.EffectiveAt)
-		if err == nil && now.Before(effective) {
-			writeFailMsg(ctx, iris.StatusForbidden, CodeShareNotEffective, "This share is not yet effective")
-			return
-		}
+	win, _ := parseShareWindow(share.EffectiveAt, share.ExpiresAt)
+	if !win.effective.IsZero() && now.Before(win.effective) {
+		writeFailMsg(ctx, iris.StatusForbidden, CodeShareNotEffective, "This share is not yet effective")
+		return
 	}
-	if share.ExpiresAt != "" {
-		expires, err := time.Parse(time.RFC3339, share.ExpiresAt)
-		if err == nil && now.After(expires) {
-			writeFailMsg(ctx, iris.StatusGone, CodeShareExpired, "This share has expired")
-			return
-		}
+	if !win.expires.IsZero() && now.After(win.expires) {
+		writeFailMsg(ctx, iris.StatusGone, CodeShareExpired, "This share has expired")
+		return
 	}
 
 	if share.MaxAccessCount > 0 && share.AccessCount >= share.MaxAccessCount {
@@ -367,27 +384,31 @@ func (s *Server) handleShareData(ctx iris.Context) {
 
 	subPath := ctx.URLParam("path")
 	resourcePath := share.ResourcePath
-	fsPath, ok := s.resolveUserPathByOwner(rctx, share.OwnerOrgID, share.OwnerUserID, resourcePath)
+	// shareRoot 是分享资源本身的绝对路径，也是子路径浏览的沙箱边界
+	shareRoot, ok := s.resolveUserPathByOwner(rctx, share.OwnerOrgID, share.OwnerUserID, resourcePath)
 	if !ok {
 		writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 		return
 	}
+	fsPath := shareRoot
 
 	if subPath != "" {
-		cleaned := filepath.Clean("/" + subPath)
-		sharePathPrefix := strings.TrimSuffix(share.ResourcePath, "/")
-		if strings.HasPrefix(cleaned, sharePathPrefix+"/") {
-			cleaned = strings.TrimPrefix(cleaned, sharePathPrefix)
+		// 子路径可能相对分享根（/a/b），也可能带完整用户路径（/docs/a/b），先剥掉分享根前缀
+		rel := strings.TrimPrefix(filepath.Clean("/"+subPath), "/")
+		if prefix := strings.Trim(strings.TrimSuffix(share.ResourcePath, "/"), "/"); prefix != "" {
+			if rel == prefix {
+				rel = ""
+			} else if strings.HasPrefix(rel, prefix+"/") {
+				rel = strings.TrimPrefix(rel, prefix)
+			}
 		}
-		fsPath = filepath.Join(fsPath, cleaned)
-		shareRoot, _ := s.resolveUserPathByOwner(rctx, share.OwnerOrgID, share.OwnerUserID, share.ResourcePath)
-		absBase, _ := filepath.Abs(shareRoot)
-		absFull, _ := filepath.Abs(fsPath)
-		if !strings.HasPrefix(absFull, absBase+string(filepath.Separator)) && absFull != absBase {
+		joined, cleanRel, ok := safeJoin(shareRoot, rel)
+		if !ok {
 			writeFail(ctx, iris.StatusNotFound, CodeNotFound)
 			return
 		}
-		resourcePath = share.ResourcePath + "/" + strings.TrimPrefix(cleaned, "/")
+		fsPath = joined
+		resourcePath = strings.TrimSuffix(share.ResourcePath, "/") + cleanRel
 	}
 
 	info, err := os.Stat(fsPath)
@@ -408,37 +429,11 @@ func (s *Server) handleShareData(ctx iris.Context) {
 	}
 
 	if info.IsDir() {
-		entries, err := os.ReadDir(fsPath)
+		dirs, files, err := s.listTreeItems(fsPath)
 		if err != nil {
 			writeFail(ctx, iris.StatusForbidden, CodeForbidden)
 			return
 		}
-
-		var dirs, files []treeItem
-		for _, e := range entries {
-			if s.isHidden(e.Name()) {
-				continue
-			}
-			isDir := e.IsDir()
-			isLink := e.Type()&os.ModeSymlink != 0
-			if isLink && !isDir {
-				if info, err := os.Stat(filepath.Join(fsPath, e.Name())); err == nil {
-					isDir = info.IsDir()
-				}
-			}
-			if isDir {
-				dirs = append(dirs, treeItem{Name: e.Name(), IsDir: true, IsLink: isLink})
-			} else {
-				fi, _ := e.Info()
-				size := int64(0)
-				if fi != nil {
-					size = fi.Size()
-				}
-				files = append(files, treeItem{Name: e.Name(), IsDir: false, Size: size, IsLink: isLink})
-			}
-		}
-		sort.Slice(dirs, func(i, j int) bool { return naturalLess(dirs[i].Name, dirs[j].Name) })
-		sort.Slice(files, func(i, j int) bool { return naturalLess(files[i].Name, files[j].Name) })
 
 		resp.Path = resourcePath
 		resp.Dirs = dirs
@@ -446,10 +441,8 @@ func (s *Server) handleShareData(ctx iris.Context) {
 		resp.IsDir = true
 		resp.CurrentPath = resourcePath
 		relPath := ""
-		if shareRoot, _ := s.resolveUserPathByOwner(rctx, share.OwnerOrgID, share.OwnerUserID, share.ResourcePath); shareRoot != "" {
-			if rel, err := filepath.Rel(shareRoot, fsPath); err == nil && rel != "." {
-				relPath = filepath.ToSlash(rel)
-			}
+		if rel, err := filepath.Rel(shareRoot, fsPath); err == nil && rel != "." {
+			relPath = filepath.ToSlash(rel)
 		}
 		resp.RelPath = relPath
 		writeOK(ctx, resp)

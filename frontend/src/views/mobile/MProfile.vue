@@ -3,8 +3,8 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { currentUser, clearAuth, orgs, currentOrgId, switchOrg } from '../../stores/auth'
-import { resetIdentityScopedState } from '../../stores/indexStore'
-import { showToast } from '../../lib/common'
+import { resetIdentityScopedState } from '../../stores/identityReset'
+import { showToast, errMsg } from '../../lib/common'
 import { updateMyEmail } from '../../api/auth'
 
 const router = useRouter()
@@ -32,7 +32,7 @@ async function saveEmail() {
     emailEditing.value = false
     showToast(email ? '邮箱已更新' : '已清空邮箱（不再接收提醒）')
   } catch (e: any) {
-    showToast(e?.msg || e?.message || '保存失败')
+    showToast(errMsg(e, '保存失败'))
   }
 }
 

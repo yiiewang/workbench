@@ -52,21 +52,24 @@ export async function listAIJobs(): Promise<{ jobs: AIJob[] }> {
 export async function createAIJob(body: AIJobBody): Promise<{ id: number }> {
   return apiCall('/api/jobs', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 
 export async function updateAIJob(id: number, body: AIJobBody): Promise<void> {
   return apiCall(`/api/jobs/${id}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 
 export async function deleteAIJob(id: number): Promise<void> {
   return apiCall(`/api/jobs/${id}`, { method: 'DELETE' })
+}
+
+// 手动触发一次任务：后端异步执行，结果写 job_runs
+export async function runAIJob(id: number): Promise<void> {
+  return apiCall(`/api/jobs/${id}/run`, { method: 'POST' })
 }
 
 // 执行历史

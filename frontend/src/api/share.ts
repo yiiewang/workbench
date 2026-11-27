@@ -42,8 +42,7 @@ export interface ShareData {
 export async function createShare(body: CreateShareBody): Promise<{ token: string }> {
   return apiCall('/api/share', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 

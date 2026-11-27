@@ -19,19 +19,28 @@ import (
 
 // aiChatCompletion 非流式调用上游 /chat/completions，返回回复消息与 finish_reason。
 func (s *Server) aiChatCompletion(ctx context.Context, payload map[string]any) (aiMessage, string, error) {
-	if !s.cfg.AI.Enabled() {
-		return aiMessage{}, "", fmt.Errorf("AI not configured (ai.api_key / AI_BASE_URL)")
+	gw, ok := s.cfg.AI.Chat.DefaultGateway()
+	if !ok {
+		return aiMessage{}, "", fmt.Errorf("AI not configured (ai.chat.gateways)")
 	}
+	thinking := s.cfg.AI.Chat.Thinking
+	if gw.Thinking != nil {
+		thinking = *gw.Thinking
+	}
+	if thinking {
+		payload["chat_template_kwargs"] = map[string]any{"thinking": true}
+	}
+	payload["model"] = gw.Model
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return aiMessage{}, "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, normalizeAIEndpoint(s.cfg.AI.Chat.BaseURL), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, normalizeAIEndpoint(gw.BaseURL), bytes.NewReader(body))
 	if err != nil {
 		return aiMessage{}, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.cfg.AI.Chat.APIKey)
+	req.Header.Set("Authorization", "Bearer "+gw.APIKey)
 	req.Header.Set("X-Model-Request-Id", uuid.NewString())
 	resp, err := aiClient.Do(req)
 	if err != nil {
@@ -110,7 +119,6 @@ func (s *Server) aiChatAgent(ctx context.Context, prompt string, names []string,
 				aiMaxToolRounds-round, toolCallsUsed)})
 		}
 		payload := map[string]any{
-			"model":    s.cfg.AI.Chat.Model,
 			"messages": payloadMsgs,
 		}
 		if !forceAnswer {
@@ -132,7 +140,7 @@ func (s *Server) aiChatAgent(ctx context.Context, prompt string, names []string,
 			}
 			return text, reasoning.String(), nil
 		}
-		msgs = append(msgs, aiMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
+		msgs = append(msgs, aiMessage{Role: "assistant", Content: msg.Content, ToolCalls: sanitizeToolCalls(msg.ToolCalls)})
 		for _, call := range msg.ToolCalls {
 			toolCallsUsed++
 			result := s.execAgentTool(ctx, call, names, stepDef, rctx)

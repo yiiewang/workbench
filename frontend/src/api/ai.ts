@@ -1,6 +1,7 @@
 // AI 对话相关 API
 // chat 走 SSE 流式（后端 /api/ai/chat 代理 OpenAI 兼容端点，key 不出后端）
-import { apiCall, authFetch, clearAuthState } from '../lib/common'
+import { apiCall, authFetch } from '../lib/common'
+import { openSSE } from '../lib/sse'
 
 // 工具调用（Agent 模式，后端 aitools.go 执行）：
 // 展示态字段 —— result 到达前表示"执行中"。
@@ -77,9 +78,19 @@ export interface AiPayloadMessage {
 }
 
 // AI 服务状态（GET /api/ai/status）
+export interface AIGateway {
+  id: string
+  name: string
+  model: string
+}
+
 export interface AIStatus {
   enabled: boolean
   model: string
+  /** 默认网关 id（对应 config 的 ai.chat.default） */
+  default?: string
+  /** 可用模型网关（不含 api_key） */
+  gateways?: AIGateway[]
 }
 
 // 会话摘要（列表项，不含 messages）
@@ -140,8 +151,7 @@ export async function listAISessions(): Promise<{ sessions: AISessionSummary[] }
 export async function createAISession(body: { title: string; messages: ChatMessage[] }): Promise<{ id: number }> {
   return apiCall('/api/ai/sessions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 
@@ -155,8 +165,7 @@ export async function getAISession(id: number): Promise<AISessionDetail> {
 export async function appendAISessionMessages(id: number, body: { messages: ChatMessage[]; truncateAfter?: string }): Promise<void> {
   return apiCall(`/api/ai/sessions/${id}/messages`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 
@@ -170,8 +179,7 @@ export async function deleteAISession(id: number): Promise<void> {
 export async function approveAITool(id: string, approved: boolean): Promise<void> {
   return apiCall('/api/ai/approval', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, approved }),
+    json: { id, approved },
   })
 }
 
@@ -181,15 +189,6 @@ export async function getAIStatus(): Promise<AIStatus> {
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   const body = await resp.json()
   return body.data ?? body
-}
-
-// 401 全局处理：token 过期清登录态并跳登录页（与 apiCall 行为一致）
-export function handleUnauthorized() {
-  clearAuthState()
-  const current = window.location.pathname + window.location.search
-  if (!current.startsWith('/login')) {
-    window.location.href = '/login?redirect=' + encodeURIComponent(current)
-  }
 }
 
 /**
@@ -222,66 +221,36 @@ export async function chatStream(
     signal?: AbortSignal
     qaId?: string
     sessionId?: string
+    /** 输出上限（0/undefined = 网关默认） */
+    maxTokens?: number
+    /** 推理强度 low/medium/high/max；空 = 不传 */
+    reasoningEffort?: string
+    /** 模型网关 id；空 = 默认网关 */
+    gateway?: string
   },
 ): Promise<void> {
-  const resp = await authFetch('/api/ai/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, qaId: opts.qaId || undefined, sessionId: opts.sessionId || undefined }),
-    signal: opts.signal,
-  })
-
-  if (resp.status === 401) {
-    handleUnauthorized()
-    throw new Error('Unauthorized')
-  }
-  if (!resp.ok || !resp.body) {
-    // 非流式错误：后端返回标准 {code,msg} 信封
-    let msg = `HTTP ${resp.status}`
-    try {
-      const body = await resp.json()
-      if (body && body.msg) msg = body.msg
-    } catch { /* 非 JSON 响应，用默认 msg */ }
-    throw new Error(msg)
-  }
-
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
-  // SSE 事件名：event: 行设置，作用于紧随的 data: 行，消费后复位
-  let curEvent = ''
-
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-
-    // SSE 按行解析：event: 行记录事件名；data: 行按事件名分发
-    let nl: number
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).replace(/\r$/, '')
-      buf = buf.slice(nl + 1)
-      if (!line) continue
-      if (line.startsWith('event:')) {
-        curEvent = line.slice(6).trim()
-        continue
-      }
-      if (!line.startsWith('data:')) continue
-      const payload = line.slice(5).trim()
-      if (payload === '[DONE]') {
-        opts.onDone?.()
-        return
-      }
-      const ev = curEvent
-      curEvent = '' // data 行消费完毕，事件名复位
-      try {
-        const obj = JSON.parse(payload)
-        if (ev === 'run_id') {
+  await openSSE(
+    '/api/ai/chat',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages,
+        qaId: opts.qaId || undefined,
+        sessionId: opts.sessionId || undefined,
+        maxTokens: opts.maxTokens || undefined,
+        reasoningEffort: opts.reasoningEffort || undefined,
+        gateway: opts.gateway || undefined,
+      }),
+      signal: opts.signal,
+    },
+    {
+      events: {
+        run_id: (obj) => {
           const id = String(obj?.id || '')
           if (id) opts.onRunId?.(id)
-          continue
-        }
-        if (ev === 'rag_hits') {
+        },
+        rag_hits: (obj) => {
           // RAG 前置检索命中（编号引用卡片数据，流开始时一次性推送）
           const hits: RagHit[] = Array.isArray(obj?.hits)
             ? obj.hits.map((h: any) => ({
@@ -292,9 +261,8 @@ export async function chatStream(
               }))
             : []
           if (hits.length) opts.onRagHits?.(hits)
-          continue
-        }
-        if (ev === 'usage') {
+        },
+        usage: (obj) => {
           // token 消耗（Agent 多轮已聚合，[DONE] 前一次性推送）
           if (obj && typeof obj.total_tokens === 'number') {
             opts.onUsage?.({
@@ -303,43 +271,38 @@ export async function chatStream(
               totalTokens: Number(obj.total_tokens) || 0,
             })
           }
-          continue
-        }
-        if (ev === 'tool_call') {
+        },
+        tool_call: (obj) => {
           opts.onToolCall?.({
             id: obj?.id || '',
             name: obj?.function?.name || '',
             arguments: obj?.function?.arguments || '',
           })
-          continue
-        }
-        if (ev === 'tool_result') {
+        },
+        tool_result: (obj) => {
           opts.onToolResult?.({ id: obj?.id || '', name: obj?.name || '', result: obj?.result })
-          continue
-        }
-        if (ev === 'approval_request') {
+        },
+        approval_request: (obj) => {
           opts.onApprovalRequest?.({ id: obj?.id || '', name: obj?.name || '', arguments: obj?.arguments || '' })
-          continue
-        }
-        if (ev === 'approval_resolved') {
+        },
+        approval_resolved: (obj) => {
           opts.onApprovalResolved?.({ id: obj?.id || '', outcome: obj?.outcome || 'declined' })
-          continue
-        }
-        if (ev === 'error') {
+        },
+        error: (obj) => {
           const err: any = new Error(obj?.msg || 'AI 流式请求失败')
           err.business = true // 服务端明确报错：后台 run 已失败，不走断流恢复
           throw err
-        }
-        // 默认事件：上游 OpenAI 兼容增量
+        },
+      },
+      // 未具名事件：上游 OpenAI 兼容增量
+      onMessage: (obj) => {
         const delta = obj?.choices?.[0]?.delta
         if (delta?.reasoning_content) opts.onReasoning?.(delta.reasoning_content)
         if (delta?.content) opts.onDelta(delta.content)
-      } catch (e) {
-        // 半截 JSON（跨 chunk 截断）重新抛出前先识别是否为业务错误
-        if (e instanceof Error && !(e instanceof SyntaxError)) throw e
-      }
-    }
-  }
+      },
+      onDone: opts.onDone,
+    },
+  )
 }
 
 // 文件索引状态（汇总 + 明细）— GET /api/ai/index-status

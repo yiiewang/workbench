@@ -50,8 +50,7 @@ export async function createUser(body: {
 }): Promise<AdminUser> {
   return apiCall('/api/admin/users', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 
@@ -62,8 +61,7 @@ export async function updateUser(
 ): Promise<AdminUser> {
   return apiCall(`/api/admin/users/${id}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    json: body,
   })
 }
 
@@ -98,7 +96,6 @@ export async function listUserFeatures(userId: number): Promise<{ features: User
 export async function updateUserFeature(userId: number, code: string, enabled: boolean) {
   return apiCall(`/api/admin/users/${userId}/features/${code}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled }),
+    json: { enabled },
   })
 }

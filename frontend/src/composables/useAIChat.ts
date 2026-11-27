@@ -7,10 +7,11 @@ import {
   getAIStatus, chatStream, approveAITool, getAIRun,
   listAISessions, getAISession, createAISession, appendAISessionMessages, deleteAISession,
   type ChatMessage, type AISessionSummary, type AiPayloadMessage,
-  type MsgStep, type ToolCallView, type AIRun,
+  type MsgStep, type ToolCallView, type AIRun, type AIGateway,
+  type RagHit, type TokenUsage,
 } from '../api/ai'
 import { getFile, createDir, uploadFiles } from '../api/files'
-import { showToast, isBinaryExt, extFromPath, copyToClipboard } from '../lib/common'
+import { showToast, errMsg, isBinaryExt, extFromPath, copyToClipboard } from '../lib/common'
 import { renderMarkdown, linkRagRefs } from '../lib/markdownRenderer'
 
 function newId(): string {
@@ -54,9 +55,88 @@ interface ChatSession {
 
 interface PendingRun { id: string; key: string; sessionId: string; dbSessionId: number | null }
 
+export interface ModelSettings {
+  /** 上下文预算（token）：历史消息按该预算裁剪，留 25% 给输出与工具结果 */
+  contextTokens: number
+  /** 单次回答输出上限，0 = 网关默认 */
+  maxTokens: number
+  /** 推理强度，空 = 不传 */
+  reasoningEffort: '' | 'low' | 'medium' | 'high' | 'max'
+  /** 模型网关 id，空 = 默认网关 */
+  gateway: string
+}
+
+const MODEL_SETTINGS_KEY = 'ai.chat.model-settings'
+const DEFAULT_MODEL_SETTINGS: ModelSettings = { contextTokens: 128_000, maxTokens: 0, reasoningEffort: '', gateway: '' }
+
+function loadModelSettings(): ModelSettings {
+  try {
+    const raw = localStorage.getItem(MODEL_SETTINGS_KEY)
+    if (!raw) return { ...DEFAULT_MODEL_SETTINGS }
+    const v = JSON.parse(raw)
+    return {
+      contextTokens: Number(v.contextTokens) > 0 ? Number(v.contextTokens) : DEFAULT_MODEL_SETTINGS.contextTokens,
+      maxTokens: Number(v.maxTokens) > 0 ? Number(v.maxTokens) : 0,
+      reasoningEffort: ['low', 'medium', 'high', 'max'].includes(v.reasoningEffort) ? v.reasoningEffort : '',
+      gateway: typeof v.gateway === 'string' ? v.gateway : '',
+    }
+  } catch {
+    return { ...DEFAULT_MODEL_SETTINGS }
+  }
+}
+
+// ---- 流式回复的展示态维护 ----
+
+// 思考过程只保留最近 4k 字：reasoning 与 steps 各存一份，全量落库会到 100KB+，
+// 回放时也没人从头读；更早的内容折叠成一行提示。
+const REASONING_KEEP = 4_000
+const FOLD_RE = /^…（前 \d+ 字已折叠）\n/
+
+function keepReasoningTail(text: string): string {
+  // 超过 1.5 倍才重组，避免每个流式 delta 都做一次字符串替换
+  if (text.length <= REASONING_KEEP * 1.5) return text
+  const body = text.replace(FOLD_RE, '')
+  return `…（前 ${body.length - REASONING_KEEP} 字已折叠）\n` + body.slice(-REASONING_KEEP)
+}
+
+// 时序步骤维护：reasoning/tool/text 按发生顺序追加进 steps（相邻同类增量合并到同一步），
+// 渲染层按此还原"思考 → 调工具 → 分析 → 回答"的时间线
+function appendStep(steps: MsgStep[], kind: MsgStep['kind'], text: string): MsgStep {
+  const last = steps[steps.length - 1]
+  if (last && last.kind === kind) {
+    last.text = (last.text || '') + text
+    return last
+  }
+  const step: MsgStep = { kind, text }
+  steps.push(step)
+  return step
+}
+
+// 流失败分类：只有「用户主动停止」和「服务端业务错误」不可恢复。刷新/网络中断时
+// 后台 run 仍在跑（runCtx 与请求连接解耦），必须保留 pending 记录交给恢复轮询，
+// 也不能把 reader 的原生错误写成「⚠」占位污染会话快照。
+type StreamFailure = 'resumable' | 'aborted' | 'error'
+
+function classifyStreamFailure(e: any, runId: string | null, stopped: boolean): StreamFailure {
+  if (runId != null && !stopped && !e?.business) return 'resumable'
+  return e?.name === 'AbortError' ? 'aborted' : 'error'
+}
+
 export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   const aiEnabled = ref(false)
   const aiModel = ref('')
+  const gateways = ref<AIGateway[]>([])
+  const modelSettings = ref<ModelSettings>(loadModelSettings())
+  const currentModel = computed(() => {
+    const g = gateways.value.find(x => x.id === modelSettings.value.gateway)
+    return g?.model || aiModel.value
+  })
+  function updateModelSettings(patch: Partial<ModelSettings>) {
+    modelSettings.value = { ...modelSettings.value, ...patch }
+    try {
+      localStorage.setItem(MODEL_SETTINGS_KEY, JSON.stringify(modelSettings.value))
+    } catch { /* 本地存储不可用时仅内存生效 */ }
+  }
   // shallowReactive 让会话增删也进响应式依赖，streamingSessions 才能随新会话更新
   const chatSessions = shallowReactive(new Map<string, ChatSession>())
   function newSession(msgs: ChatMessage[] = [], dbId: number | null = null): ChatSession {
@@ -185,6 +265,13 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
       const st = await getAIStatus()
       aiEnabled.value = !!st.enabled
       aiModel.value = st.model || ''
+      gateways.value = st.gateways || []
+      // 默认选中配置里的 default；本地存过但已失效（网关被删）时回退默认
+      const ids = gateways.value.map(g => g.id)
+      if (!modelSettings.value.gateway || !ids.includes(modelSettings.value.gateway)) {
+        const def = st.default && ids.includes(st.default) ? st.default : (ids[0] || '')
+        if (def) updateModelSettings({ gateway: def })
+      }
     } catch {
       aiEnabled.value = false
     }
@@ -332,7 +419,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
       try { sessionStorage.removeItem(NEW_CHAT_FLAG) } catch { /* 忽略 */ }
       resumePendingRuns()
     } catch (e: any) {
-      showToast('载入会话失败：' + (e?.message || ''))
+      showToast('载入会话失败：' + (errMsg(e, '')))
     }
   }
 
@@ -556,22 +643,140 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   // 从尾部往前收集轮次，展开后总条数不超预算——避免把 assistant
   // 与其 tool 消息拆开（OpenAI 语义：tool 消息必须紧跟对应 tool_calls），
   // 也避免超过后端 aiMaxMessages 上限。
+  // 粗略 token 估算：约 4 字符/token；工具参数也计入（模型要看到才能续接调用）。
+  function estimateTokens(m: ChatMessage): number {
+    let chars = (m.content || '').length
+    for (const tc of m.toolCalls || []) chars += (tc.arguments || '').length
+    return Math.ceil(chars / 4)
+  }
+
   function buildPayloadHistory(msgs: ChatMessage[]): AiPayloadMessage[] {
     const rounds: ChatMessage[][] = []
     for (const m of msgs) {
       if (m.role === 'user') rounds.push([m])
       else if (rounds.length) rounds[rounds.length - 1].push(m)
     }
+    // 条数上限（后端 aiMaxMessages）与 token 预算取小；token 预算留 25% 给输出/工具
+    const tokenBudget = Math.floor(modelSettings.value.contextTokens * 0.75)
     let count = 0
+    let tokens = 0
     let start = rounds.length
     for (let i = rounds.length - 1; i >= 0; i--) {
       const r = rounds[i]
       const cost = r.reduce((s, m) => s + (m.toolCalls?.length ? 1 + m.toolCalls.length : 1), 0)
-      if (count + cost > HISTORY_BUDGET) break
+      const roundTokens = r.reduce((s, m) => s + estimateTokens(m), 0)
+      if (count + cost > HISTORY_BUDGET || tokens + roundTokens > tokenBudget) break
       count += cost
+      tokens += roundTokens
       start = i
     }
     return toPayloadMessages(rounds.slice(start).flat())
+  }
+
+  // 上游消息体：历史按 token 预算裁剪 + 引用文件全文并入当前 user 消息
+  // （不放 system：部分网关对 system 转发不稳，并入 user 必然可见）。
+  async function buildStreamPayload(s: ChatSession, userMsg: ChatMessage): Promise<AiPayloadMessage[]> {
+    const ctxText = await buildCtxText(userMsg.files || [])
+    const history = s.messages.slice(0, -2)
+    const question = ctxText
+      ? `【引用文件内容】\n${ctxText}\n【引用文件结束】\n\n我的问题：${userMsg.content}`
+      : userMsg.content
+    return [
+      ...buildPayloadHistory(history),
+      { role: 'user', content: question },
+    ]
+  }
+
+  // 流事件 → 展示态：正文/思考增量、工具卡片与审批状态、usage/RAG 命中。
+  // 每个分片即时滚动并节流落库（断连期间库里也能看到增量）。
+  function buildStreamHandlers(live: ChatMessage, s: ChatSession, sc: () => void) {
+    return {
+      onReasoning: (delta: string) => {
+        live.reasoning = keepReasoningTail((live.reasoning || '') + delta)
+        const step = appendStep(live.steps!, 'reasoning', delta)
+        step.text = keepReasoningTail(step.text || '')
+        sc()
+        throttledPersist(s)
+      },
+      onRagHits: (hits: RagHit[]) => {
+        live.ragHits = hits
+      },
+      onUsage: (u: TokenUsage) => {
+        live.usage = u
+      },
+      onDelta: (delta: string) => {
+        live.content += delta
+        appendStep(live.steps!, 'text', delta)
+        sc()
+        throttledPersist(s)
+      },
+      onToolCall: (tc: { id: string; name: string; arguments: string }) => {
+        live.toolCalls = live.toolCalls || []
+        const call: ToolCallView = { id: tc.id, name: tc.name, arguments: tc.arguments }
+        live.toolCalls.push(call)
+        live.steps!.push({ kind: 'tool', call })
+        sc()
+      },
+      onToolResult: (tr: { id: string; name: string; result: unknown }) => {
+        const tc = live.toolCalls?.find(t => t.id === tr.id)
+        if (tc) tc.result = tr.result
+        sc()
+        throttledPersist(s)
+      },
+      onApprovalRequest: (ar: { id: string; name: string; arguments: string }) => {
+        const tc = live.toolCalls?.find(t => t.id === ar.id)
+        if (tc) tc.approval = 'pending'
+        sc()
+      },
+      onApprovalResolved: (ar: { id: string; outcome: 'approved' | 'declined' | 'timeout' }) => {
+        // 超时场景由后端通知收尾；用户自己点击的场景与本地状态一致（幂等）
+        const tc = live.toolCalls?.find(t => t.id === ar.id)
+        if (tc && tc.approval === 'pending') tc.approval = ar.outcome
+        sc()
+      },
+    }
+  }
+
+  // 不可恢复失败的用户可见收尾：主动停止 → 「（已停止）」+ 未决审批定格；
+  // 其它错误 → 「⚠ …」占位 + toast。
+  function applyStreamFailure(live: ChatMessage, failure: StreamFailure, e: any) {
+    if (failure === 'aborted') {
+      if (!live.content) {
+        live.content = '（已停止）'
+        appendStep(live.steps!, 'text', '（已停止）')
+      }
+      // 中断时未决的审批卡片定格为已取消（后端断开兜底会作废审批）
+      for (const tc of live.toolCalls || []) {
+        if (tc.approval === 'pending') tc.approval = 'declined'
+      }
+      return
+    }
+    const msg = '⚠ ' + (errMsg(e, '请求失败'))
+    live.content = live.content || msg
+    if (!live.steps!.some(step => step.kind === 'text')) appendStep(live.steps!, 'text', msg)
+    showToast(errMsg(e, 'AI 请求失败'))
+  }
+
+  // 流收尾：可恢复（后台 run 仍在跑）则保持流式态交给 pollRun 补齐，
+  // 否则落定流式态并清 pending；无正文时补占位，避免空 assistant 落库导致下次 400。
+  function finishStream(s: ChatSession, live: ChatMessage, recoverable: boolean, completed: boolean, runId: string | null) {
+    s.abortCtrl = null
+    if (recoverable && !completed && runId) {
+      void pollRun(runId, live, s)
+    } else {
+      s.streaming = false
+      // 用户主动停止/业务错误也不留 pending，否则面板重开会被 resumeOne
+      // 当成待恢复任务、把已停止的生成又补回来
+      setRunId(s, null)
+      if (!live.content) {
+        live.content = '（已中断）'
+        const last = live.steps![live.steps!.length - 1]
+        if (last?.kind === 'text') last.text = '（已中断）'
+        else live.steps!.push({ kind: 'text', text: '（已中断）' })
+      }
+    }
+    if (s === current.value) scrollBottom(true)
+    persistSession(s)
   }
 
   // 一次流完全绑定发起它的会话：即使中途切到别的会话，增量仍写本会话的 live，
@@ -587,31 +792,6 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     const sc = () => { if (s === current.value) scrollBottom() }
     scrollBottom(true)
 
-    // 思考过程只保留最近 4k 字：reasoning 与 steps 各存一份，全量落库会到
-    // 100KB+，回放时也没人从头读；更早的内容折叠成一行提示。
-    const REASONING_KEEP = 4_000
-    const FOLD_RE = /^…（前 \d+ 字已折叠）\n/
-    function keepReasoningTail(text: string): string {
-      // 超过 1.5 倍才重组，避免每个流式 delta 都做一次字符串替换
-      if (text.length <= REASONING_KEEP * 1.5) return text
-      const body = text.replace(FOLD_RE, '')
-      return `…（前 ${body.length - REASONING_KEEP} 字已折叠）\n` + body.slice(-REASONING_KEEP)
-    }
-
-    // 时序步骤维护：reasoning/tool/text 按发生顺序追加进 steps（相邻同类增量合并
-    // 到同一步），渲染层按此还原"思考 → 调工具 → 分析 → 回答"的时间线
-    function appendStep(kind: MsgStep['kind'], text: string): MsgStep {
-      const steps = live.steps!
-      const last = steps[steps.length - 1]
-      if (last && last.kind === kind) {
-        last.text = (last.text || '') + text
-        return last
-      }
-      const step: MsgStep = { kind, text }
-      steps.push(step)
-      return step
-    }
-
     const abortCtrl = new AbortController()
     s.abortCtrl = abortCtrl
     s.resumeStopped = false
@@ -619,110 +799,25 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     let recoverable = true
     let runId: string | null = null
     const qaId = newId()
-    const ctxText = await buildCtxText(userMsg.files || [])
-    const history = s.messages.slice(0, -2)
-    const question = ctxText
-      ? `【引用文件内容】\n${ctxText}\n【引用文件结束】\n\n我的问题：${userMsg.content}`
-      : userMsg.content
-    const payload: AiPayloadMessage[] = [
-      ...buildPayloadHistory(history),
-      { role: 'user', content: question },
-    ]
+    const payload = await buildStreamPayload(s, userMsg)
     try {
       await chatStream(payload, {
         signal: abortCtrl.signal,
         qaId,
         sessionId: s.sessionId,
+        maxTokens: modelSettings.value.maxTokens || undefined,
+        reasoningEffort: modelSettings.value.reasoningEffort || undefined,
+        gateway: modelSettings.value.gateway || undefined,
         onRunId: (id) => { runId = id; setRunId(s, id) },
         onDone: () => { completed = true },
-        onReasoning: (delta) => {
-          live.reasoning = keepReasoningTail((live.reasoning || '') + delta)
-          const step = appendStep('reasoning', delta)
-          step.text = keepReasoningTail(step.text || '')
-          sc()
-          throttledPersist(s)
-        },
-        onRagHits: (hits) => {
-          live.ragHits = hits
-        },
-        onUsage: (u) => {
-          live.usage = u
-        },
-        onDelta: (delta) => {
-          live.content += delta
-          appendStep('text', delta)
-          sc()
-          throttledPersist(s)
-        },
-        onToolCall: (tc) => {
-          live.toolCalls = live.toolCalls || []
-          const call: ToolCallView = { id: tc.id, name: tc.name, arguments: tc.arguments }
-          live.toolCalls.push(call)
-          live.steps!.push({ kind: 'tool', call })
-          sc()
-        },
-        onToolResult: (tr) => {
-          const tc = live.toolCalls?.find(t => t.id === tr.id)
-          if (tc) tc.result = tr.result
-          sc()
-          throttledPersist(s)
-        },
-        onApprovalRequest: (ar) => {
-          const tc = live.toolCalls?.find(t => t.id === ar.id)
-          if (tc) tc.approval = 'pending'
-          sc()
-        },
-        onApprovalResolved: (ar) => {
-          // 超时场景由后端通知收尾；用户自己点击的场景与本地状态一致（幂等）
-          const tc = live.toolCalls?.find(t => t.id === ar.id)
-          if (tc && tc.approval === 'pending') tc.approval = ar.outcome
-          sc()
-        },
+        ...buildStreamHandlers(live, s, sc),
       })
     } catch (e: any) {
-      // 只有「用户主动停止」和「服务端业务错误」不可恢复。刷新/网络中断时
-      // 后台 run 仍在跑（runCtx 与请求连接解耦），必须保留 pending 记录交给恢复
-      // 轮询，也不能把 reader 的原生错误写成「⚠」占位污染会话快照。
-      const canResume = runId != null && !s.resumeStopped && !e?.business
-      if (!canResume) {
-        recoverable = false
-        if (e?.name === 'AbortError') {
-          if (!live.content) {
-            live.content = '（已停止）'
-            appendStep('text', '（已停止）')
-          }
-          // 中断时未决的审批卡片定格为已取消（后端断开兜底会作废审批）
-          for (const tc of live.toolCalls || []) {
-            if (tc.approval === 'pending') tc.approval = 'declined'
-          }
-        } else {
-          const msg = '⚠ ' + (e?.message || '请求失败')
-          live.content = live.content || msg
-          if (!live.steps!.some(step => step.kind === 'text')) appendStep('text', msg)
-          showToast(e?.message || 'AI 请求失败')
-        }
-      }
+      const failure = classifyStreamFailure(e, runId, s.resumeStopped)
+      recoverable = failure === 'resumable'
+      if (!recoverable) applyStreamFailure(live, failure, e)
     } finally {
-      s.abortCtrl = null
-      // 静默断流 / 刷新 / 网络中断：服务端后台 run 继续跑，保持流式态并轮询补齐
-      if (recoverable && !completed && runId) {
-        void pollRun(runId, live, s)
-      } else {
-        s.streaming = false
-        // 用户主动停止/业务错误也不留 pending，否则面板重开会被 resumeOne
-        // 当成待恢复任务、把已停止的生成又补回来
-        setRunId(s, null)
-        // 兜底：中断后无正文（哪怕已有思考与工具调用）——补"（已中断）"
-        // 文本：空 assistant 落库会让下次提问 400
-        if (!live.content) {
-          live.content = '（已中断）'
-          const last = live.steps![live.steps!.length - 1]
-          if (last?.kind === 'text') last.text = '（已中断）'
-          else live.steps!.push({ kind: 'text', text: '（已中断）' })
-        }
-      }
-      if (s === current.value) scrollBottom(true)
-      persistSession(s)
+      finishStream(s, live, recoverable, completed, runId)
     }
   }
 
@@ -755,7 +850,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
     try {
       await approveAITool(id, approved)
     } catch (e: any) {
-      showToast(e?.msg || e?.message || '提交失败，请重试')
+      showToast(errMsg(e, '提交失败，请重试'))
       mark('pending')
     }
   }
@@ -789,7 +884,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
       await uploadFiles('/ai', [file])
       showToast('已保存到 /ai/' + name)
     } catch (e: any) {
-      showToast('保存失败：' + (e?.msg || e?.message || ''))
+      showToast('保存失败：' + (errMsg(e, '')))
     }
   }
 
@@ -885,7 +980,7 @@ export function useAIChat(onScrollBottom?: (force?: boolean) => void) {
   }
 
   return {
-    aiEnabled, aiModel, messages, input, streaming,
+    aiEnabled, aiModel, currentModel, gateways, modelSettings, updateModelSettings, messages, input, streaming,
     visibleMessages, hiddenCount, showMore,
     pendingCtxFiles, showFilePicker,
     dbSessionId, streamingSessions, sessions, sessionsOpen, sessionsLoading,

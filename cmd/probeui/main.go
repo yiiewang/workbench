@@ -40,10 +40,13 @@ func main() {
 	cfg := config.DefaultConfig()
 	cfg.Server.StaticDir = staticDir
 	cfg.AI.Chat = config.ChatConfig{
-		BaseURL: os.Getenv("AI_BASE_URL"),
-		APIKey:  os.Getenv("AI_API_KEY"),
-		Model:   os.Getenv("AI_MODEL"),
-		Tools:   true,
+		Gateways: []config.ChatGateway{{
+			ID: "default", Name: "Default",
+			BaseURL: os.Getenv("AI_BASE_URL"),
+			APIKey:  os.Getenv("AI_API_KEY"),
+			Model:   os.Getenv("AI_MODEL"),
+		}},
+		Tools: true,
 	}
 	secret := []byte("probe-secret")
 	srv, err := server.New(d, cfg, secret, filepath.Join(dir, "access.log"))
